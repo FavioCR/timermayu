@@ -97,7 +97,7 @@ export default function App() {
 
         {/* Flip clock: HH : MM : SS */}
         <div
-          className="flex items-center justify-center gap-1 mb-6 font-medium text-[8rem] sm:text-[12rem] md:text-[16rem] lg:text-[20rem] xl:text-[24rem]"
+          className="flex items-center justify-center gap-1 mb-6 font-medium text-[4.5rem] sm:text-[6rem] md:text-[10rem] xl:text-[16rem]"
         >
           {showHours && (
             <>
@@ -194,7 +194,7 @@ export default function App() {
       >
         <div className="p-6 pb-20">
           {/* Selector de unidad de tiempo y display */}
-          <div className="flex items-center justify-center gap-4 mb-6">
+          <div className="flex items-center justify-center gap-4 mb-6 hidden">
             <select
               value={displayUnit}
               onChange={(e) => setDisplayUnit(e.target.value)}
