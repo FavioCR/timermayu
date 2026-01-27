@@ -11,21 +11,27 @@ function secondsToHms(total) {
 
 function hmsToSeconds(h, m, s) {
   const clamp = (n, min, max) => Math.min(max, Math.max(min, isNaN(n) ? 0 : n));
-  const hc = clamp(Math.floor(Number(h) || 0), 0, 99);
-  const mc = clamp(Math.floor(Number(m) || 0), 0, 59);
-  const sc = clamp(Math.floor(Number(s) || 0), 0, 59);
+  // Tratar strings vacíos o "-" como 0
+  const parseValue = (val) => {
+    if (val === "" || val === "-" || val === null || val === undefined) return 0;
+    const num = Number(val);
+    return isNaN(num) ? 0 : num;
+  };
+  const hc = clamp(Math.floor(parseValue(h)), 0, 99);
+  const mc = clamp(Math.floor(parseValue(m)), 0, 59);
+  const sc = clamp(Math.floor(parseValue(s)), 0, 59);
   return hc * 3600 + mc * 60 + sc;
 }
 
 export default function App() {
   const [seconds, setSeconds] = useState(0);
   const [running, setRunning] = useState(false);
-  const [editH, setEditH] = useState("0");
-  const [editM, setEditM] = useState("0");
-  const [editS, setEditS] = useState("0");
+  const [editH, setEditH] = useState("");
+  const [editM, setEditM] = useState("");
+  const [editS, setEditS] = useState("");
   const [savedSeconds, setSavedSeconds] = useState(0);
-  const [orangeThreshold, setOrangeThreshold] = useState(360); // naranja cuando queden ≤ 360 seg
-  const [redThreshold, setRedThreshold] = useState(180);       // rojo cuando queden ≤ 180 seg
+  const [orangeThreshold, setOrangeThreshold] = useState(0); // naranja cuando queden ≤ X seg (0 = desactivado)
+  const [redThreshold, setRedThreshold] = useState(0);       // rojo cuando queden ≤ X seg (0 = desactivado)
   const [displayUnit, setDisplayUnit] = useState("seconds"); // "seconds" o "minutes"
   const [orangeUnit, setOrangeUnit] = useState("seconds"); // unidad para umbral naranja
   const [redUnit, setRedUnit] = useState("seconds"); // unidad para umbral rojo
@@ -51,9 +57,9 @@ export default function App() {
   useEffect(() => {
     if (running) {
       const { h: ch, m: cm, s: cs } = secondsToHms(seconds);
-      setEditH(String(ch));
-      setEditM(String(cm));
-      setEditS(String(cs));
+      setEditH(ch > 0 ? String(ch) : "");
+      setEditM(cm > 0 ? String(cm) : "");
+      setEditS(cs > 0 ? String(cs) : "");
     }
   }, [seconds, running]);
 
@@ -77,9 +83,9 @@ export default function App() {
   }, [running]);
 
   const handleClear = () => {
-    setEditH("0");
-    setEditM("0");
-    setEditS("0");
+    setEditH("");
+    setEditM("");
+    setEditS("");
     setSeconds(0);
     setSavedSeconds(0);
     setShowHours(true);
@@ -146,9 +152,9 @@ export default function App() {
               setRunning(false);
               setSeconds(0);
               setSavedSeconds(0);
-              setEditH("0");
-              setEditM("0");
-              setEditS("0");
+              setEditH("");
+              setEditM("");
+              setEditS("");
               setShowHours(true);
               setShowMinutes(true);
               setShowSeconds(true);
@@ -222,8 +228,8 @@ export default function App() {
                   onChange={(e) => {
                     setShowHours(e.target.checked);
                     if (!e.target.checked) {
-                      setEditH("0");
-                      const next = hmsToSeconds("0", editM, editS);
+                      setEditH("");
+                      const next = hmsToSeconds("", editM, editS);
                       setSeconds(next);
                       setSavedSeconds(next);
                     }
@@ -238,14 +244,21 @@ export default function App() {
                 min={0}
                 max={99}
                 value={editH}
+                placeholder="-"
                 onChange={(e) => {
-                  setEditH(e.target.value);
-                  const next = hmsToSeconds(e.target.value, editM, editS);
+                  const val = e.target.value === "" ? "" : e.target.value;
+                  setEditH(val);
+                  const next = hmsToSeconds(val, editM, editS);
                   setSeconds(next);
                   setSavedSeconds(next);
                 }}
+                onFocus={(e) => {
+                  if (e.target.value === "" || e.target.value === "-") {
+                    e.target.value = "";
+                  }
+                }}
                 disabled={running}
-                className="w-16 sm:w-20 bg-white/90 border-2 border-[#333] rounded-lg px-2 py-2 text-center text-lg font-bold disabled:opacity-60 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-black"
+                className="w-16 sm:w-20 bg-white/90 border-2 border-[#333] rounded-lg px-2 py-2 text-center text-lg font-bold disabled:opacity-60 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-black placeholder:text-gray-400"
               />
             </div>
           )}
@@ -267,8 +280,8 @@ export default function App() {
                   onChange={(e) => {
                     setShowMinutes(e.target.checked);
                     if (!e.target.checked) {
-                      setEditM("0");
-                      const next = hmsToSeconds(editH, "0", editS);
+                      setEditM("");
+                      const next = hmsToSeconds(editH, "", editS);
                       setSeconds(next);
                       setSavedSeconds(next);
                     }
@@ -283,14 +296,21 @@ export default function App() {
                 min={0}
                 max={59}
                 value={editM}
+                placeholder="-"
                 onChange={(e) => {
-                  setEditM(e.target.value);
-                  const next = hmsToSeconds(editH, e.target.value, editS);
+                  const val = e.target.value === "" ? "" : e.target.value;
+                  setEditM(val);
+                  const next = hmsToSeconds(editH, val, editS);
                   setSeconds(next);
                   setSavedSeconds(next);
                 }}
+                onFocus={(e) => {
+                  if (e.target.value === "" || e.target.value === "-") {
+                    e.target.value = "";
+                  }
+                }}
                 disabled={running}
-                className="w-16 sm:w-20 bg-white/90 border-2 border-[#333] rounded-lg px-2 py-2 text-center text-lg font-bold disabled:opacity-60 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-black"
+                className="w-16 sm:w-20 bg-white/90 border-2 border-[#333] rounded-lg px-2 py-2 text-center text-lg font-bold disabled:opacity-60 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-black placeholder:text-gray-400"
               />
             </div>
           )}
@@ -312,8 +332,8 @@ export default function App() {
                   onChange={(e) => {
                     setShowSeconds(e.target.checked);
                     if (!e.target.checked) {
-                      setEditS("0");
-                      const next = hmsToSeconds(editH, editM, "0");
+                      setEditS("");
+                      const next = hmsToSeconds(editH, editM, "");
                       setSeconds(next);
                       setSavedSeconds(next);
                     }
@@ -328,14 +348,21 @@ export default function App() {
                 min={0}
                 max={59}
                 value={editS}
+                placeholder="-"
                 onChange={(e) => {
-                  setEditS(e.target.value);
-                  const next = hmsToSeconds(editH, editM, e.target.value);
+                  const val = e.target.value === "" ? "" : e.target.value;
+                  setEditS(val);
+                  const next = hmsToSeconds(editH, editM, val);
                   setSeconds(next);
                   setSavedSeconds(next);
                 }}
+                onFocus={(e) => {
+                  if (e.target.value === "" || e.target.value === "-") {
+                    e.target.value = "";
+                  }
+                }}
                 disabled={running}
-                className="w-16 sm:w-20 bg-white/90 border-2 border-[#333] rounded-lg px-2 py-2 text-center text-lg font-bold disabled:opacity-60 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-black"
+                className="w-16 sm:w-20 bg-white/90 border-2 border-[#333] rounded-lg px-2 py-2 text-center text-lg font-bold disabled:opacity-60 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-black placeholder:text-gray-400"
               />
             </div>
           )}
@@ -379,15 +406,45 @@ export default function App() {
               <input
                 type="number"
                 min={0}
-                step={orangeUnit === "minutes" ? "0.1" : "1"}
-                value={orangeUnit === "seconds" ? orangeThreshold : (orangeThreshold / 60).toFixed(1)}
+                step="1"
+                value={orangeThreshold === 0 ? "" : (orangeUnit === "seconds" ? Math.round(orangeThreshold) : Math.round(orangeThreshold / 60))}
+                placeholder="-"
                 onChange={(e) => {
-                  const val = parseFloat(e.target.value) || 0;
-                  const seconds = orangeUnit === "seconds" ? val : val * 60;
-                  setOrangeThreshold(Math.max(0, Math.round(seconds)));
+                  const val = e.target.value === "" ? "" : e.target.value;
+                  if (val === "") {
+                    setOrangeThreshold(0);
+                  } else {
+                    const numVal = parseFloat(val) || 0;
+                    if (orangeUnit === "seconds") {
+                      // Solo enteros en segundos
+                      setOrangeThreshold(Math.max(0, Math.round(numVal)));
+                    } else {
+                      // Solo enteros en minutos
+                      setOrangeThreshold(Math.max(0, Math.round(numVal * 60)));
+                    }
+                  }
+                }}
+                onBlur={(e) => {
+                  // Asegurar que siempre sea entero al perder el foco
+                  if (e.target.value !== "" && e.target.value !== "-") {
+                    const numVal = Math.round(parseFloat(e.target.value) || 0);
+                    if (numVal !== parseFloat(e.target.value)) {
+                      e.target.value = numVal.toString();
+                      if (orangeUnit === "seconds") {
+                        setOrangeThreshold(Math.max(0, numVal));
+                      } else {
+                        setOrangeThreshold(Math.max(0, numVal * 60));
+                      }
+                    }
+                  }
+                }}
+                onFocus={(e) => {
+                  if (e.target.value === "" || e.target.value === "-") {
+                    e.target.value = "";
+                  }
                 }}
                 disabled={running}
-                className="w-16 sm:w-20 bg-white/90 border-2 border-[#333] rounded-lg px-2 py-2 text-center text-lg font-bold disabled:opacity-60 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-black"
+                className="w-16 sm:w-20 bg-white/90 border-2 border-[#333] rounded-lg px-2 py-2 text-center text-lg font-bold disabled:opacity-60 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-black placeholder:text-gray-400"
               />
               <select
                 value={orangeUnit}
@@ -412,15 +469,45 @@ export default function App() {
               <input
                 type="number"
                 min={0}
-                step={redUnit === "minutes" ? "0.1" : "1"}
-                value={redUnit === "seconds" ? redThreshold : (redThreshold / 60).toFixed(1)}
+                step="1"
+                value={redThreshold === 0 ? "" : (redUnit === "seconds" ? Math.round(redThreshold) : Math.round(redThreshold / 60))}
+                placeholder="-"
                 onChange={(e) => {
-                  const val = parseFloat(e.target.value) || 0;
-                  const seconds = redUnit === "seconds" ? val : val * 60;
-                  setRedThreshold(Math.max(0, Math.round(seconds)));
+                  const val = e.target.value === "" ? "" : e.target.value;
+                  if (val === "") {
+                    setRedThreshold(0);
+                  } else {
+                    const numVal = parseFloat(val) || 0;
+                    if (redUnit === "seconds") {
+                      // Solo enteros en segundos
+                      setRedThreshold(Math.max(0, Math.round(numVal)));
+                    } else {
+                      // Solo enteros en minutos
+                      setRedThreshold(Math.max(0, Math.round(numVal * 60)));
+                    }
+                  }
+                }}
+                onBlur={(e) => {
+                  // Asegurar que siempre sea entero al perder el foco
+                  if (e.target.value !== "" && e.target.value !== "-") {
+                    const numVal = Math.round(parseFloat(e.target.value) || 0);
+                    if (numVal !== parseFloat(e.target.value)) {
+                      e.target.value = numVal.toString();
+                      if (redUnit === "seconds") {
+                        setRedThreshold(Math.max(0, numVal));
+                      } else {
+                        setRedThreshold(Math.max(0, numVal * 60));
+                      }
+                    }
+                  }
+                }}
+                onFocus={(e) => {
+                  if (e.target.value === "" || e.target.value === "-") {
+                    e.target.value = "";
+                  }
                 }}
                 disabled={running}
-                className="w-16 sm:w-20 bg-white/90 border-2 border-[#333] rounded-lg px-2 py-2 text-center text-lg font-bold disabled:opacity-60 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-black"
+                className="w-16 sm:w-20 bg-white/90 border-2 border-[#333] rounded-lg px-2 py-2 text-center text-lg font-bold disabled:opacity-60 disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-black placeholder:text-gray-400"
               />
               <select
                 value={redUnit}
