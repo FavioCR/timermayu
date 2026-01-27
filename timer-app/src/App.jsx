@@ -39,7 +39,11 @@ export default function App() {
   const [showMinutes, setShowMinutes] = useState(true);
   const [showSeconds, setShowSeconds] = useState(true);
   const [controlsOpen, setControlsOpen] = useState(false);
+  const [showCompletionMessage, setShowCompletionMessage] = useState(false);
   const intervalRef = useRef(null);
+  const wakeLockRef = useRef(null);
+  const startTimeRef = useRef(null);
+  const initialSecondsRef = useRef(0);
 
   // Verde por defecto; naranja o rojo solo cuando está en marcha y se cumplen los umbrales
   const bgColor =
@@ -63,22 +67,229 @@ export default function App() {
     }
   }, [seconds, running]);
 
+  // Ocultar mensaje de finalización después de 5 segundos
   useEffect(() => {
-    if (!running) return;
-    intervalRef.current = setInterval(() => {
-      setSeconds((prev) => {
-        if (prev <= 1) {
+    if (showCompletionMessage) {
+      const timer = setTimeout(() => {
+        setShowCompletionMessage(false);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [showCompletionMessage]);
+
+  // Ocultar mensaje cuando se inicia un nuevo timer
+  useEffect(() => {
+    if (running) {
+      setShowCompletionMessage(false);
+    }
+  }, [running]);
+
+  // Solicitar permiso para notificaciones al cargar la página
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "default") {
+      // Solicitar permiso de forma silenciosa (el usuario puede aceptar cuando el timer termine)
+      // No solicitamos inmediatamente para no ser intrusivos
+    }
+  }, []);
+
+  // Wake Lock para evitar que la pantalla se apague en móviles
+  useEffect(() => {
+    const requestWakeLock = async () => {
+      if (!running) {
+        // Liberar wake lock si existe
+        if (wakeLockRef.current) {
+          try {
+            await wakeLockRef.current.release();
+            wakeLockRef.current = null;
+          } catch (err) {
+            console.log("Error al liberar wake lock:", err);
+          }
+        }
+        return;
+      }
+
+      // Solicitar wake lock solo si está corriendo
+      if ("wakeLock" in navigator) {
+        try {
+          const wakeLock = await navigator.wakeLock.request("screen");
+          wakeLockRef.current = wakeLock;
+          
+          // Manejar cuando el wake lock se libera automáticamente
+          wakeLock.addEventListener("release", () => {
+            wakeLockRef.current = null;
+          });
+        } catch (err) {
+          // El wake lock puede fallar si el usuario lo desactiva o si hay restricciones
+          console.log("No se pudo activar wake lock:", err);
+        }
+      }
+    };
+
+    requestWakeLock();
+
+    // Manejar cuando la página pierde/recupera visibilidad
+    const handleVisibilityChange = async () => {
+      if (document.hidden) {
+        // Liberar wake lock cuando la página está oculta
+        if (wakeLockRef.current) {
+          try {
+            await wakeLockRef.current.release();
+            wakeLockRef.current = null;
+          } catch (err) {
+            console.log("Error al liberar wake lock:", err);
+          }
+        }
+      } else if (running) {
+        // Reactivar wake lock cuando la página vuelve a ser visible y el timer está corriendo
+        await requestWakeLock();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    // Limpiar wake lock al desmontar o cuando running cambia
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch((err) => {
+          console.log("Error al liberar wake lock:", err);
+        });
+        wakeLockRef.current = null;
+      }
+    };
+  }, [running]);
+
+  useEffect(() => {
+    // Función para calcular el tiempo restante basado en timestamps
+    const calculateRemainingTime = () => {
+      if (!startTimeRef.current) return 0;
+      const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
+      const remaining = Math.max(0, initialSecondsRef.current - elapsed);
+      return remaining;
+    };
+
+    // Función para actualizar el contador
+    const updateTimer = () => {
+      if (!running) return;
+      
+      const remaining = calculateRemainingTime();
+      
+      if (remaining <= 0) {
+        setSeconds(0);
+        setRunning(false);
+        if (intervalRef.current) {
           clearInterval(intervalRef.current);
           intervalRef.current = null;
-          setRunning(false);
-          return 0;
         }
-        return prev - 1;
-      });
+        startTimeRef.current = null;
+        // Mostrar mensaje de finalización solo si el timer estaba corriendo
+        setShowCompletionMessage(true);
+        
+        // Notificación del navegador si está disponible
+        if ("Notification" in window && Notification.permission === "granted") {
+          new Notification("¡Timer completado!", {
+            body: "El contador ha llegado a 0",
+            icon: "/android-chrome-192x192.png",
+            badge: "/android-chrome-192x192.png",
+          });
+        } else if ("Notification" in window && Notification.permission === "default") {
+          Notification.requestPermission().then((permission) => {
+            if (permission === "granted") {
+              new Notification("¡Timer completado!", {
+                body: "El contador ha llegado a 0",
+                icon: "/android-chrome-192x192.png",
+                badge: "/android-chrome-192x192.png",
+              });
+            }
+          });
+        }
+        
+        // Sonido de notificación (usando Web Audio API)
+        try {
+          const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          const oscillator = audioContext.createOscillator();
+          const gainNode = audioContext.createGain();
+          
+          oscillator.connect(gainNode);
+          gainNode.connect(audioContext.destination);
+          
+          oscillator.frequency.value = 800;
+          oscillator.type = "sine";
+          
+          gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+          
+          oscillator.start(audioContext.currentTime);
+          oscillator.stop(audioContext.currentTime + 0.5);
+        } catch (err) {
+          console.log("No se pudo reproducir sonido:", err);
+        }
+        
+        return;
+      }
+      
+      setSeconds(remaining);
+    };
+
+    if (!running) {
+      // Limpiar cuando se detiene o pausa
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      // Cuando se pausa, calcular y guardar el tiempo restante actual
+      if (startTimeRef.current !== null) {
+        const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
+        const remaining = Math.max(0, initialSecondsRef.current - elapsed);
+        // Actualizar initialSecondsRef con el tiempo restante para poder reanudar
+        initialSecondsRef.current = remaining;
+        // Resetear startTimeRef para que cuando se reanude, se inicialice correctamente
+        startTimeRef.current = null;
+      }
+      return;
+    }
+
+    // Inicializar cuando se inicia el timer (primera vez o después de pausar)
+    if (startTimeRef.current === null) {
+      // Usar el tiempo actual (seconds) como tiempo inicial
+      initialSecondsRef.current = seconds;
+      startTimeRef.current = Date.now();
+    }
+
+    // Actualizar inmediatamente
+    updateTimer();
+
+    // Actualizar cada segundo
+    intervalRef.current = setInterval(() => {
+      updateTimer();
     }, 1000);
+
+    // Manejar cuando la página vuelve a estar visible
+    const handleVisibilityChange = () => {
+      if (!document.hidden && running) {
+        // Recalcular el tiempo cuando la página vuelve a estar visible
+        updateTimer();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    // Manejar cuando la ventana vuelve a tener foco
+    const handleFocus = () => {
+      if (running) {
+        updateTimer();
+      }
+    };
+
+    window.addEventListener("focus", handleFocus);
+
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      intervalRef.current = null;
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleFocus);
     };
   }, [running]);
 
@@ -91,6 +302,11 @@ export default function App() {
     setShowHours(true);
     setShowMinutes(true);
     setShowSeconds(true);
+    // Resetear refs del timer
+    startTimeRef.current = null;
+    initialSecondsRef.current = 0;
+    // Ocultar mensaje de finalización
+    setShowCompletionMessage(false);
   };
 
   return (
@@ -100,6 +316,49 @@ export default function App() {
     >
       <div className="w-full text-center px-2 pb-20">
         <h1 className="text-[1.5rem] md:text-[2rem] font-semibold mb-4 md:mb-6">Timer</h1>
+
+        {/* Mensaje de finalización */}
+        {showCompletionMessage && (
+          <div className="fixed top-4 left-0 right-0 flex justify-center z-50 animate-bounce px-4">
+            <div className="bg-white text-black px-6 py-4 rounded-xl shadow-2xl border-4 border-yellow-400 flex items-center gap-3 max-w-md">
+              <svg
+                className="w-8 h-8 text-yellow-500"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              <div>
+                <p className="text-xl font-bold">¡Timer completado!</p>
+                <p className="text-sm text-gray-600">El contador ha llegado a 0</p>
+              </div>
+              <button
+                onClick={() => setShowCompletionMessage(false)}
+                className="ml-2 text-gray-500 hover:text-gray-700"
+              >
+                <svg
+                  className="w-6 h-6"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Flip clock: HH : MM : SS */}
         <div
@@ -158,6 +417,11 @@ export default function App() {
               setShowHours(true);
               setShowMinutes(true);
               setShowSeconds(true);
+              // Resetear refs del timer
+              startTimeRef.current = null;
+              initialSecondsRef.current = 0;
+              // Ocultar mensaje de finalización
+              setShowCompletionMessage(false);
             }}
             className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 md:px-8 md:py-4 rounded-xl text-lg md:text-xl font-semibold transition"
           >
