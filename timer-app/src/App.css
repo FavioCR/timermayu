@@ -1,0 +1,47 @@
+/* Animación: el número nuevo cae de arriba, el que estaba se va hacia abajo */
+.flip-viewport {
+  display: inline-block;
+  width: 0.8em;
+  height: 1.2em;
+  overflow: hidden;
+  position: relative;
+}
+
+.flip-current,
+.flip-outgoing,
+.flip-incoming {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+  font-weight: inherit;
+}
+
+.flip-outgoing,
+.flip-incoming {
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Estado inicial: el viejo está en su sitio, el nuevo arriba (oculto) */
+.flip-outgoing {
+  transform: translateY(0);
+}
+
+.flip-incoming {
+  transform: translateY(-100%);
+}
+
+/* Al animar: el viejo baja y sale, el nuevo cae a su lugar */
+.flip-viewport.flip-animate .flip-outgoing {
+  transform: translateY(100%);
+}
+
+.flip-viewport.flip-animate .flip-incoming {
+  transform: translateY(0);
+}
