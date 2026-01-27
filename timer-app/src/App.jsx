@@ -93,7 +93,7 @@ export default function App() {
       style={{ backgroundColor: bgColor }}
     >
       <div className="w-full text-center px-2 pb-20">
-        <h1 className="text-[1.5rem] md:text-[2rem] font-semibold mb-4 md:mb-6">Timer3</h1>
+        <h1 className="text-[1.5rem] md:text-[2rem] font-semibold mb-4 md:mb-6">Timer</h1>
 
         {/* Flip clock: HH : MM : SS */}
         <div
