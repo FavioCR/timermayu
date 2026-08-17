@@ -8,6 +8,25 @@ services:
     networks:
       - nginx_gateway_network
 
+  webhook_receiver:
+    build:
+      context: ./webhook-receiver
+      dockerfile: Dockerfile
+    container_name: timermayu_webhook_receiver_prod
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      DATA_DIR: /data
+      PANEL_USER: ${WEBHOOK_PANEL_USER:-debug}
+      PANEL_PASSWORD: ${WEBHOOK_PANEL_PASSWORD:?WEBHOOK_PANEL_PASSWORD is required}
+    volumes:
+      - webhook_data:/data
+    networks:
+      - nginx_gateway_network
+
 networks:
   nginx_gateway_network:
     external: true
+
+volumes:
+  webhook_data:
