@@ -27,9 +27,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { api, esNoAutorizado, mensajeDeError, type CambiosPendiente, type Estado, type Pendiente, type Perfil } from "@/lib/api"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
-// Sugerencias del campo proyecto; se puede escribir cualquier otro.
-const PROYECTOS_SUGERIDOS = ["kimba", "pos", "practipdf", "practitv", "timermayu", "servidor"]
-
 const fecha = new Intl.DateTimeFormat("es", { day: "numeric", month: "short" })
 
 // Kibo UI necesita name y column en cada tarjeta.
@@ -140,10 +137,8 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
 
   const asignados = useMemo(() => contar(tarjetas, (tarjeta) => tarjeta.perfil_id ?? NADIE), [tarjetas])
 
-  const sugerencias = useMemo(
-    () => [...new Set([...PROYECTOS_SUGERIDOS, ...proyectos.map(([nombre]) => nombre)])].sort(),
-    [proyectos]
-  )
+  // El campo proyecto sugiere los que ya se usan en alguna tarjeta; se puede escribir cualquier otro.
+  const sugerencias = useMemo(() => proyectos.map(([nombre]) => nombre), [proyectos])
 
   const abiertos = tarjetas.filter((tarjeta) => tarjeta.column !== "hecho").length
 
