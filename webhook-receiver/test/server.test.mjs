@@ -65,7 +65,9 @@ test('rechaza un valor que no sea un whsec_ valido', async (t) => {
     body: JSON.stringify({ secret: '3i_test_algo.no-es-un-whsec' }),
   });
   assert.equal(response.status, 422);
-  assert.deepEqual(await response.json(), { error: 'secret_invalid' });
+  const body = await response.json();
+  assert.equal(body.error, 'secret_invalid');
+  assert.match(body.message, /parece una API key/);
 });
 
 test('acepta un evento firmado y detecta el duplicado', async (t) => {
