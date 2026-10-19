@@ -11,6 +11,7 @@ import {
   type SyntheticEvent,
 } from "react"
 import {
+  Building2,
   CircleCheck,
   CircleDashed,
   ClipboardList,
@@ -18,8 +19,10 @@ import {
   FolderOpen,
   ImageIcon,
   Inbox,
+  Info,
   Keyboard,
   Layers,
+  Lock,
   LogOut,
   MoreVertical,
   Plus,
@@ -27,6 +30,7 @@ import {
   Search,
   Timer,
   Trash2,
+  UsersRound,
   X,
 } from "lucide-react"
 import { cn } from "cn"
@@ -41,8 +45,9 @@ import {
   KanbanProvider,
 } from "@/components/kibo-ui/kanban"
 import { PerfilAvatar } from "@/components/perfil-avatar"
-import { PerfilesDialog } from "@/components/perfiles-dialog"
+import { PerfilesDialog, type CambiosPerfil } from "@/components/perfiles-dialog"
 import { ProyectoCombobox } from "@/components/proyecto-combobox"
+import { ProyectosDialog } from "@/components/proyectos-dialog"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -68,7 +73,19 @@ import {
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "@/components/ui/input-group"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { api, esNoAutorizado, mensajeDeError, type CambiosPendiente, type Estado, type Pendiente, type Perfil } from "@/lib/api"
+import {
+  api,
+  crearCredenciales,
+  esNoAutorizado,
+  mensajeDeError,
+  partesDe,
+  type CambiosPendiente,
+  type Estado,
+  type Pendiente,
+  type Perfil,
+  type Usuario,
+} from "@/lib/api"
+import { agrupar, conProyecto, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
 const ICONOS: Record<Estado, typeof Inbox> = { pendiente: Inbox, haciendo: RotateCw, hecho: CircleCheck }
@@ -104,6 +121,16 @@ function contar<T>(items: T[], clave: (item: T) => string | null) {
   return conteo
 }
 
+const AVISO_EQUIPO = "pendientes.aviso-equipo-cerrado"
+
+function avisoEquipoCerrado() {
+  try {
+    return localStorage.getItem(AVISO_EQUIPO) === "1"
+  } catch {
+    return false
+  }
+}
+
 // Tocar un botón dentro de la tarjeta no debe empezar a arrastrarla.
 const detener = (event: SyntheticEvent) => event.stopPropagation()
 const noArrastrar = { onMouseDown: detener, onTouchStart: detener, onKeyDown: detener }
@@ -132,20 +159,32 @@ function Filtro({ activo, onClick, children }: { activo: boolean; onClick: () =>
   )
 }
 
-export function Tablero({ credenciales, onSalir }: { credenciales: string; onSalir: () => void }) {
+export function Tablero({
+  credenciales,
+  onCredenciales,
+  onSalir,
+}: {
+  credenciales: string
+  onCredenciales: (credenciales: string) => void
+  onSalir: () => void
+}) {
   const [tarjetas, setTarjetas] = useState<Tarjeta[]>([])
   const [perfiles, setPerfiles] = useState<Perfil[]>([])
+  const [catalogo, setCatalogo] = useState<Catalogo>({ organizaciones: [], proyectos: [] })
+  const [usuario, setUsuario] = useState<Usuario | null>(null)
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState("")
+  const [filtroOrganizacion, setFiltroOrganizacion] = useState<string | null>(null)
   const [filtroProyecto, setFiltroProyecto] = useState<string | null>(null)
   const [filtroPerfil, setFiltroPerfil] = useState<string | null>(null)
   const [texto, setTexto] = useState("")
-  const [proyecto, setProyecto] = useState<string | null>(null)
+  const [proyectoId, setProyectoId] = useState<string | null>(null)
   const [responsable, setResponsable] = useState(NADIE)
   // Columna donde cae lo que se agrega; se elige desde el menú de cada columna.
   const [destino, setDestino] = useState<Estado>("pendiente")
   const [abierto, setAbierto] = useState<string | null>(null)
   const [confirmarLimpieza, setConfirmarLimpieza] = useState(false)
+  const [sinAvisoEquipo, setSinAvisoEquipo] = useState(avisoEquipoCerrado)
   const ultimas = useRef<Tarjeta[]>([])
   const ordenAlEmpezar = useRef("")
   const arrastrando = useRef(false)
@@ -167,9 +206,17 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
 
   const recargar = useCallback(async () => {
     try {
-      const [pendientes, nuevosPerfiles] = await Promise.all([api.listar(credenciales), api.perfiles.listar(credenciales)])
+      const [pendientes, nuevosPerfiles, organizaciones, proyectos, yo] = await Promise.all([
+        api.listar(credenciales),
+        api.perfiles.listar(credenciales),
+        api.organizaciones.listar(credenciales),
+        api.proyectos.listar(credenciales),
+        api.yo(credenciales),
+      ])
       setTarjetas(pendientes.map(aTarjeta))
       setPerfiles(nuevosPerfiles)
+      setCatalogo({ organizaciones, proyectos })
+      setUsuario(yo)
       setError("")
     } catch (err) {
       fallar(err)
@@ -187,28 +234,50 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
   }, [recargar])
 
   const perfilesPorId = useMemo(() => new Map(perfiles.map((perfil) => [perfil.id, perfil])), [perfiles])
+  const proyectosPorId = useMemo(() => new Map(catalogo.proyectos.map((proyecto) => [proyecto.id, proyecto])), [catalogo])
+  const organizacionesPorId = useMemo(
+    () => new Map(catalogo.organizaciones.map((organizacion) => [organizacion.id, organizacion])),
+    [catalogo]
+  )
+  const grupos = useMemo(() => agrupar(catalogo), [catalogo])
 
-  const filtrando = filtroProyecto !== null || filtroPerfil !== null
+  // Lo que no tiene proyecto, o tiene uno suelto, cae en "Sin organización".
+  const claveOrganizacion = useCallback(
+    (tarjeta: Pendiente) => (tarjeta.proyecto_id && proyectosPorId.get(tarjeta.proyecto_id)?.organizacion_id) || SIN_ORGANIZACION,
+    [proyectosPorId]
+  )
+
+  // Un filtro que apunta a algo borrado deja de filtrar.
+  const organizacionFiltrada =
+    filtroOrganizacion === SIN_ORGANIZACION || (filtroOrganizacion && organizacionesPorId.has(filtroOrganizacion)) ? filtroOrganizacion : null
+  const proyectoFiltrado = filtroProyecto && proyectosPorId.has(filtroProyecto) ? filtroProyecto : null
+
+  const filtrando = organizacionFiltrada !== null || proyectoFiltrado !== null || filtroPerfil !== null
 
   const visibles = useMemo(
     () =>
       tarjetas.filter(
         (tarjeta) =>
-          (filtroProyecto === null || tarjeta.proyecto === filtroProyecto) &&
+          (organizacionFiltrada === null || claveOrganizacion(tarjeta) === organizacionFiltrada) &&
+          (proyectoFiltrado === null || tarjeta.proyecto_id === proyectoFiltrado) &&
           (filtroPerfil === null || (tarjeta.perfil_id ?? NADIE) === filtroPerfil)
       ),
-    [tarjetas, filtroProyecto, filtroPerfil]
+    [tarjetas, organizacionFiltrada, proyectoFiltrado, filtroPerfil, claveOrganizacion]
   )
 
-  const proyectos = useMemo(
-    () => [...contar(tarjetas, (tarjeta) => tarjeta.proyecto).entries()].sort(([a], [b]) => a.localeCompare(b)),
-    [tarjetas]
-  )
-
+  const porOrganizacion = useMemo(() => contar(tarjetas, claveOrganizacion), [tarjetas, claveOrganizacion])
+  const porProyecto = useMemo(() => contar(tarjetas, (tarjeta) => tarjeta.proyecto_id), [tarjetas])
   const asignados = useMemo(() => contar(tarjetas, (tarjeta) => tarjeta.perfil_id ?? NADIE), [tarjetas])
 
-  // El campo proyecto sugiere los que ya se usan en alguna tarjeta; se puede escribir cualquier otro.
-  const sugerencias = useMemo(() => proyectos.map(([nombre]) => nombre), [proyectos])
+  // Los proyectos de la organización elegida en el filtro.
+  const proyectosDelFiltro =
+    organizacionFiltrada === null
+      ? []
+      : (grupos.find((grupo) => (grupo.organizacion?.id ?? SIN_ORGANIZACION) === organizacionFiltrada)?.proyectos ?? [])
+
+  const hayCatalogo = catalogo.organizaciones.length > 0 || catalogo.proyectos.length > 0
+
+  const miPerfil = usuario?.perfil_id ? perfilesPorId.get(usuario.perfil_id) : null
 
   const abiertos = tarjetas.filter((tarjeta) => tarjeta.column !== "hecho").length
 
@@ -227,7 +296,7 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
     try {
       const nuevo = await api.crear(credenciales, {
         texto,
-        proyecto,
+        proyecto_id: proyectoId,
         estado: destino,
         perfil_id: responsable === NADIE ? null : responsable,
       })
@@ -284,7 +353,22 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
     }
   }
 
-  async function crearPerfil(datos: { nombre: string; color: string }) {
+  const crearProyecto = useCallback(
+    async (datos: { nombre: string; organizacion_id: string | null }) => {
+      try {
+        const nuevo = await api.proyectos.crear(credenciales, datos)
+        setCatalogo((actual) => conProyecto(actual, nuevo))
+        setError("")
+        return nuevo
+      } catch (err) {
+        fallar(err)
+        return null
+      }
+    },
+    [credenciales, fallar]
+  )
+
+  async function crearPerfil(datos: { nombre: string; color: string; correo: string | null }) {
     try {
       const nuevo = await api.perfiles.crear(credenciales, datos)
       setPerfiles((actuales) => [...actuales, nuevo])
@@ -295,9 +379,43 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
     }
   }
 
+  // En un perfil ajeno los datos van antes que la contraseña: con contraseña ya solo lo edita esa persona.
+  // En el propio, la contraseña va primero y las credenciales guardadas se rehacen para seguir dentro.
+  async function actualizarPerfil(perfil: Perfil, { contrasena, ...datos }: CambiosPerfil) {
+    const esYo = perfil.id === usuario?.perfil_id
+    let actuales = credenciales
+    try {
+      let actualizado = perfil
+      const cambios = Object.fromEntries(
+        Object.entries(datos).filter(([campo, valor]) => (campo === "color" ? valor !== perfil.color.toUpperCase() : valor !== perfil[campo as keyof Perfil]))
+      )
+      const guardarDatos = async () => {
+        if (Object.keys(cambios).length) actualizado = await api.perfiles.actualizar(actuales, perfil.id, cambios)
+      }
+      if (!esYo) await guardarDatos()
+      if (contrasena) {
+        actualizado = await api.perfiles.ponerContrasena(actuales, perfil.id, contrasena)
+        if (esYo) actuales = crearCredenciales(partesDe(actuales).usuario, contrasena)
+      }
+      if (esYo) await guardarDatos()
+      if (esYo && (contrasena || cambios.nombre)) actuales = crearCredenciales(actualizado.nombre, partesDe(actuales).contrasena)
+      setPerfiles((lista) => lista.map((p) => (p.id === perfil.id ? actualizado : p)))
+      return null
+    } catch (err) {
+      if (esNoAutorizado(err)) onSalir()
+      return mensajeDeError(err)
+    } finally {
+      if (actuales !== credenciales) onCredenciales(actuales)
+    }
+  }
+
   async function borrarPerfil(perfil: Perfil) {
     try {
       await api.perfiles.borrar(credenciales, perfil.id)
+      if (perfil.id === usuario?.perfil_id) {
+        onSalir()
+        return null
+      }
       setPerfiles((actuales) => actuales.filter((p) => p.id !== perfil.id))
       setTarjetas((actuales) => actuales.map((t) => (t.perfil_id === perfil.id ? { ...t, perfil_id: null } : t)))
       if (filtroPerfil === perfil.id) setFiltroPerfil(null)
@@ -349,15 +467,45 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
             </span>
           )}
           <div className="ml-auto flex items-center gap-1">
-            <PerfilesDialog perfiles={perfiles} asignados={asignados} onCrear={crearPerfil} onBorrar={borrarPerfil} />
+            <ProyectosDialog
+              credenciales={credenciales}
+              catalogo={catalogo}
+              onCatalogo={setCatalogo}
+              perfiles={perfiles}
+              usuario={usuario}
+              pendientesPorProyecto={porProyecto}
+              onSalir={onSalir}
+            />
+            <PerfilesDialog
+              perfiles={perfiles}
+              asignados={asignados}
+              usuario={usuario}
+              onCrear={crearPerfil}
+              onActualizar={actualizarPerfil}
+              onBorrar={borrarPerfil}
+            />
             <Button asChild variant="ghost">
               <a href="/" aria-label="Timer">
-                <Timer /> <span className="hidden sm:inline">Timer</span>
+                <Timer /> <span className="hidden lg:inline">Timer</span>
               </a>
             </Button>
-            <Button variant="ghost" onClick={onSalir} aria-label="Salir">
-              <LogOut /> <span className="hidden sm:inline">Salir</span>
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" className="gap-2 px-2" aria-label={`Cuenta: ${usuario?.nombre ?? ""}`}>
+                  {miPerfil ? <PerfilAvatar perfil={miPerfil} size="sm" /> : <UsersRound />}
+                  <span className="hidden max-w-32 truncate md:inline">{usuario?.nombre}</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-56">
+                <DropdownMenuLabel className="font-normal text-muted-foreground">
+                  {usuario?.perfil_id ? `Entraste como ${usuario.nombre}` : "Entraste con la cuenta del equipo"}
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={onSalir}>
+                  <LogOut /> Salir
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
       </header>
@@ -388,7 +536,13 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
               </InputGroupAddon>
             )}
           </InputGroup>
-          <ProyectoCombobox valor={proyecto} onCambiar={setProyecto} sugerencias={sugerencias} className="h-11 w-full sm:w-52" />
+          <ProyectoCombobox
+            valor={proyectoId}
+            onCambiar={setProyectoId}
+            catalogo={catalogo}
+            onCrear={crearProyecto}
+            className="h-11 w-full sm:w-60"
+          />
           <Select value={responsable} onValueChange={setResponsable}>
             <SelectTrigger aria-label="Responsable" className="w-full px-3 data-[size=default]:h-11 sm:w-48">
               <SelectValue />
@@ -409,7 +563,32 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
           </Button>
         </form>
 
-        {(perfiles.length > 0 || proyectos.length > 0) && (
+        {usuario && usuario.perfil_id === null && !sinAvisoEquipo && (
+          <div className="flex items-start gap-3 rounded-xl border border-primary/30 bg-primary/10 px-4 py-3 text-sm">
+            <Info className="mt-0.5 size-4 shrink-0 text-primary" />
+            <p className="m-0 flex-1">
+              Entraste con la cuenta del equipo, así que solo ves lo compartido. Ponle contraseña a tu perfil en{" "}
+              <strong className="font-medium">Perfiles</strong> y entra con tu nombre para tener organizaciones privadas.
+            </p>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Cerrar aviso"
+              onClick={() => {
+                setSinAvisoEquipo(true)
+                try {
+                  localStorage.setItem(AVISO_EQUIPO, "1")
+                } catch {
+                  // Sin almacenamiento el aviso vuelve a salir al recargar.
+                }
+              }}
+            >
+              <X />
+            </Button>
+          </div>
+        )}
+
+        {(perfiles.length > 0 || hayCatalogo) && (
           <div className="flex flex-col gap-2.5">
             {perfiles.length > 0 && (
               <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por persona">
@@ -435,18 +614,56 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
                 })}
               </div>
             )}
-            {proyectos.length > 0 && (
+            {hayCatalogo && (
+              <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por organización">
+                <Filtro
+                  activo={organizacionFiltrada === null}
+                  onClick={() => {
+                    setFiltroOrganizacion(null)
+                    setFiltroProyecto(null)
+                  }}
+                >
+                  <Building2 /> Todas
+                </Filtro>
+                {grupos.map(({ organizacion, proyectos }) => {
+                  const clave = organizacion?.id ?? SIN_ORGANIZACION
+                  const cantidad = porOrganizacion.get(clave) ?? 0
+                  // "Sin organización" solo sale si tiene algo.
+                  if (!organizacion && cantidad === 0 && proyectos.length === 0) return null
+                  return (
+                    <Filtro
+                      key={clave}
+                      activo={organizacionFiltrada === clave}
+                      onClick={() => {
+                        setFiltroOrganizacion(organizacionFiltrada === clave ? null : clave)
+                        setFiltroProyecto(null)
+                      }}
+                    >
+                      {organizacion ? (
+                        <span className="size-2.5 rounded-full" style={{ backgroundColor: organizacion.color }} />
+                      ) : (
+                        <CircleDashed className="text-muted-foreground" />
+                      )}
+                      {organizacion?.nombre ?? "Sin organización"}
+                      {organizacion && !organizacion.compartida && <Lock className="text-muted-foreground" aria-label="Privada" />}
+                      <Contador valor={cantidad} />
+                    </Filtro>
+                  )
+                })}
+              </div>
+            )}
+            {proyectosDelFiltro.length > 0 && (
               <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por proyecto">
-                <Filtro activo={filtroProyecto === null} onClick={() => setFiltroProyecto(null)}>
+                <Filtro activo={proyectoFiltrado === null} onClick={() => setFiltroProyecto(null)}>
                   <FolderOpen /> Todos los proyectos
                 </Filtro>
-                {proyectos.map(([nombre, cantidad]) => (
+                {proyectosDelFiltro.map((proyecto) => (
                   <Filtro
-                    key={nombre}
-                    activo={filtroProyecto === nombre}
-                    onClick={() => setFiltroProyecto(filtroProyecto === nombre ? null : nombre)}
+                    key={proyecto.id}
+                    activo={proyectoFiltrado === proyecto.id}
+                    onClick={() => setFiltroProyecto(proyectoFiltrado === proyecto.id ? null : proyecto.id)}
                   >
-                    <Folder className="text-muted-foreground" /> {nombre} <Contador valor={cantidad} />
+                    <Folder className="text-muted-foreground" /> {proyecto.nombre} <Contador valor={porProyecto.get(proyecto.id) ?? 0} />
                   </Filtro>
                 ))}
               </div>
@@ -535,6 +752,8 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
                     <KanbanCards id={columna.id} className={cantidad === 0 ? "p-0" : "gap-2.5 p-3"}>
                       {(tarjeta: Tarjeta) => {
                         const perfil = tarjeta.perfil_id ? perfilesPorId.get(tarjeta.perfil_id) : null
+                        const proyecto = tarjeta.proyecto_id ? proyectosPorId.get(tarjeta.proyecto_id) : null
+                        const organizacion = proyecto?.organizacion_id ? organizacionesPorId.get(proyecto.organizacion_id) : null
                         return (
                           <KanbanCard
                             column={columna.id}
@@ -572,10 +791,23 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
                               {tarjeta.resumen && (
                                 <p className="m-0 line-clamp-2 text-xs text-muted-foreground">{tarjeta.resumen}</p>
                               )}
-                              <div className="flex items-center gap-2">
-                                {tarjeta.proyecto && (
-                                  <Badge variant="secondary" className="gap-1">
-                                    <Folder className="size-3" /> {tarjeta.proyecto}
+                              <div className="flex min-w-0 items-center gap-2">
+                                {proyecto && (
+                                  <Badge
+                                    variant="secondary"
+                                    className="min-w-0 shrink justify-start gap-1.5"
+                                    title={organizacion ? `${organizacion.nombre} › ${proyecto.nombre}` : proyecto.nombre}
+                                  >
+                                    {organizacion ? (
+                                      <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: organizacion.color }} />
+                                    ) : (
+                                      <Folder />
+                                    )}
+                                    <span className="truncate">
+                                      {organizacion && <span className="text-muted-foreground">{organizacion.nombre} › </span>}
+                                      {proyecto.nombre}
+                                    </span>
+                                    {organizacion && !organizacion.compartida && <Lock aria-label="Privado" />}
                                   </Badge>
                                 )}
                                 {tarjeta.num_imagenes > 0 && (
@@ -586,7 +818,7 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
                                     <ImageIcon className="size-3.5" /> {tarjeta.num_imagenes}
                                   </span>
                                 )}
-                                <span className="ml-auto text-xs text-muted-foreground">
+                                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
                                   {fecha.format(new Date(tarjeta.creado_en))}
                                 </span>
                                 <DropdownMenu>
@@ -669,7 +901,8 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
         credenciales={credenciales}
         pendiente={pendienteAbierto}
         perfiles={perfiles}
-        sugerencias={sugerencias}
+        catalogo={catalogo}
+        onCrearProyecto={crearProyecto}
         onCambiar={cambiarPendiente}
         onBorrar={borrar}
         onCerrar={cerrarDetalle}

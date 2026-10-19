@@ -27,5 +27,5 @@ export default function App() {
     )
   }
 
-  return <Tablero credenciales={credenciales} onSalir={salir} />
+  return <Tablero credenciales={credenciales} onCredenciales={entrar} onSalir={salir} />
 }

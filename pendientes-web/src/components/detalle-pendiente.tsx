@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
-import { Trash2 } from "lucide-react"
+import { Lock, Trash2, Users } from "lucide-react"
 
 import type { DocumentoDescripcion } from "@/components/editor-descripcion"
 import { PerfilAvatar } from "@/components/perfil-avatar"
@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Textarea } from "@/components/ui/textarea"
-import { api, esNoAutorizado, mensajeDeError, type CambiosPendiente, type Estado, type Pendiente, type Perfil } from "@/lib/api"
+import { api, esNoAutorizado, mensajeDeError, type CambiosPendiente, type Estado, type Pendiente, type Perfil, type Proyecto } from "@/lib/api"
+import { organizacionDe, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
 const EditorDescripcion = lazy(() => import("@/components/editor-descripcion"))
@@ -22,7 +23,8 @@ type Props = {
   credenciales: string
   pendiente: Pendiente | null
   perfiles: Perfil[]
-  sugerencias: string[]
+  catalogo: Catalogo
+  onCrearProyecto: (datos: { nombre: string; organizacion_id: string | null }) => Promise<Proyecto | null>
   onCambiar: (id: string, cambios: CambiosPendiente) => Promise<Pendiente | null>
   onBorrar: (pendiente: Pendiente) => void
   onCerrar: () => void
@@ -55,7 +57,8 @@ function Contenido({
   credenciales,
   pendiente,
   perfiles,
-  sugerencias,
+  catalogo,
+  onCrearProyecto,
   onCambiar,
   onBorrar,
   onSalir,
@@ -149,6 +152,8 @@ function Contenido({
   }
 
   const estadoGuardado = guardando ? "Guardando…" : guardado ? "Guardado" : ""
+  const organizacion = organizacionDe(catalogo, pendiente.proyecto_id)
+  const privado = organizacion !== null && !organizacion.compartida
 
   return (
     <>
@@ -180,7 +185,7 @@ function Contenido({
           <dt className="text-muted-foreground">Estado</dt>
           <dd>
             <Select value={pendiente.estado} onValueChange={(valor) => onCambiar(id, { estado: valor as Estado })}>
-              <SelectTrigger aria-label="Estado" size="sm" className="w-full sm:w-56">
+              <SelectTrigger aria-label="Estado" size="sm" className="w-full sm:w-72">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -199,7 +204,7 @@ function Contenido({
               value={pendiente.perfil_id ?? NADIE}
               onValueChange={(valor) => onCambiar(id, { perfil_id: valor === NADIE ? null : valor })}
             >
-              <SelectTrigger aria-label="Responsable del pendiente" size="sm" className="w-full sm:w-56">
+              <SelectTrigger aria-label="Responsable del pendiente" size="sm" className="w-full sm:w-72">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -219,11 +224,25 @@ function Contenido({
           <dd>
             <ProyectoCombobox
               etiqueta="Proyecto del pendiente"
-              valor={pendiente.proyecto}
-              onCambiar={(proyecto) => onCambiar(id, { proyecto })}
-              sugerencias={sugerencias}
-              className="h-8 w-full sm:w-56"
+              valor={pendiente.proyecto_id}
+              onCambiar={(proyectoId) => onCambiar(id, { proyecto_id: proyectoId })}
+              catalogo={catalogo}
+              onCrear={onCrearProyecto}
+              className="h-8 w-full sm:w-72"
             />
+          </dd>
+
+          <dt className="text-muted-foreground">Lo ve</dt>
+          <dd className="flex items-center gap-1.5 text-sm [&_svg]:size-3.5 [&_svg]:text-muted-foreground">
+            {privado ? (
+              <>
+                <Lock /> Solo tú: está en {organizacion.nombre}, que es privada
+              </>
+            ) : (
+              <>
+                <Users /> Todo el equipo
+              </>
+            )}
           </dd>
         </dl>
 

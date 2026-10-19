@@ -1,8 +1,9 @@
-import { useState, type FormEvent } from "react"
-import { cn } from "cn"
-import { Plus, Trash2, Users } from "lucide-react"
+import { useId, useState, type FormEvent } from "react"
+import { KeyRound, Lock, Pencil, Plus, Trash2, Users } from "lucide-react"
 
 import { PerfilAvatar } from "@/components/perfil-avatar"
+import { SelectorColor } from "@/components/selector-color"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -12,38 +13,132 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import { COLORES_PERFIL, type Perfil } from "@/lib/api"
+import { colorLibre, type Perfil, type Usuario } from "@/lib/api"
+
+export type CambiosPerfil = { nombre: string; correo: string | null; color: string; contrasena: string }
+
+function EditorPerfil({
+  perfil,
+  esYo,
+  onGuardar,
+  onCancelar,
+}: {
+  perfil: Perfil
+  esYo: boolean
+  onGuardar: (cambios: CambiosPerfil) => Promise<boolean>
+  onCancelar: () => void
+}) {
+  const id = useId()
+  const [nombre, setNombre] = useState(perfil.nombre)
+  const [correo, setCorreo] = useState(perfil.correo ?? "")
+  const [color, setColor] = useState(perfil.color.toUpperCase())
+  const [contrasena, setContrasena] = useState("")
+  const [guardando, setGuardando] = useState(false)
+
+  async function guardar(event: FormEvent) {
+    event.preventDefault()
+    setGuardando(true)
+    const listo = await onGuardar({ nombre: nombre.trim(), correo: correo.trim() || null, color, contrasena })
+    setGuardando(false)
+    if (listo) onCancelar()
+  }
+
+  return (
+    <form onSubmit={guardar} className="mt-2 flex flex-col gap-4 rounded-lg border bg-muted/30 p-3">
+      <FieldGroup className="gap-3">
+        <Field>
+          <FieldLabel htmlFor={`${id}-nombre`}>Nombre</FieldLabel>
+          <Input id={`${id}-nombre`} value={nombre} onChange={(event) => setNombre(event.target.value)} maxLength={40} required />
+        </Field>
+        <Field>
+          <FieldLabel htmlFor={`${id}-correo`}>
+            Correo <span className="font-normal text-muted-foreground">(opcional)</span>
+          </FieldLabel>
+          <Input
+            id={`${id}-correo`}
+            type="email"
+            autoComplete="off"
+            placeholder="nombre@ejemplo.com"
+            value={correo}
+            onChange={(event) => setCorreo(event.target.value)}
+            maxLength={120}
+          />
+        </Field>
+        <Field>
+          <FieldLabel htmlFor={`${id}-contrasena`}>{perfil.tiene_contrasena ? "Nueva contraseña" : "Contraseña"}</FieldLabel>
+          <Input
+            id={`${id}-contrasena`}
+            type="password"
+            autoComplete="new-password"
+            minLength={8}
+            placeholder={perfil.tiene_contrasena ? "Déjala vacía para no cambiarla" : "Mínimo 8 caracteres"}
+            value={contrasena}
+            onChange={(event) => setContrasena(event.target.value)}
+          />
+          {!perfil.tiene_contrasena && (
+            <FieldDescription>
+              Con ella {esYo ? "entras" : `${perfil.nombre} entra`} con su nombre y puede tener organizaciones privadas. Desde entonces solo{" "}
+              {esYo ? "tú podrás" : `${perfil.nombre} podrá`} cambiar este perfil.
+            </FieldDescription>
+          )}
+        </Field>
+        <SelectorColor valor={color} onCambiar={setColor} etiqueta="Color del perfil" />
+      </FieldGroup>
+      <div className="flex gap-2">
+        <Button type="submit" size="sm" disabled={guardando || !nombre.trim()}>
+          {guardando ? "Guardando…" : "Guardar"}
+        </Button>
+        <Button type="button" size="sm" variant="ghost" onClick={onCancelar}>
+          Cancelar
+        </Button>
+      </div>
+    </form>
+  )
+}
 
 // Los callbacks devuelven el mensaje de error, o null si salió bien.
 export function PerfilesDialog({
   perfiles,
   asignados,
+  usuario,
   onCrear,
+  onActualizar,
   onBorrar,
 }: {
   perfiles: Perfil[]
   asignados: Map<string, number>
-  onCrear: (datos: { nombre: string; color: string }) => Promise<string | null>
+  usuario: Usuario | null
+  onCrear: (datos: { nombre: string; color: string; correo: string | null }) => Promise<string | null>
+  onActualizar: (perfil: Perfil, cambios: CambiosPerfil) => Promise<string | null>
   onBorrar: (perfil: Perfil) => Promise<string | null>
 }) {
   const [nombre, setNombre] = useState("")
+  const [correo, setCorreo] = useState("")
   const [color, setColor] = useState<string | null>(null)
+  const [editando, setEditando] = useState<string | null>(null)
   const [confirmando, setConfirmando] = useState<string | null>(null)
   const [error, setError] = useState("")
 
-  const usados = new Set(perfiles.map((perfil) => perfil.color.toUpperCase()))
-  const colorElegido = color ?? COLORES_PERFIL.find((c) => !usados.has(c)) ?? COLORES_PERFIL[perfiles.length % COLORES_PERFIL.length]
+  const colorElegido = color ?? colorLibre(perfiles.map((perfil) => perfil.color))
 
   async function agregar(event: FormEvent) {
     event.preventDefault()
     if (!nombre.trim()) return
-    const fallo = await onCrear({ nombre: nombre.trim(), color: colorElegido })
+    const fallo = await onCrear({ nombre: nombre.trim(), color: colorElegido, correo: correo.trim() || null })
     setError(fallo ?? "")
     if (!fallo) {
       setNombre("")
+      setCorreo("")
       setColor(null)
     }
+  }
+
+  async function guardar(perfil: Perfil, cambios: CambiosPerfil) {
+    const fallo = await onActualizar(perfil, cambios)
+    setError(fallo ?? "")
+    return !fallo
   }
 
   async function quitar(perfil: Perfil) {
@@ -55,6 +150,7 @@ export function PerfilesDialog({
   return (
     <Dialog
       onOpenChange={() => {
+        setEditando(null)
         setConfirmando(null)
         setError("")
       }}
@@ -64,50 +160,87 @@ export function PerfilesDialog({
           <Users /> <span className="hidden sm:inline">Perfiles</span>
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[90svh] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Perfiles</DialogTitle>
-          <DialogDescription>Las personas a las que se les puede asignar un pendiente.</DialogDescription>
+          <DialogDescription>
+            Las personas a las que se les puede asignar un pendiente. Con contraseña, cada una entra con su nombre (o su correo).
+          </DialogDescription>
         </DialogHeader>
 
-        <ul className="flex flex-col divide-y">
+        <ul className="-mx-4 flex flex-col divide-y overflow-y-auto px-4">
           {perfiles.map((perfil) => {
             const cantidad = asignados.get(perfil.id) ?? 0
+            const esYo = perfil.id === usuario?.perfil_id
+            // Un perfil con contraseña solo lo cambia o lo quita esa persona.
+            const puedeCambiar = !perfil.tiene_contrasena || esYo
             const enConfirmacion = confirmando === perfil.id
             return (
-              <li key={perfil.id} className="flex items-center gap-3 py-2">
-                <PerfilAvatar perfil={perfil} size="default" />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{perfil.nombre}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {enConfirmacion && cantidad > 0
-                      ? cantidad === 1
-                        ? "Su pendiente quedará sin asignar"
-                        : `Sus ${cantidad} pendientes quedarán sin asignar`
-                      : cantidad === 0
-                        ? "Sin pendientes asignados"
-                        : `${cantidad} pendiente${cantidad === 1 ? "" : "s"} asignado${cantidad === 1 ? "" : "s"}`}
-                  </p>
-                </div>
-                {enConfirmacion ? (
-                  <div className="flex items-center gap-1">
-                    <Button size="xs" variant="destructive" onClick={() => quitar(perfil)}>
-                      Sí, quitar
-                    </Button>
-                    <Button size="xs" variant="ghost" onClick={() => setConfirmando(null)}>
-                      No
-                    </Button>
+              <li key={perfil.id} className="flex flex-col py-2">
+                <div className="flex items-center gap-3">
+                  <PerfilAvatar perfil={perfil} size="default" />
+                  <div className="min-w-0 flex-1">
+                    <p className="flex items-center gap-1.5 text-sm font-medium">
+                      <span className="truncate">{perfil.nombre}</span>
+                      {esYo && <Badge variant="secondary">Tú</Badge>}
+                      {perfil.tiene_contrasena && <KeyRound className="size-3.5 shrink-0 text-muted-foreground" aria-label="Tiene contraseña" />}
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {enConfirmacion
+                        ? esYo
+                          ? "Se cerrará tu sesión"
+                          : cantidad > 0
+                            ? cantidad === 1
+                              ? "Su pendiente quedará sin asignar"
+                              : `Sus ${cantidad} pendientes quedarán sin asignar`
+                            : "No tiene pendientes asignados"
+                        : [perfil.correo, cantidad === 0 ? "Sin pendientes asignados" : `${cantidad} pendiente${cantidad === 1 ? "" : "s"}`]
+                            .filter(Boolean)
+                            .join(" · ")}
+                    </p>
                   </div>
-                ) : (
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    className="text-muted-foreground hover:text-destructive"
-                    aria-label={`Quitar a ${perfil.nombre}`}
-                    onClick={() => setConfirmando(perfil.id)}
-                  >
-                    <Trash2 />
-                  </Button>
+                  {enConfirmacion ? (
+                    <div className="flex items-center gap-1">
+                      <Button size="xs" variant="destructive" onClick={() => quitar(perfil)}>
+                        Sí, quitar
+                      </Button>
+                      <Button size="xs" variant="ghost" onClick={() => setConfirmando(null)}>
+                        No
+                      </Button>
+                    </div>
+                  ) : puedeCambiar ? (
+                    <div className="flex items-center">
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        className="text-muted-foreground"
+                        aria-label={`Editar a ${perfil.nombre}`}
+                        aria-expanded={editando === perfil.id}
+                        onClick={() => setEditando(editando === perfil.id ? null : perfil.id)}
+                      >
+                        <Pencil />
+                      </Button>
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        className="text-muted-foreground hover:text-destructive"
+                        aria-label={`Quitar a ${perfil.nombre}`}
+                        onClick={() => {
+                          setEditando(null)
+                          setConfirmando(perfil.id)
+                        }}
+                      >
+                        <Trash2 />
+                      </Button>
+                    </div>
+                  ) : (
+                    <span className="flex size-8 items-center justify-center text-muted-foreground" title={`Solo ${perfil.nombre} puede cambiar su perfil`}>
+                      <Lock className="size-4" aria-label={`Solo ${perfil.nombre} puede cambiar su perfil`} />
+                    </span>
+                  )}
+                </div>
+                {editando === perfil.id && (
+                  <EditorPerfil perfil={perfil} esYo={esYo} onGuardar={(cambios) => guardar(perfil, cambios)} onCancelar={() => setEditando(null)} />
                 )}
               </li>
             )
@@ -128,23 +261,16 @@ export function PerfilesDialog({
               <Plus /> Agregar
             </Button>
           </div>
-          <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Color del perfil">
-            {COLORES_PERFIL.map((opcion) => (
-              <button
-                key={opcion}
-                type="button"
-                role="radio"
-                aria-checked={colorElegido === opcion}
-                aria-label={`Color ${opcion}`}
-                onClick={() => setColor(opcion)}
-                className={cn(
-                  "size-6 rounded-full ring-offset-2 ring-offset-background outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                  colorElegido === opcion && "ring-2 ring-foreground"
-                )}
-                style={{ backgroundColor: opcion }}
-              />
-            ))}
-          </div>
+          <Input
+            type="email"
+            aria-label="Correo del perfil nuevo (opcional)"
+            placeholder="Correo (opcional)"
+            autoComplete="off"
+            value={correo}
+            onChange={(event) => setCorreo(event.target.value)}
+            maxLength={120}
+          />
+          <SelectorColor valor={colorElegido} onCambiar={setColor} etiqueta="Color del perfil" />
           {error && (
             <p role="alert" className="text-sm text-destructive">
               {error}

@@ -18,13 +18,32 @@ import {
 import { Input } from "@/components/ui/input"
 import { api, crearCredenciales, mensajeDeError } from "@/lib/api"
 
-// Basado en el bloque login-01 de shadcn/ui, adaptado al usuario y contraseña del API de pendientes.
+const ULTIMO_USUARIO = "pendientes.usuario"
+
+function leerUltimoUsuario() {
+  try {
+    return localStorage.getItem(ULTIMO_USUARIO) ?? ""
+  } catch {
+    return ""
+  }
+}
+
+function guardarUltimoUsuario(usuario: string) {
+  try {
+    localStorage.setItem(ULTIMO_USUARIO, usuario)
+  } catch {
+    // Sin almacenamiento: la próxima vez habrá que escribirlo de nuevo.
+  }
+}
+
+// Basado en el bloque login-01 de shadcn/ui. Cada perfil entra con su nombre (o su correo) y su contraseña;
+// la cuenta del equipo sirve para entrar la primera vez y ponerle contraseña a cada perfil.
 export function LoginForm({
   className,
   onEntrar,
   ...props
 }: React.ComponentProps<"div"> & { onEntrar: (credenciales: string) => void }) {
-  const [usuario, setUsuario] = useState("pendientes")
+  const [usuario, setUsuario] = useState(leerUltimoUsuario)
   const [contrasena, setContrasena] = useState("")
   const [error, setError] = useState("")
   const [enviando, setEnviando] = useState(false)
@@ -35,7 +54,8 @@ export function LoginForm({
     setError("")
     const credenciales = crearCredenciales(usuario.trim(), contrasena)
     try {
-      await api.listar(credenciales)
+      await api.yo(credenciales)
+      guardarUltimoUsuario(usuario.trim())
       onEntrar(credenciales)
     } catch (err) {
       setError(mensajeDeError(err))
@@ -49,7 +69,8 @@ export function LoginForm({
         <CardHeader>
           <CardTitle>Pendientes</CardTitle>
           <CardDescription>
-            Entra con el usuario y la contraseña del tablero.
+            Entra con tu nombre (o tu correo) y tu contraseña. Si tu perfil todavía no tiene contraseña, entra con la cuenta del equipo
+            y pónsela en Perfiles.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -60,6 +81,8 @@ export function LoginForm({
                 <Input
                   id="usuario"
                   autoComplete="username"
+                  placeholder="Tu nombre"
+                  autoFocus={!usuario}
                   value={usuario}
                   onChange={(event) => setUsuario(event.target.value)}
                   required
@@ -71,7 +94,7 @@ export function LoginForm({
                   id="contrasena"
                   type="password"
                   autoComplete="current-password"
-                  autoFocus
+                  autoFocus={Boolean(usuario)}
                   value={contrasena}
                   onChange={(event) => setContrasena(event.target.value)}
                   aria-invalid={Boolean(error) || undefined}
