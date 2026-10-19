@@ -4,9 +4,10 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createApp, openDb, parseOrden, parsePendiente, parsePerfil } from '../src/server.mjs';
+import { createApp, openDb, parseOrden, parsePendiente, parsePerfil, resumirDescripcion, tipoDeImagen } from '../src/server.mjs';
 
 const password = 'test-password';
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
 const auth = `Basic ${Buffer.from(`pendientes:${password}`).toString('base64')}`;
 
 async function startServer(t, options = {}) {
@@ -144,6 +145,92 @@ test('importa una sola vez los pendientes de la versión con archivo JSON', asyn
   assert.deepEqual((await data('GET')).pendientes.map((p) => [p.texto, p.estado, p.perfil_id]), [['Primero', 'haciendo', null], ['Segundo', 'pendiente', null]]);
   assert.equal(existsSync(path.join(dataDir, 'pendientes.json')), false);
   assert.equal(existsSync(path.join(dataDir, 'pendientes.json.importado')), true);
+});
+
+test('reconoce las imágenes por su contenido y no por el nombre', () => {
+  assert.equal(tipoDeImagen(PNG), 'image/png');
+  assert.equal(tipoDeImagen(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0])), 'image/jpeg');
+  assert.equal(tipoDeImagen(Buffer.from('GIF89a......')), 'image/gif');
+  assert.equal(tipoDeImagen(Buffer.from('RIFF\0\0\0\0WEBPVP8 ')), 'image/webp');
+  assert.equal(tipoDeImagen(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>')), null);
+  assert.equal(tipoDeImagen(Buffer.alloc(0)), null);
+});
+
+test('resume la descripción en texto plano y cuenta sus imágenes', () => {
+  const bloques = [
+    { type: 'heading', content: [{ type: 'text', text: 'Pasos' }], children: [] },
+    { type: 'paragraph', content: [{ type: 'text', text: 'Revisar ' }, { type: 'link', href: 'https://x', content: [{ type: 'text', text: 'el log' }] }],
+      children: [{ type: 'image', props: { url: '/api/pendientes/imagenes/abc' }, children: [] }] },
+    { type: 'image', props: { url: '' }, children: [] },
+    { type: 'table', content: { type: 'tableContent', rows: [{ cells: [[{ type: 'text', text: 'celda' }]] }] }, children: [] },
+  ];
+  assert.deepEqual(resumirDescripcion(bloques), { resumen: 'Pasos Revisar el log celda', num_imagenes: 1 });
+  assert.deepEqual(resumirDescripcion([{ type: 'paragraph', content: [], children: [] }]), { resumen: null, num_imagenes: 0 });
+});
+
+test('guarda la descripción, la devuelve en el detalle y deja un resumen en la lista', async (t) => {
+  const { call, data } = await startServer(t);
+  const { pendiente } = await data('POST', '', { texto: 'Con descripción' });
+  const descripcion = JSON.stringify([{ type: 'paragraph', content: [{ type: 'text', text: 'Hay que revisar el túnel' }], children: [] }]);
+  const saved = await data('PATCH', `/${pendiente.id}`, { descripcion });
+  assert.equal(saved.pendiente.resumen, 'Hay que revisar el túnel');
+  assert.equal((await data('GET', `/${pendiente.id}`)).pendiente.descripcion, descripcion);
+  const enLista = (await data('GET')).pendientes[0];
+  assert.equal(enLista.resumen, 'Hay que revisar el túnel');
+  assert.equal('descripcion' in enLista, false);
+  assert.equal((await call('PATCH', `/${pendiente.id}`, { descripcion: '{"no":"es lista"}' })).status, 422);
+  assert.equal((await call('PATCH', `/${pendiente.id}`, { descripcion: 'x'.repeat(450 * 1024) })).status, 422);
+  assert.equal((await call('GET', `/${crypto.randomUUID()}`)).status, 404);
+});
+
+test('sube imágenes, las sirve con contraseña y rechaza lo que no es imagen', async (t) => {
+  const { base, data } = await startServer(t);
+  const { pendiente } = await data('POST', '', { texto: 'Con captura' });
+  const subir = (cuerpo, id = pendiente.id) => fetch(`${base}/api/pendientes/${id}/imagenes`, {
+    method: 'POST', headers: { Authorization: auth, 'Content-Type': 'image/png' }, body: cuerpo,
+  });
+
+  const subida = await subir(PNG);
+  assert.equal(subida.status, 201);
+  const { imagen } = await subida.json();
+  assert.match(imagen.url, /^\/api\/pendientes\/imagenes\/[0-9a-f-]{36}$/);
+
+  const servida = await fetch(`${base}${imagen.url}`, { headers: { Authorization: auth } });
+  assert.equal(servida.status, 200);
+  assert.equal(servida.headers.get('content-type'), 'image/png');
+  assert.equal(servida.headers.get('x-content-type-options'), 'nosniff');
+  assert.deepEqual(Buffer.from(await servida.arrayBuffer()), PNG);
+  assert.equal((await fetch(`${base}${imagen.url}`)).status, 401);
+
+  assert.equal((await subir(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>'))).status, 415);
+  assert.equal((await subir(PNG, crypto.randomUUID())).status, 404);
+  assert.equal((await subir(Buffer.alloc(10 * 1024 * 1024 + 1))).status, 413);
+});
+
+test('borra las imágenes que salen de la descripción, salvo si otra tarjeta las usa', async (t) => {
+  const { base, dataDir, data } = await startServer(t, { graciaImagenesMs: 0 });
+  const subir = async (id) => (await (await fetch(`${base}/api/pendientes/${id}/imagenes`, {
+    method: 'POST', headers: { Authorization: auth }, body: PNG,
+  })).json()).imagen;
+  const conImagenes = (...urls) => JSON.stringify(urls.map((url) => ({ type: 'image', props: { url }, children: [] })));
+  const archivo = (imagen) => path.join(dataDir, 'imagenes', imagen.url.split('/').pop());
+
+  const a = (await data('POST', '', { texto: 'A' })).pendiente;
+  const b = (await data('POST', '', { texto: 'B' })).pendiente;
+  const queda = await subir(a.id);
+  const sale = await subir(a.id);
+  const copiada = await subir(a.id);
+  await data('PATCH', `/${b.id}`, { descripcion: conImagenes(copiada.url) });
+
+  const saved = await data('PATCH', `/${a.id}`, { descripcion: conImagenes(queda.url) });
+  assert.equal(saved.pendiente.num_imagenes, 1);
+  assert.equal(existsSync(archivo(queda)), true);
+  assert.equal(existsSync(archivo(sale)), false);
+  assert.equal(existsSync(archivo(copiada)), true);
+  assert.equal((await fetch(`${base}${sale.url}`, { headers: { Authorization: auth } })).status, 404);
+
+  await data('DELETE', `/${a.id}`);
+  assert.equal(existsSync(archivo(queda)), false);
 });
 
 test('rechaza JSON roto y rutas desconocidas', async (t) => {

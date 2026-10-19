@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* Clases que usa el editor de BlockNote (descripción de cada pendiente) */
+@source "../node_modules/@blocknote/shadcn";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
@@ -130,4 +132,9 @@
   html {
     @apply font-sans;
     }
+}
+/* El editor de la descripción toma los colores del panel en vez de su propio fondo gris. */
+.bn-root.bn-container[data-color-scheme] {
+  --bn-colors-editor-background: transparent;
+  --bn-colors-editor-text: var(--foreground);
 }

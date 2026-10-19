@@ -6,9 +6,16 @@ export type Pendiente = {
   proyecto: string | null
   estado: Estado
   perfil_id: string | null
+  resumen: string | null
+  num_imagenes: number
   creado_en: string
   actualizado_en: string
 }
+
+// Solo el detalle trae la descripción: el documento del editor en JSON.
+export type PendienteDetalle = Pendiente & { descripcion: string | null }
+
+export type CambiosPendiente = Partial<Pick<Pendiente, "texto" | "proyecto" | "estado" | "perfil_id"> & { descripcion: string | null }>
 
 export type Perfil = {
   id: string
@@ -32,7 +39,12 @@ const MENSAJES: Record<string, string> = {
   perfil_invalido: "Ese perfil ya no existe. Recarga la página.",
   nombre_invalido: "Escribe un nombre (máximo 40 caracteres).",
   perfil_duplicado: "Ya hay un perfil con ese nombre.",
+  descripcion_invalida: "La descripción es demasiado larga.",
+  imagen_invalida: "Solo se pueden subir imágenes PNG, JPG, GIF o WebP.",
+  body_too_large: "La imagen pesa más de 10 MB.",
 }
+
+export const MAX_IMAGEN_BYTES = 10 * 1024 * 1024
 
 export class ApiError extends Error {
   code: string
@@ -96,16 +108,54 @@ async function pedir<T>(credenciales: string, method: string, ruta = "", body?: 
   return data as T
 }
 
+async function subirImagen(credenciales: string, pendienteId: string, archivo: File) {
+  if (archivo.size > MAX_IMAGEN_BYTES) throw new ApiError("body_too_large", 413)
+  let response: Response
+  try {
+    response = await fetch(`${BASE}/${pendienteId}/imagenes`, {
+      method: "POST",
+      headers: { Authorization: `Basic ${credenciales}`, "Content-Type": archivo.type || "application/octet-stream" },
+      body: archivo,
+    })
+  } catch {
+    throw new ApiError("sin_conexion", 0)
+  }
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new ApiError(data.error ?? `http_${response.status}`, response.status)
+  return (data as { imagen: { id: string; url: string } }).imagen
+}
+
+// Las imágenes piden contraseña, así que un <img src> directo no sirve: se bajan con fetch y se
+// muestran desde un blob. Cada url es un archivo que nunca cambia, así que se guarda una vez.
+const imagenesEnMemoria = new Map<string, Promise<string>>()
+
+function urlDeImagen(credenciales: string, url: string) {
+  let promesa = imagenesEnMemoria.get(url)
+  if (!promesa) {
+    promesa = fetch(url, { headers: { Authorization: `Basic ${credenciales}` } }).then(async (response) => {
+      if (!response.ok) throw new ApiError(`http_${response.status}`, response.status)
+      return URL.createObjectURL(await response.blob())
+    })
+    promesa.catch(() => imagenesEnMemoria.delete(url))
+    imagenesEnMemoria.set(url, promesa)
+  }
+  return promesa
+}
+
 export const api = {
   listar: (credenciales: string) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "GET").then((data) => data.pendientes),
   crear: (credenciales: string, datos: { texto: string; proyecto: string | null; perfil_id: string | null }) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "POST", "", datos).then((data) => data.pendiente),
-  actualizar: (credenciales: string, id: string, cambios: Partial<Pick<Pendiente, "texto" | "proyecto" | "estado" | "perfil_id">>) =>
+  detalle: (credenciales: string, id: string) =>
+    pedir<{ pendiente: PendienteDetalle }>(credenciales, "GET", `/${id}`).then((data) => data.pendiente),
+  actualizar: (credenciales: string, id: string, cambios: CambiosPendiente) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "PATCH", `/${id}`, cambios).then((data) => data.pendiente),
   borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/${id}`),
   ordenar: (credenciales: string, items: { id: string; estado: Estado }[]) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "PUT", "/orden", { items }).then((data) => data.pendientes),
+  subirImagen,
+  urlDeImagen,
   perfiles: {
     listar: (credenciales: string) =>
       pedir<{ perfiles: Perfil[] }>(credenciales, "GET", "/perfiles").then((data) => data.perfiles),

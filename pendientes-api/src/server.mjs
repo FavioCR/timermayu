@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
+import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -7,9 +8,15 @@ import { fileURLToPath } from 'node:url';
 
 // Alcanza para el orden completo del tablero (hasta 5000 pendientes de ~60 bytes cada uno).
 const MAX_BODY_BYTES = 512 * 1024;
+const MAX_IMAGEN_BYTES = 10 * 1024 * 1024;
 const MAX_TEXTO = 500;
 const MAX_PROYECTO = 60;
 const MAX_NOMBRE = 40;
+const MAX_DESCRIPCION = 400 * 1024;
+const MAX_RESUMEN = 200;
+// Una imagen que ya no aparece en la descripción se borra pasado este tiempo, para no
+// pisar una subida en curso cuyo bloque todavía no llegó a guardarse.
+const GRACIA_IMAGENES_MS = 60 * 60 * 1000;
 const ESTADOS = ['pendiente', 'haciendo', 'hecho'];
 const COLORES = ['#2563EB', '#DB2777', '#059669', '#7C3AED', '#EA580C', '#0891B2', '#CA8A04', '#DC2626'];
 const PERFILES_INICIALES = ['Favio', 'Diego', 'Junior'];
@@ -18,7 +25,9 @@ const ORDER_PATH = '/api/pendientes/orden';
 const PERFILES_PATH = '/api/pendientes/perfiles';
 const ITEM_PATH = /^\/api\/pendientes\/([0-9a-f-]{36})$/;
 const PERFIL_PATH = /^\/api\/pendientes\/perfiles\/([0-9a-f-]{36})$/;
-const SELECT_PENDIENTE = 'SELECT id, texto, proyecto, estado, perfil_id, creado_en, actualizado_en FROM pendientes';
+const SUBIR_IMAGEN_PATH = /^\/api\/pendientes\/([0-9a-f-]{36})\/imagenes$/;
+const IMAGEN_PATH = /^\/api\/pendientes\/imagenes\/([0-9a-f-]{36})$/;
+const COLUMNAS_PENDIENTE = 'id, texto, proyecto, estado, perfil_id, resumen, num_imagenes, creado_en, actualizado_en';
 const SELECT_PERFIL = 'SELECT id, nombre, color, creado_en FROM perfiles';
 
 // Cada función lleva la base de una versión a la siguiente; la versión vive en PRAGMA user_version.
@@ -47,6 +56,22 @@ const MIGRACIONES = [
     const insert = db.prepare('INSERT INTO perfiles (id, nombre, color, creado_en) VALUES (?, ?, ?, ?)');
     PERFILES_INICIALES.forEach((nombre, i) => insert.run(randomUUID(), nombre, COLORES[i], now));
   },
+  // Descripción (documento del editor en JSON) e imágenes pegadas o subidas en ella.
+  (db) => {
+    db.exec(`
+      ALTER TABLE pendientes ADD COLUMN descripcion TEXT;
+      ALTER TABLE pendientes ADD COLUMN resumen TEXT;
+      ALTER TABLE pendientes ADD COLUMN num_imagenes INTEGER NOT NULL DEFAULT 0;
+      CREATE TABLE imagenes (
+        id TEXT PRIMARY KEY,
+        pendiente_id TEXT NOT NULL REFERENCES pendientes(id) ON DELETE CASCADE,
+        tipo TEXT NOT NULL,
+        tamano INTEGER NOT NULL,
+        creado_en TEXT NOT NULL
+      );
+      CREATE INDEX imagenes_pendiente ON imagenes (pendiente_id);
+    `);
+  },
 ];
 
 function json(res, status, body) {
@@ -70,15 +95,19 @@ function httpError(status, message) {
   return Object.assign(new Error(message), { statusCode: status });
 }
 
-async function readJson(req) {
+async function readBody(req, limit) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw httpError(413, 'body_too_large');
+    if (size > limit) throw httpError(413, 'body_too_large');
     chunks.push(chunk);
   }
-  const input = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+  return Buffer.concat(chunks);
+}
+
+async function readJson(req) {
+  const input = JSON.parse((await readBody(req, MAX_BODY_BYTES)).toString('utf8') || '{}');
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw httpError(400, 'invalid_json');
   return input;
 }
@@ -91,6 +120,32 @@ function basicAuth(req, user, password) {
   const separator = decoded.indexOf(':');
   if (separator < 0) return false;
   return safeEqual(decoded.slice(0, separator), user) && safeEqual(decoded.slice(separator + 1), password);
+}
+
+// Se mira el contenido, no el Content-Type: solo formatos de imagen que el navegador no ejecuta (nada de SVG).
+export function tipoDeImagen(buffer) {
+  const ascii = (inicio, fin) => buffer.subarray(inicio, fin).toString('latin1');
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (['GIF87a', 'GIF89a'].includes(ascii(0, 6))) return 'image/gif';
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
+// Texto plano para la vista previa de la tarjeta y cantidad de imágenes del documento del editor.
+export function resumirDescripcion(bloques) {
+  const textos = [];
+  let imagenes = 0;
+  const visitar = (nodo) => {
+    if (Array.isArray(nodo)) return nodo.forEach(visitar);
+    if (!nodo || typeof nodo !== 'object') return;
+    if (nodo.type === 'image' && nodo.props?.url) imagenes++;
+    if (typeof nodo.text === 'string') textos.push(nodo.text);
+    for (const hijo of [nodo.content, nodo.children, nodo.rows, nodo.cells]) visitar(hijo);
+  };
+  visitar(bloques);
+  const resumen = textos.join(' ').replace(/\s+/g, ' ').trim().slice(0, MAX_RESUMEN);
+  return { resumen: resumen || null, num_imagenes: imagenes };
 }
 
 export function parsePendiente(input, { partial = false } = {}) {
@@ -113,6 +168,15 @@ export function parsePendiente(input, { partial = false } = {}) {
   if ('perfil_id' in input) {
     if (input.perfil_id !== null && typeof input.perfil_id !== 'string') throw httpError(422, 'perfil_invalido');
     changes.perfil_id = input.perfil_id || null;
+  }
+  if (partial && 'descripcion' in input) {
+    if (input.descripcion !== null) {
+      if (typeof input.descripcion !== 'string' || input.descripcion.length > MAX_DESCRIPCION) throw httpError(422, 'descripcion_invalida');
+      let bloques;
+      try { bloques = JSON.parse(input.descripcion); } catch { throw httpError(422, 'descripcion_invalida'); }
+      if (!Array.isArray(bloques)) throw httpError(422, 'descripcion_invalida');
+    }
+    changes.descripcion = input.descripcion;
   }
   return changes;
 }
@@ -162,7 +226,7 @@ function importarJson(db, dataDir) {
 }
 
 export function openDb(dataDir) {
-  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(path.join(dataDir, 'imagenes'), { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'pendientes.db'));
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   const { user_version: version } = db.prepare('PRAGMA user_version').get();
@@ -176,16 +240,38 @@ export function openDb(dataDir) {
   return db;
 }
 
-function createRepo(db) {
-  const pendiente = (id) => fila(db.prepare(`${SELECT_PENDIENTE} WHERE id = ?`).get(id));
+function createRepo(db, dataDir, graciaImagenesMs) {
+  const archivoDeImagen = (id) => path.join(dataDir, 'imagenes', id);
+  const pendiente = (id) => fila(db.prepare(`SELECT ${COLUMNAS_PENDIENTE} FROM pendientes WHERE id = ?`).get(id));
   const perfil = (id) => fila(db.prepare(`${SELECT_PERFIL} WHERE id = ?`).get(id));
 
   function verificarPerfil(perfilId) {
     if (perfilId && !perfil(perfilId)) throw httpError(422, 'perfil_invalido');
   }
 
+  async function borrarArchivos(ids) {
+    await Promise.all(ids.map((id) => unlink(archivoDeImagen(id)).catch((error) => {
+      if (error.code !== 'ENOENT') throw error;
+    })));
+  }
+
+  // Imágenes del pendiente que pasaron el tiempo de gracia y ya no aparecen en ninguna descripción
+  // (un bloque copiado a otra tarjeta sigue usando el mismo archivo).
+  async function limpiarImagenes(pendienteId) {
+    const limite = new Date(Date.now() - graciaImagenesMs).toISOString();
+    const enUso = db.prepare('SELECT 1 FROM pendientes WHERE instr(descripcion, ?) > 0 LIMIT 1');
+    const sobrantes = db.prepare('SELECT id FROM imagenes WHERE pendiente_id = ? AND creado_en <= ?').all(pendienteId, limite)
+      .map((row) => row.id)
+      .filter((id) => !enUso.get(`${API_PATH}/imagenes/${id}`));
+    const borrar = db.prepare('DELETE FROM imagenes WHERE id = ?');
+    for (const id of sobrantes) borrar.run(id);
+    await borrarArchivos(sobrantes);
+  }
+
   return {
-    listarPendientes: () => db.prepare(`${SELECT_PENDIENTE} ORDER BY posicion, creado_en DESC`).all().map(fila),
+    listarPendientes: () => db.prepare(`SELECT ${COLUMNAS_PENDIENTE} FROM pendientes ORDER BY posicion, creado_en DESC`).all().map(fila),
+
+    detallePendiente: (id) => fila(db.prepare(`SELECT ${COLUMNAS_PENDIENTE}, descripcion FROM pendientes WHERE id = ?`).get(id)),
 
     crearPendiente(changes) {
       verificarPerfil(changes.perfil_id);
@@ -199,17 +285,30 @@ function createRepo(db) {
       return pendiente(id);
     },
 
-    actualizarPendiente(id, changes) {
+    async actualizarPendiente(id, changes) {
       if (!pendiente(id)) return null;
       verificarPerfil(changes.perfil_id);
-      // Las columnas salen de parsePendiente, que solo deja pasar campos conocidos.
-      const campos = Object.keys(changes);
+      const columnas = { ...changes };
+      if ('descripcion' in changes) {
+        Object.assign(columnas, changes.descripcion === null
+          ? { resumen: null, num_imagenes: 0 }
+          : resumirDescripcion(JSON.parse(changes.descripcion)));
+      }
+      // Las columnas salen de parsePendiente y resumirDescripcion, que solo producen campos conocidos.
+      const campos = Object.keys(columnas);
       db.prepare(`UPDATE pendientes SET ${[...campos.map((campo) => `${campo} = ?`), 'actualizado_en = ?'].join(', ')} WHERE id = ?`)
-        .run(...campos.map((campo) => changes[campo]), new Date().toISOString(), id);
+        .run(...campos.map((campo) => columnas[campo]), new Date().toISOString(), id);
+      if ('descripcion' in changes) await limpiarImagenes(id);
       return pendiente(id);
     },
 
-    borrarPendiente: (id) => db.prepare('DELETE FROM pendientes WHERE id = ?').run(id).changes > 0,
+    async borrarPendiente(id) {
+      const imagenes = db.prepare('SELECT id FROM imagenes WHERE pendiente_id = ?').all(id).map((row) => row.id);
+      // ON DELETE CASCADE quita sus filas de imagenes; los archivos se borran aparte.
+      const borrado = db.prepare('DELETE FROM pendientes WHERE id = ?').run(id).changes > 0;
+      if (borrado) await borrarArchivos(imagenes);
+      return borrado;
+    },
 
     ordenar(orden) {
       const now = new Date().toISOString();
@@ -224,6 +323,30 @@ function createRepo(db) {
           UPDATE pendientes SET posicion = (SELECT n FROM r WHERE r.id = pendientes.id)`);
       });
       return this.listarPendientes();
+    },
+
+    async guardarImagen(pendienteId, contenido) {
+      if (!pendiente(pendienteId)) return null;
+      const tipo = tipoDeImagen(contenido);
+      if (!tipo) throw httpError(415, 'imagen_invalida');
+      const id = randomUUID();
+      const destino = archivoDeImagen(id);
+      await writeFile(`${destino}.tmp`, contenido, { mode: 0o600 });
+      await rename(`${destino}.tmp`, destino);
+      db.prepare('INSERT INTO imagenes (id, pendiente_id, tipo, tamano, creado_en) VALUES (?, ?, ?, ?, ?)')
+        .run(id, pendienteId, tipo, contenido.length, new Date().toISOString());
+      return { id, url: `${API_PATH}/imagenes/${id}` };
+    },
+
+    async leerImagen(id) {
+      const imagen = fila(db.prepare('SELECT id, tipo FROM imagenes WHERE id = ?').get(id));
+      if (!imagen) return null;
+      try {
+        return { tipo: imagen.tipo, contenido: await readFile(archivoDeImagen(id)) };
+      } catch (error) {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      }
     },
 
     listarPerfiles: () => db.prepare(`${SELECT_PERFIL} ORDER BY creado_en, rowid`).all().map(fila),
@@ -247,7 +370,7 @@ export function createApp(options = {}) {
   const authUser = options.authUser || process.env.AUTH_USER || 'pendientes';
   const authPassword = options.authPassword ?? process.env.AUTH_PASSWORD ?? '';
   const db = openDb(dataDir);
-  const repo = createRepo(db);
+  const repo = createRepo(db, dataDir, options.graciaImagenesMs ?? GRACIA_IMAGENES_MS);
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
@@ -256,7 +379,8 @@ export function createApp(options = {}) {
         return json(res, 200, { ok: true, service: 'timermayu-pendientes-api', configured: Boolean(authPassword) });
       }
 
-      const known = [API_PATH, ORDER_PATH, PERFILES_PATH].includes(url.pathname) || ITEM_PATH.test(url.pathname) || PERFIL_PATH.test(url.pathname);
+      const known = [API_PATH, ORDER_PATH, PERFILES_PATH].includes(url.pathname)
+        || [ITEM_PATH, PERFIL_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH].some((ruta) => ruta.test(url.pathname));
       if (!known) return json(res, 404, { error: 'not_found' });
 
       // Sin contraseña configurada no se abre a nadie. No se manda WWW-Authenticate para que
@@ -290,15 +414,41 @@ export function createApp(options = {}) {
         return repo.borrarPerfil(perfilId) ? json(res, 200, { ok: true }) : json(res, 404, { error: 'not_found' });
       }
 
+      const pendienteDeImagen = url.pathname.match(SUBIR_IMAGEN_PATH)?.[1];
+      if (pendienteDeImagen && req.method === 'POST') {
+        const imagen = await repo.guardarImagen(pendienteDeImagen, await readBody(req, MAX_IMAGEN_BYTES));
+        return imagen ? json(res, 201, { imagen }) : json(res, 404, { error: 'not_found' });
+      }
+
+      const imagenId = url.pathname.match(IMAGEN_PATH)?.[1];
+      if (imagenId && req.method === 'GET') {
+        const imagen = await repo.leerImagen(imagenId);
+        if (!imagen) return json(res, 404, { error: 'not_found' });
+        res.writeHead(200, {
+          'Content-Type': imagen.tipo,
+          'Content-Length': imagen.contenido.length,
+          // Cada id es un archivo distinto que nunca cambia.
+          'Cache-Control': 'private, max-age=31536000, immutable',
+          'Content-Disposition': 'inline',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        return res.end(imagen.contenido);
+      }
+
       const id = url.pathname.match(ITEM_PATH)?.[1];
 
+      if (id && req.method === 'GET') {
+        const pendiente = repo.detallePendiente(id);
+        return pendiente ? json(res, 200, { pendiente }) : json(res, 404, { error: 'not_found' });
+      }
+
       if (id && req.method === 'PATCH') {
-        const pendiente = repo.actualizarPendiente(id, parsePendiente(await readJson(req), { partial: true }));
+        const pendiente = await repo.actualizarPendiente(id, parsePendiente(await readJson(req), { partial: true }));
         return pendiente ? json(res, 200, { pendiente }) : json(res, 404, { error: 'not_found' });
       }
 
       if (id && req.method === 'DELETE') {
-        return repo.borrarPendiente(id) ? json(res, 200, { ok: true }) : json(res, 404, { error: 'not_found' });
+        return (await repo.borrarPendiente(id)) ? json(res, 200, { ok: true }) : json(res, 404, { error: 'not_found' });
       }
 
       return json(res, 405, { error: 'method_not_allowed' });
