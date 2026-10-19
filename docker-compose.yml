@@ -8,6 +8,36 @@ services:
     networks:
       - nginx_gateway_network
 
+  # Tablero de pendientes en /pendientes/ (web) y /api/pendientes (api)
+  pendientes_web:
+    build:
+      context: ./pendientes-web
+      dockerfile: Dockerfile
+    container_name: timermayu_pendientes_web_prod
+    restart: unless-stopped
+    networks:
+      - nginx_gateway_network
+
+  pendientes_api:
+    build:
+      context: ./pendientes-api
+      dockerfile: Dockerfile
+    container_name: timermayu_pendientes_api_prod
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      DATA_DIR: /data
+      AUTH_USER: ${PENDIENTES_USER:-pendientes}
+      # Sin contraseña el API arranca pero rechaza todo; así no tumba al resto del compose.
+      AUTH_PASSWORD: ${PENDIENTES_PASSWORD:-}
+    volumes:
+      - pendientes_data:/data
+    networks:
+      - nginx_gateway_network
+
 networks:
   nginx_gateway_network:
     external: true
+
+volumes:
+  pendientes_data:
