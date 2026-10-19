@@ -1,6 +1,38 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent, type ReactNode, type SyntheticEvent } from "react"
-import { ImageIcon, LogOut, Plus, Timer, Trash2 } from "lucide-react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type MouseEvent,
+  type ReactNode,
+  type SyntheticEvent,
+} from "react"
+import {
+  CircleCheck,
+  CircleDashed,
+  ClipboardList,
+  Folder,
+  FolderOpen,
+  ImageIcon,
+  Inbox,
+  Keyboard,
+  Layers,
+  LogOut,
+  MoreVertical,
+  Plus,
+  RotateCw,
+  Search,
+  Timer,
+  Trash2,
+  X,
+} from "lucide-react"
+import { cn } from "cn"
 
+import { DetallePendiente } from "@/components/detalle-pendiente"
+import { IlustracionColumna } from "@/components/ilustraciones"
 import {
   KanbanBoard,
   KanbanCard,
@@ -8,24 +40,44 @@ import {
   KanbanHeader,
   KanbanProvider,
 } from "@/components/kibo-ui/kanban"
-import { DetallePendiente } from "@/components/detalle-pendiente"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { PerfilesDialog } from "@/components/perfiles-dialog"
+import { ProyectoCombobox } from "@/components/proyecto-combobox"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Input } from "@/components/ui/input"
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "@/components/ui/input-group"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api, esNoAutorizado, mensajeDeError, type CambiosPendiente, type Estado, type Pendiente, type Perfil } from "@/lib/api"
 import { COLUMNAS, NADIE } from "@/lib/estados"
+
+const ICONOS: Record<Estado, typeof Inbox> = { pendiente: Inbox, haciendo: RotateCw, hecho: CircleCheck }
+
+const VACIO: Record<Estado, string> = {
+  pendiente: "Agrega una tarea o arrastra una tarjeta a esta columna.",
+  haciendo: "Arrastra una tarjeta o crea una nueva tarea para empezar.",
+  hecho: "Las tareas completadas aparecerán aquí automáticamente.",
+}
 
 const fecha = new Intl.DateTimeFormat("es", { day: "numeric", month: "short" })
 
@@ -60,11 +112,23 @@ const noArrastrar = { onMouseDown: detener, onTouchStart: detener, onKeyDown: de
 const esClicEnLaTarjeta = (event: MouseEvent<HTMLElement>) =>
   event.currentTarget.contains(event.target as Node) && !(event.target as HTMLElement).closest("button, a, input")
 
+function Contador({ valor }: { valor: number }) {
+  return <span className="rounded-md bg-muted px-1.5 py-0.5 text-xs leading-none tabular-nums text-muted-foreground">{valor}</span>
+}
+
 function Filtro({ activo, onClick, children }: { activo: boolean; onClick: () => void; children: ReactNode }) {
   return (
-    <Button size="xs" variant={activo ? "default" : "outline"} aria-pressed={activo} onClick={onClick}>
+    <button
+      type="button"
+      aria-pressed={activo}
+      onClick={onClick}
+      className={cn(
+        "inline-flex h-10 items-center gap-2 rounded-lg border bg-card px-3.5 text-sm font-medium transition-colors outline-none hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50 [&_svg]:size-4 [&_svg]:shrink-0",
+        activo && "border-primary bg-primary/25 ring-3 ring-primary/25 hover:bg-primary/30"
+      )}
+    >
       {children}
-    </Button>
+    </button>
   )
 }
 
@@ -76,12 +140,18 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
   const [filtroProyecto, setFiltroProyecto] = useState<string | null>(null)
   const [filtroPerfil, setFiltroPerfil] = useState<string | null>(null)
   const [texto, setTexto] = useState("")
-  const [proyecto, setProyecto] = useState("")
+  const [proyecto, setProyecto] = useState<string | null>(null)
   const [responsable, setResponsable] = useState(NADIE)
+  // Columna donde cae lo que se agrega; se elige desde el menú de cada columna.
+  const [destino, setDestino] = useState<Estado>("pendiente")
   const [abierto, setAbierto] = useState<string | null>(null)
+  const [confirmarLimpieza, setConfirmarLimpieza] = useState(false)
   const ultimas = useRef<Tarjeta[]>([])
   const ordenAlEmpezar = useRef("")
   const arrastrando = useRef(false)
+  const campoTexto = useRef<HTMLInputElement>(null)
+  // Lo que toca hacer cuando el menú de una columna termina de cerrarse (en vez de devolver el foco a su botón).
+  const alCerrarMenu = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     ultimas.current = tarjetas
@@ -142,19 +212,28 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
 
   const abiertos = tarjetas.filter((tarjeta) => tarjeta.column !== "hecho").length
 
+  const hechosVisibles = visibles.filter((tarjeta) => tarjeta.column === "hecho")
+
   const pendienteAbierto = tarjetas.find((tarjeta) => tarjeta.id === abierto) ?? null
+
+  const columnaDestino = COLUMNAS.find((columna) => columna.id === destino)
 
   async function agregar(event: FormEvent) {
     event.preventDefault()
-    if (!texto.trim()) return
+    if (!texto.trim()) {
+      campoTexto.current?.focus()
+      return
+    }
     try {
       const nuevo = await api.crear(credenciales, {
         texto,
-        proyecto: proyecto.trim() || null,
+        proyecto,
+        estado: destino,
         perfil_id: responsable === NADIE ? null : responsable,
       })
       setTarjetas((actuales) => [aTarjeta(nuevo), ...actuales])
       setTexto("")
+      setDestino("pendiente")
       setError("")
     } catch (err) {
       fallar(err)
@@ -186,6 +265,19 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
     setTarjetas((actuales) => actuales.filter((t) => t.id !== tarjeta.id))
     try {
       await api.borrar(credenciales, tarjeta.id)
+    } catch (err) {
+      fallar(err)
+      recargar()
+    }
+  }
+
+  // Borra los hechos que se ven (con un filtro activo, solo los de ese filtro).
+  async function borrarHechos() {
+    const ids = new Set(hechosVisibles.map((tarjeta) => tarjeta.id))
+    if (abierto && ids.has(abierto)) setAbierto(null)
+    setTarjetas((actuales) => actuales.filter((t) => !ids.has(t.id)))
+    try {
+      await Promise.all([...ids].map((id) => api.borrar(credenciales, id)))
     } catch (err) {
       fallar(err)
       recargar()
@@ -246,53 +338,59 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
   return (
     <div className="min-h-svh bg-background text-foreground">
       <header className="border-b">
-        <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-3 md:px-6">
-          <h1 className="text-base font-semibold">Pendientes</h1>
+        <div className="mx-auto flex max-w-[100rem] items-center gap-3 px-4 py-4 md:px-6 lg:px-10">
+          <span className="mr-1 flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-[0_0_22px_-2px] shadow-primary/60">
+            <ClipboardList className="size-5" />
+          </span>
+          <h1 className="text-2xl font-bold tracking-tight">Pendientes</h1>
           {!cargando && (
-            <span className="text-sm text-muted-foreground">
+            <span className="hidden rounded-full bg-muted px-3 py-1 text-sm text-muted-foreground min-[400px]:inline">
               {abiertos} {abiertos === 1 ? "abierto" : "abiertos"}
             </span>
           )}
           <div className="ml-auto flex items-center gap-1">
             <PerfilesDialog perfiles={perfiles} asignados={asignados} onCrear={crearPerfil} onBorrar={borrarPerfil} />
-            <Button asChild variant="ghost" size="sm">
+            <Button asChild variant="ghost">
               <a href="/" aria-label="Timer">
                 <Timer /> <span className="hidden sm:inline">Timer</span>
               </a>
             </Button>
-            <Button variant="ghost" size="sm" onClick={onSalir} aria-label="Salir">
+            <Button variant="ghost" onClick={onSalir} aria-label="Salir">
               <LogOut /> <span className="hidden sm:inline">Salir</span>
             </Button>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 md:px-6 md:py-6">
-        <form onSubmit={agregar} className="flex flex-col gap-2 sm:flex-row">
-          <Input
-            aria-label="Nuevo pendiente"
-            placeholder="¿Qué falta hacer?"
-            value={texto}
-            onChange={(event) => setTexto(event.target.value)}
-            maxLength={500}
-            className="sm:flex-1"
-          />
-          <Input
-            aria-label="Proyecto"
-            placeholder="Proyecto"
-            list="proyectos-sugeridos"
-            value={proyecto}
-            onChange={(event) => setProyecto(event.target.value)}
-            maxLength={60}
-            className="sm:w-40"
-          />
-          <datalist id="proyectos-sugeridos">
-            {sugerencias.map((nombre) => (
-              <option key={nombre} value={nombre} />
-            ))}
-          </datalist>
+      <main className="mx-auto flex max-w-[100rem] flex-col gap-5 px-4 py-5 md:px-6 md:py-6 lg:px-10">
+        <form onSubmit={agregar} className="flex flex-col gap-3 sm:flex-row">
+          <InputGroup className="h-11 sm:flex-1">
+            <InputGroupAddon className="pl-3">
+              <Search />
+            </InputGroupAddon>
+            <InputGroupInput
+              ref={campoTexto}
+              aria-label="Nuevo pendiente"
+              placeholder="¿Qué falta hacer?"
+              value={texto}
+              onChange={(event) => setTexto(event.target.value)}
+              maxLength={500}
+            />
+            {destino !== "pendiente" && columnaDestino && (
+              <InputGroupAddon align="inline-end">
+                <span className="flex items-center gap-1.5 rounded-md bg-muted py-0.5 pr-0.5 pl-2 text-xs font-normal text-foreground">
+                  <span className="size-2 rounded-full" style={{ backgroundColor: columnaDestino.color }} />
+                  en {columnaDestino.name}
+                  <InputGroupButton size="icon-xs" aria-label="Agregar en Por hacer" onClick={() => setDestino("pendiente")}>
+                    <X />
+                  </InputGroupButton>
+                </span>
+              </InputGroupAddon>
+            )}
+          </InputGroup>
+          <ProyectoCombobox valor={proyecto} onCambiar={setProyecto} sugerencias={sugerencias} className="h-11 w-full sm:w-52" />
           <Select value={responsable} onValueChange={setResponsable}>
-            <SelectTrigger aria-label="Responsable" className="w-full sm:w-40">
+            <SelectTrigger aria-label="Responsable" className="w-full px-3 data-[size=default]:h-11 sm:w-48">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -306,17 +404,17 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
               </SelectItem>
             </SelectContent>
           </Select>
-          <Button type="submit" disabled={!texto.trim()}>
+          <Button type="submit" className="h-11 px-5">
             <Plus /> Agregar
           </Button>
         </form>
 
         {(perfiles.length > 0 || proyectos.length > 0) && (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2.5">
             {perfiles.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filtrar por persona">
+              <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por persona">
                 <Filtro activo={filtroPerfil === null} onClick={() => setFiltroPerfil(null)}>
-                  Todos
+                  <Layers /> Todos
                 </Filtro>
                 {[...perfiles, null].map((perfil) => {
                   const clave = perfil?.id ?? NADIE
@@ -326,17 +424,21 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
                       activo={filtroPerfil === clave}
                       onClick={() => setFiltroPerfil(filtroPerfil === clave ? null : clave)}
                     >
-                      <span className="size-2 rounded-full" style={{ backgroundColor: perfil?.color ?? "transparent", border: perfil ? undefined : "1px dashed currentColor" }} />
-                      {perfil?.nombre ?? "Sin asignar"} <span className="opacity-60">{asignados.get(clave) ?? 0}</span>
+                      {perfil ? (
+                        <span className="size-2.5 rounded-full" style={{ backgroundColor: perfil.color }} />
+                      ) : (
+                        <CircleDashed className="text-muted-foreground" />
+                      )}
+                      {perfil?.nombre ?? "Sin asignar"} <Contador valor={asignados.get(clave) ?? 0} />
                     </Filtro>
                   )
                 })}
               </div>
             )}
             {proyectos.length > 0 && (
-              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filtrar por proyecto">
+              <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por proyecto">
                 <Filtro activo={filtroProyecto === null} onClick={() => setFiltroProyecto(null)}>
-                  Todos los proyectos
+                  <FolderOpen /> Todos los proyectos
                 </Filtro>
                 {proyectos.map(([nombre, cantidad]) => (
                   <Filtro
@@ -344,7 +446,7 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
                     activo={filtroProyecto === nombre}
                     onClick={() => setFiltroProyecto(filtroProyecto === nombre ? null : nombre)}
                   >
-                    {nombre} <span className="opacity-60">{cantidad}</span>
+                    <Folder className="text-muted-foreground" /> {nombre} <Contador valor={cantidad} />
                   </Filtro>
                 ))}
               </div>
@@ -363,7 +465,7 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
         ) : (
           <div className="overflow-x-auto pb-2">
             <KanbanProvider
-              className="min-w-[48rem] md:min-w-0"
+              className="min-w-[56rem] gap-5 md:min-w-0"
               columns={COLUMNAS}
               data={visibles}
               onDataChange={cambiarTablero}
@@ -372,20 +474,75 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
             >
               {(columna) => {
                 const cantidad = visibles.filter((tarjeta) => tarjeta.column === columna.id).length
+                const Icono = ICONOS[columna.id]
                 return (
-                  <KanbanBoard id={columna.id} key={columna.id}>
-                    <KanbanHeader>
-                      <div className="flex items-center gap-2">
-                        <span className="size-2 rounded-full" style={{ backgroundColor: columna.color }} />
-                        <span>{columna.name}</span>
-                        <span className="ml-auto font-normal text-muted-foreground">{cantidad}</span>
-                      </div>
+                  <KanbanBoard
+                    id={columna.id}
+                    key={columna.id}
+                    // Cada columna se tiñe con su color: el fondo apenas, el encabezado un poco más.
+                    style={{ "--tono": columna.color } as CSSProperties}
+                    className="min-h-[28rem] divide-y-0 rounded-xl border-[color-mix(in_oklab,var(--tono)_20%,var(--color-border))] bg-[color-mix(in_oklab,var(--tono)_4%,var(--color-columna))] text-sm shadow-none"
+                  >
+                    <KanbanHeader className="flex items-center gap-2.5 bg-[color-mix(in_oklab,var(--tono)_10%,transparent)] py-3 pr-2 pl-4">
+                      <span className="size-2.5 shrink-0 rounded-full bg-(--tono)" />
+                      <Icono className="size-4.5 shrink-0 text-foreground/80" />
+                      <h2 className="text-sm font-semibold">{columna.name}</h2>
+                      <span className="ml-auto rounded-md bg-background/60 px-2 py-0.5 text-xs tabular-nums text-muted-foreground">
+                        {cantidad}
+                      </span>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon-sm" className="text-muted-foreground" aria-label={`Opciones de ${columna.name}`}>
+                            <MoreVertical />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="end"
+                          className="min-w-52"
+                          onCloseAutoFocus={(event) => {
+                            const despues = alCerrarMenu.current
+                            if (!despues) return
+                            event.preventDefault()
+                            alCerrarMenu.current = null
+                            despues()
+                          }}
+                        >
+                          <DropdownMenuItem
+                            onSelect={() => {
+                              setDestino(columna.id)
+                              alCerrarMenu.current = () => campoTexto.current?.focus()
+                            }}
+                          >
+                            <Plus /> Agregar pendiente aquí
+                          </DropdownMenuItem>
+                          {columna.id === "hecho" && (
+                            <>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                variant="destructive"
+                                disabled={cantidad === 0}
+                                onSelect={() => {
+                                  alCerrarMenu.current = () => setConfirmarLimpieza(true)
+                                }}
+                              >
+                                <Trash2 /> {cantidad === 1 ? "Borrar el hecho" : `Borrar los ${cantidad} hechos`}
+                              </DropdownMenuItem>
+                            </>
+                          )}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </KanbanHeader>
-                    <KanbanCards id={columna.id}>
+                    <KanbanCards id={columna.id} className={cantidad === 0 ? "p-0" : "gap-2.5 p-3"}>
                       {(tarjeta: Tarjeta) => {
                         const perfil = tarjeta.perfil_id ? perfilesPorId.get(tarjeta.perfil_id) : null
                         return (
-                          <KanbanCard column={columna.id} id={tarjeta.id} key={tarjeta.id} name={tarjeta.name}>
+                          <KanbanCard
+                            column={columna.id}
+                            id={tarjeta.id}
+                            key={tarjeta.id}
+                            name={tarjeta.name}
+                            className="rounded-lg ring-border transition-shadow hover:ring-primary/50"
+                          >
                             <div
                               className="flex flex-col gap-2"
                               onClick={(event) => !arrastrando.current && esClicEnLaTarjeta(event) && setAbierto(tarjeta.id)}
@@ -416,7 +573,11 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
                                 <p className="m-0 line-clamp-2 text-xs text-muted-foreground">{tarjeta.resumen}</p>
                               )}
                               <div className="flex items-center gap-2">
-                                {tarjeta.proyecto && <Badge variant="secondary">{tarjeta.proyecto}</Badge>}
+                                {tarjeta.proyecto && (
+                                  <Badge variant="secondary" className="gap-1">
+                                    <Folder className="size-3" /> {tarjeta.proyecto}
+                                  </Badge>
+                                )}
                                 {tarjeta.num_imagenes > 0 && (
                                   <span
                                     className="flex items-center gap-1 text-xs text-muted-foreground"
@@ -463,7 +624,17 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
                         )
                       }}
                     </KanbanCards>
-                    {cantidad === 0 && <p className="m-0 px-3 pb-3 text-muted-foreground">Nada por aquí</p>}
+                    {cantidad === 0 && (
+                      <Empty className="m-3 w-auto gap-3 border border-[color-mix(in_oklab,var(--tono)_22%,var(--color-border))] p-6">
+                        <EmptyHeader>
+                          <EmptyMedia>
+                            <IlustracionColumna estado={columna.id} />
+                          </EmptyMedia>
+                          <EmptyTitle className="text-lg font-semibold">Nada por aquí</EmptyTitle>
+                          <EmptyDescription className="max-w-64 text-sm">{VACIO[columna.id]}</EmptyDescription>
+                        </EmptyHeader>
+                      </Empty>
+                    )}
                   </KanbanBoard>
                 )
               }}
@@ -471,10 +642,28 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
           </div>
         )}
 
-        <p className="text-xs text-muted-foreground">
+        <p className="m-0 flex items-center gap-4 rounded-xl border border-dashed px-5 py-4 text-sm text-muted-foreground">
+          <Keyboard className="size-6 shrink-0" />
           Arrastra las tarjetas entre columnas. Toca una tarjeta para abrir su detalle: descripción e imágenes (también se pegan con Ctrl+V o ⌘V).
         </p>
       </main>
+
+      <AlertDialog open={confirmarLimpieza} onOpenChange={setConfirmarLimpieza}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {hechosVisibles.length === 1 ? "¿Borrar el pendiente hecho?" : `¿Borrar los ${hechosVisibles.length} pendientes hechos?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription>También se borran sus descripciones e imágenes. No se puede deshacer.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={borrarHechos}>
+              Sí, borrar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <DetallePendiente
         credenciales={credenciales}

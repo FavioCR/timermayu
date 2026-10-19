@@ -3,8 +3,8 @@ import { Trash2 } from "lucide-react"
 
 import type { DocumentoDescripcion } from "@/components/editor-descripcion"
 import { PerfilAvatar } from "@/components/perfil-avatar"
+import { ProyectoCombobox } from "@/components/proyecto-combobox"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Textarea } from "@/components/ui/textarea"
@@ -143,11 +143,9 @@ function Contenido({
     return url.startsWith("/api/pendientes/imagenes/") ? api.urlDeImagen(credenciales, url) : Promise.resolve(url)
   }
 
-  function guardarCampo(campo: "texto" | "proyecto", valor: string) {
+  function guardarTitulo(valor: string) {
     const limpio = valor.trim()
-    const actual = (campo === "texto" ? pendiente.texto : pendiente.proyecto) ?? ""
-    if (limpio === actual || (campo === "texto" && !limpio)) return
-    onCambiar(id, { [campo]: limpio || null })
+    if (limpio && limpio !== pendiente.texto) onCambiar(id, { texto: limpio })
   }
 
   const estadoGuardado = guardando ? "Guardando…" : guardado ? "Guardado" : ""
@@ -169,7 +167,7 @@ function Contenido({
               event.currentTarget.blur()
             }
           }}
-          onBlur={(event) => guardarCampo("texto", event.currentTarget.value.replace(/\s+/g, " "))}
+          onBlur={(event) => guardarTitulo(event.currentTarget.value.replace(/\s+/g, " "))}
         />
         <SheetDescription>
           Creado el {fechaLarga.format(new Date(pendiente.creado_en))}
@@ -219,21 +217,13 @@ function Contenido({
 
           <dt className="text-muted-foreground">Proyecto</dt>
           <dd>
-            <Input
-              aria-label="Proyecto del pendiente"
-              placeholder="Sin proyecto"
-              list="proyectos-detalle"
-              defaultValue={pendiente.proyecto ?? ""}
-              maxLength={60}
+            <ProyectoCombobox
+              etiqueta="Proyecto del pendiente"
+              valor={pendiente.proyecto}
+              onCambiar={(proyecto) => onCambiar(id, { proyecto })}
+              sugerencias={sugerencias}
               className="h-8 w-full sm:w-56"
-              onKeyDown={(event) => event.key === "Enter" && event.currentTarget.blur()}
-              onBlur={(event) => guardarCampo("proyecto", event.currentTarget.value)}
             />
-            <datalist id="proyectos-detalle">
-              {sugerencias.map((nombre) => (
-                <option key={nombre} value={nombre} />
-              ))}
-            </datalist>
           </dd>
         </dl>
 

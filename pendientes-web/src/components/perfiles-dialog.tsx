@@ -60,7 +60,7 @@ export function PerfilesDialog({
       }}
     >
       <DialogTrigger asChild>
-        <Button variant="ghost" size="sm" aria-label="Perfiles">
+        <Button variant="ghost" aria-label="Perfiles">
           <Users /> <span className="hidden sm:inline">Perfiles</span>
         </Button>
       </DialogTrigger>

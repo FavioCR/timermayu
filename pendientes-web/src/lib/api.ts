@@ -145,7 +145,7 @@ function urlDeImagen(credenciales: string, url: string) {
 export const api = {
   listar: (credenciales: string) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "GET").then((data) => data.pendientes),
-  crear: (credenciales: string, datos: { texto: string; proyecto: string | null; perfil_id: string | null }) =>
+  crear: (credenciales: string, datos: { texto: string; proyecto: string | null; estado?: Estado; perfil_id: string | null }) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "POST", "", datos).then((data) => data.pendiente),
   detalle: (credenciales: string, id: string) =>
     pedir<{ pendiente: PendienteDetalle }>(credenciales, "GET", `/${id}`).then((data) => data.pendiente),

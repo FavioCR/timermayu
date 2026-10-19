@@ -22,6 +22,7 @@ import { arrayMove, SortableContext, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
   createContext,
+  type CSSProperties,
   type HTMLAttributes,
   type ReactNode,
   useContext,
@@ -67,9 +68,10 @@ export type KanbanBoardProps = {
   id: string;
   children: ReactNode;
   className?: string;
+  style?: CSSProperties;
 };
 
-export const KanbanBoard = ({ id, children, className }: KanbanBoardProps) => {
+export const KanbanBoard = ({ id, children, className, style }: KanbanBoardProps) => {
   const { isOver, setNodeRef } = useDroppable({
     id,
   });
@@ -82,6 +84,7 @@ export const KanbanBoard = ({ id, children, className }: KanbanBoardProps) => {
         className
       )}
       ref={setNodeRef}
+      style={style}
     >
       {children}
     </div>
