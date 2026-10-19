@@ -4,7 +4,8 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const MAX_BODY_BYTES = 16 * 1024;
+// Alcanza para el orden completo del tablero (hasta 5000 pendientes de ~60 bytes cada uno).
+const MAX_BODY_BYTES = 512 * 1024;
 const MAX_TEXTO = 500;
 const MAX_PROYECTO = 60;
 const ESTADOS = ['pendiente', 'haciendo', 'hecho'];

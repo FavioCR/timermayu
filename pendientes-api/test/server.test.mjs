@@ -96,6 +96,12 @@ test('guarda el orden del tablero por la API', async (t) => {
   assert.deepEqual(pendientes.map((item) => [item.texto, item.estado]), [['Primero', 'hecho'], ['Segundo', 'pendiente']]);
 });
 
+test('acepta el orden de un tablero grande', async (t) => {
+  const { call } = await startServer(t);
+  const items = Array.from({ length: 5000 }, () => ({ id: crypto.randomUUID(), estado: 'hecho' }));
+  assert.equal((await call('PUT', '/orden', { items })).status, 200);
+});
+
 test('rechaza JSON roto y rutas desconocidas', async (t) => {
   const { base, call } = await startServer(t);
   const broken = await fetch(`${base}/api/pendientes`, { method: 'POST', headers: { Authorization: auth, 'Content-Type': 'application/json' }, body: '{' });
