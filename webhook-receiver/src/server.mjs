@@ -96,7 +96,7 @@ $('secret-form').addEventListener('submit', async (e) => {
   e.preventDefault(); $('secret-result').textContent = 'guardando…';
   const response = await fetch('/debug/webhooks/api/secret', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({secret: $('secret').value}) });
   const data = await response.json();
-  $('secret-result').textContent = response.ok ? 'Guardado' : (data.error || 'Error');
+  $('secret-result').textContent = response.ok ? 'Guardado' : (data.message || data.error || 'Error');
   $('secret-result').className = response.ok ? 'ok' : 'bad';
   if (response.ok) $('secret').value = '';
   await load();
@@ -134,7 +134,8 @@ export function verifyWebhook({ secret, eventId, timestamp, signature, rawBody, 
   const age = Math.abs(Math.floor(now / 1000) - Number(timestamp));
   if (!Number.isFinite(age) || age > MAX_CLOCK_SKEW_SECONDS) return { valid: false, reason: 'expired_timestamp' };
   const expected = computeSignature(secret, eventId, timestamp, rawBody);
-  return safeEqual(expected, signature)
+  const received = signature.split(',');
+  return received.some((candidate) => safeEqual(expected, candidate.trim()))
     ? { valid: true, reason: null }
     : { valid: false, reason: 'invalid_signature' };
 }
@@ -242,10 +243,17 @@ export function createApp(options = {}) {
         }
         if (url.pathname === '/debug/webhooks/api/secret' && req.method === 'POST') {
           const input = JSON.parse((await readBody(req, 4096)).toString('utf8'));
-          if (typeof input.secret !== 'string' || !/^whsec_[A-Za-z0-9_-]{32,}$/.test(input.secret)) {
-            return json(res, 422, { error: 'secret_invalid' });
+          const secret = String(input.secret ?? '').trim();
+          if (typeof input.secret !== 'string' || !/^whsec_[A-Za-z0-9_-]{32,}$/.test(secret)) {
+            const looksLikeApiKey = /^3i_(test|live)_/.test(secret);
+            return json(res, 422, {
+              error: 'secret_invalid',
+              message: looksLikeApiKey
+                ? 'Esto parece una API key (3i_test_... / 3i_live_...). Pega aquí el signing_secret del webhook (whsec_...), el que muestra la API al crear/rotar el endpoint webhook.'
+                : 'Debe ser un signing_secret de webhook válido (whsec_...) sin espacios. No se acepta la API key ni la clave del webhook en otros formatos.',
+            });
           }
-          await saveSecret(dataDir, input.secret);
+          await saveSecret(dataDir, secret);
           return json(res, 200, { ok: true, configured: true });
         }
         return json(res, 404, { error: 'not_found' });
