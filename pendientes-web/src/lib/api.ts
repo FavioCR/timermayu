@@ -5,9 +5,20 @@ export type Pendiente = {
   texto: string
   proyecto: string | null
   estado: Estado
+  perfil_id: string | null
   creado_en: string
   actualizado_en: string
 }
+
+export type Perfil = {
+  id: string
+  nombre: string
+  color: string
+  creado_en: string
+}
+
+// Los mismos colores que asigna el API cuando no se elige uno.
+export const COLORES_PERFIL = ["#2563EB", "#DB2777", "#059669", "#7C3AED", "#EA580C", "#0891B2", "#CA8A04", "#DC2626"]
 
 const BASE = "/api/pendientes"
 const STORAGE_KEY = "pendientes.auth"
@@ -17,7 +28,10 @@ const MENSAJES: Record<string, string> = {
   sin_conexion: "No se pudo conectar con el servidor.",
   texto_invalido: "Escribe el pendiente (máximo 500 caracteres).",
   proyecto_invalido: "El nombre del proyecto es muy largo (máximo 60 caracteres).",
-  not_found: "Ese pendiente ya no existe. Recarga la página.",
+  not_found: "Eso ya no existe. Recarga la página.",
+  perfil_invalido: "Ese perfil ya no existe. Recarga la página.",
+  nombre_invalido: "Escribe un nombre (máximo 40 caracteres).",
+  perfil_duplicado: "Ya hay un perfil con ese nombre.",
 }
 
 export class ApiError extends Error {
@@ -85,11 +99,18 @@ async function pedir<T>(credenciales: string, method: string, ruta = "", body?: 
 export const api = {
   listar: (credenciales: string) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "GET").then((data) => data.pendientes),
-  crear: (credenciales: string, datos: { texto: string; proyecto: string | null }) =>
+  crear: (credenciales: string, datos: { texto: string; proyecto: string | null; perfil_id: string | null }) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "POST", "", datos).then((data) => data.pendiente),
-  actualizar: (credenciales: string, id: string, cambios: Partial<Pick<Pendiente, "texto" | "proyecto" | "estado">>) =>
+  actualizar: (credenciales: string, id: string, cambios: Partial<Pick<Pendiente, "texto" | "proyecto" | "estado" | "perfil_id">>) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "PATCH", `/${id}`, cambios).then((data) => data.pendiente),
   borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/${id}`),
   ordenar: (credenciales: string, items: { id: string; estado: Estado }[]) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "PUT", "/orden", { items }).then((data) => data.pendientes),
+  perfiles: {
+    listar: (credenciales: string) =>
+      pedir<{ perfiles: Perfil[] }>(credenciales, "GET", "/perfiles").then((data) => data.perfiles),
+    crear: (credenciales: string, datos: { nombre: string; color: string }) =>
+      pedir<{ perfil: Perfil }>(credenciales, "POST", "/perfiles", datos).then((data) => data.perfil),
+    borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/perfiles/${id}`),
+  },
 }

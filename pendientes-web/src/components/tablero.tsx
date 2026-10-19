@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type SyntheticEvent } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type SyntheticEvent } from "react"
 import { LogOut, Pencil, Plus, Timer, Trash2 } from "lucide-react"
 
 import {
@@ -8,10 +8,22 @@ import {
   KanbanHeader,
   KanbanProvider,
 } from "@/components/kibo-ui/kanban"
+import { PerfilAvatar } from "@/components/perfil-avatar"
+import { PerfilesDialog } from "@/components/perfiles-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
-import { api, esNoAutorizado, mensajeDeError, type Estado, type Pendiente } from "@/lib/api"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { api, esNoAutorizado, mensajeDeError, type Estado, type Pendiente, type Perfil } from "@/lib/api"
 
 const COLUMNAS: { id: Estado; name: string; color: string }[] = [
   { id: "pendiente", name: "Por hacer", color: "#6B7280" },
@@ -21,6 +33,9 @@ const COLUMNAS: { id: Estado; name: string; color: string }[] = [
 
 // Sugerencias del campo proyecto; se puede escribir cualquier otro.
 const PROYECTOS_SUGERIDOS = ["kimba", "pos", "practipdf", "practitv", "timermayu", "servidor"]
+
+// Radix Select no acepta "" como valor: este marca "sin asignar".
+const NADIE = "nadie"
 
 const fecha = new Intl.DateTimeFormat("es", { day: "numeric", month: "short" })
 
@@ -38,17 +53,37 @@ function mezclar(todas: Tarjeta[], visibles: Tarjeta[]) {
   return todas.map((tarjeta) => (ids.has(tarjeta.id) ? visibles[i++] : tarjeta))
 }
 
+function contar<T>(items: T[], clave: (item: T) => string | null) {
+  const conteo = new Map<string, number>()
+  for (const item of items) {
+    const valor = clave(item)
+    if (valor) conteo.set(valor, (conteo.get(valor) ?? 0) + 1)
+  }
+  return conteo
+}
+
 // Escribir o tocar un botón dentro de la tarjeta no debe empezar a arrastrarla.
 const detener = (event: SyntheticEvent) => event.stopPropagation()
 const noArrastrar = { onMouseDown: detener, onTouchStart: detener, onKeyDown: detener }
 
+function Filtro({ activo, onClick, children }: { activo: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <Button size="xs" variant={activo ? "default" : "outline"} aria-pressed={activo} onClick={onClick}>
+      {children}
+    </Button>
+  )
+}
+
 export function Tablero({ credenciales, onSalir }: { credenciales: string; onSalir: () => void }) {
   const [tarjetas, setTarjetas] = useState<Tarjeta[]>([])
+  const [perfiles, setPerfiles] = useState<Perfil[]>([])
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState("")
-  const [filtro, setFiltro] = useState<string | null>(null)
+  const [filtroProyecto, setFiltroProyecto] = useState<string | null>(null)
+  const [filtroPerfil, setFiltroPerfil] = useState<string | null>(null)
   const [texto, setTexto] = useState("")
   const [proyecto, setProyecto] = useState("")
+  const [responsable, setResponsable] = useState(NADIE)
   const [editando, setEditando] = useState<string | null>(null)
   const ultimas = useRef<Tarjeta[]>([])
   const ordenAlEmpezar = useRef("")
@@ -68,7 +103,9 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
 
   const recargar = useCallback(async () => {
     try {
-      setTarjetas((await api.listar(credenciales)).map(aTarjeta))
+      const [pendientes, nuevosPerfiles] = await Promise.all([api.listar(credenciales), api.perfiles.listar(credenciales)])
+      setTarjetas(pendientes.map(aTarjeta))
+      setPerfiles(nuevosPerfiles)
       setError("")
     } catch (err) {
       fallar(err)
@@ -85,18 +122,26 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
     return () => document.removeEventListener("visibilitychange", alVolver)
   }, [recargar])
 
+  const perfilesPorId = useMemo(() => new Map(perfiles.map((perfil) => [perfil.id, perfil])), [perfiles])
+
+  const filtrando = filtroProyecto !== null || filtroPerfil !== null
+
   const visibles = useMemo(
-    () => (filtro ? tarjetas.filter((tarjeta) => tarjeta.proyecto === filtro) : tarjetas),
-    [tarjetas, filtro]
+    () =>
+      tarjetas.filter(
+        (tarjeta) =>
+          (filtroProyecto === null || tarjeta.proyecto === filtroProyecto) &&
+          (filtroPerfil === null || (tarjeta.perfil_id ?? NADIE) === filtroPerfil)
+      ),
+    [tarjetas, filtroProyecto, filtroPerfil]
   )
 
-  const proyectos = useMemo(() => {
-    const conteo = new Map<string, number>()
-    for (const tarjeta of tarjetas) {
-      if (tarjeta.proyecto) conteo.set(tarjeta.proyecto, (conteo.get(tarjeta.proyecto) ?? 0) + 1)
-    }
-    return [...conteo.entries()].sort(([a], [b]) => a.localeCompare(b))
-  }, [tarjetas])
+  const proyectos = useMemo(
+    () => [...contar(tarjetas, (tarjeta) => tarjeta.proyecto).entries()].sort(([a], [b]) => a.localeCompare(b)),
+    [tarjetas]
+  )
+
+  const asignados = useMemo(() => contar(tarjetas, (tarjeta) => tarjeta.perfil_id ?? NADIE), [tarjetas])
 
   const sugerencias = useMemo(
     () => [...new Set([...PROYECTOS_SUGERIDOS, ...proyectos.map(([nombre]) => nombre)])].sort(),
@@ -109,7 +154,11 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
     event.preventDefault()
     if (!texto.trim()) return
     try {
-      const nuevo = await api.crear(credenciales, { texto, proyecto: proyecto.trim() || null })
+      const nuevo = await api.crear(credenciales, {
+        texto,
+        proyecto: proyecto.trim() || null,
+        perfil_id: responsable === NADIE ? null : responsable,
+      })
       setTarjetas((actuales) => [aTarjeta(nuevo), ...actuales])
       setTexto("")
       setError("")
@@ -132,6 +181,16 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
     }
   }
 
+  async function asignar(tarjeta: Tarjeta, perfilId: string | null) {
+    setTarjetas((actuales) => actuales.map((t) => (t.id === tarjeta.id ? { ...t, perfil_id: perfilId } : t)))
+    try {
+      await api.actualizar(credenciales, tarjeta.id, { perfil_id: perfilId })
+    } catch (err) {
+      fallar(err)
+      recargar()
+    }
+  }
+
   async function borrar(tarjeta: Tarjeta) {
     setTarjetas((actuales) => actuales.filter((t) => t.id !== tarjeta.id))
     try {
@@ -142,8 +201,33 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
     }
   }
 
+  async function crearPerfil(datos: { nombre: string; color: string }) {
+    try {
+      const nuevo = await api.perfiles.crear(credenciales, datos)
+      setPerfiles((actuales) => [...actuales, nuevo])
+      return null
+    } catch (err) {
+      if (esNoAutorizado(err)) onSalir()
+      return mensajeDeError(err)
+    }
+  }
+
+  async function borrarPerfil(perfil: Perfil) {
+    try {
+      await api.perfiles.borrar(credenciales, perfil.id)
+      setPerfiles((actuales) => actuales.filter((p) => p.id !== perfil.id))
+      setTarjetas((actuales) => actuales.map((t) => (t.perfil_id === perfil.id ? { ...t, perfil_id: null } : t)))
+      if (filtroPerfil === perfil.id) setFiltroPerfil(null)
+      if (responsable === perfil.id) setResponsable(NADIE)
+      return null
+    } catch (err) {
+      if (esNoAutorizado(err)) onSalir()
+      return mensajeDeError(err)
+    }
+  }
+
   function cambiarTablero(nuevas: Tarjeta[]) {
-    const todas = filtro ? mezclar(ultimas.current, nuevas) : nuevas
+    const todas = filtrando ? mezclar(ultimas.current, nuevas) : nuevas
     ultimas.current = todas
     setTarjetas(todas)
   }
@@ -177,13 +261,14 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
             </span>
           )}
           <div className="ml-auto flex items-center gap-1">
+            <PerfilesDialog perfiles={perfiles} asignados={asignados} onCrear={crearPerfil} onBorrar={borrarPerfil} />
             <Button asChild variant="ghost" size="sm">
-              <a href="/">
-                <Timer /> Timer
+              <a href="/" aria-label="Timer">
+                <Timer /> <span className="hidden sm:inline">Timer</span>
               </a>
             </Button>
-            <Button variant="ghost" size="sm" onClick={onSalir}>
-              <LogOut /> Salir
+            <Button variant="ghost" size="sm" onClick={onSalir} aria-label="Salir">
+              <LogOut /> <span className="hidden sm:inline">Salir</span>
             </Button>
           </div>
         </div>
@@ -206,34 +291,71 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
             value={proyecto}
             onChange={(event) => setProyecto(event.target.value)}
             maxLength={60}
-            className="sm:w-44"
+            className="sm:w-40"
           />
           <datalist id="proyectos-sugeridos">
             {sugerencias.map((nombre) => (
               <option key={nombre} value={nombre} />
             ))}
           </datalist>
+          <Select value={responsable} onValueChange={setResponsable}>
+            <SelectTrigger aria-label="Responsable" className="w-full sm:w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {perfiles.map((perfil) => (
+                <SelectItem key={perfil.id} value={perfil.id}>
+                  <PerfilAvatar perfil={perfil} size="sm" /> {perfil.nombre}
+                </SelectItem>
+              ))}
+              <SelectItem value={NADIE}>
+                <PerfilAvatar perfil={null} size="sm" /> Sin asignar
+              </SelectItem>
+            </SelectContent>
+          </Select>
           <Button type="submit" disabled={!texto.trim()}>
             <Plus /> Agregar
           </Button>
         </form>
 
-        {proyectos.length > 0 && (
-          <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filtrar por proyecto">
-            <Button size="xs" variant={filtro === null ? "default" : "outline"} onClick={() => setFiltro(null)}>
-              Todos
-            </Button>
-            {proyectos.map(([nombre, cantidad]) => (
-              <Button
-                key={nombre}
-                size="xs"
-                variant={filtro === nombre ? "default" : "outline"}
-                aria-pressed={filtro === nombre}
-                onClick={() => setFiltro(filtro === nombre ? null : nombre)}
-              >
-                {nombre} <span className="opacity-60">{cantidad}</span>
-              </Button>
-            ))}
+        {(perfiles.length > 0 || proyectos.length > 0) && (
+          <div className="flex flex-col gap-2">
+            {perfiles.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filtrar por persona">
+                <Filtro activo={filtroPerfil === null} onClick={() => setFiltroPerfil(null)}>
+                  Todos
+                </Filtro>
+                {[...perfiles, null].map((perfil) => {
+                  const clave = perfil?.id ?? NADIE
+                  return (
+                    <Filtro
+                      key={clave}
+                      activo={filtroPerfil === clave}
+                      onClick={() => setFiltroPerfil(filtroPerfil === clave ? null : clave)}
+                    >
+                      <span className="size-2 rounded-full" style={{ backgroundColor: perfil?.color ?? "transparent", border: perfil ? undefined : "1px dashed currentColor" }} />
+                      {perfil?.nombre ?? "Sin asignar"} <span className="opacity-60">{asignados.get(clave) ?? 0}</span>
+                    </Filtro>
+                  )
+                })}
+              </div>
+            )}
+            {proyectos.length > 0 && (
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filtrar por proyecto">
+                <Filtro activo={filtroProyecto === null} onClick={() => setFiltroProyecto(null)}>
+                  Todos los proyectos
+                </Filtro>
+                {proyectos.map(([nombre, cantidad]) => (
+                  <Filtro
+                    key={nombre}
+                    activo={filtroProyecto === nombre}
+                    onClick={() => setFiltroProyecto(filtroProyecto === nombre ? null : nombre)}
+                  >
+                    {nombre} <span className="opacity-60">{cantidad}</span>
+                  </Filtro>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -267,71 +389,103 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
                       </div>
                     </KanbanHeader>
                     <KanbanCards id={columna.id}>
-                      {(tarjeta: Tarjeta) => (
-                        <KanbanCard column={columna.id} id={tarjeta.id} key={tarjeta.id} name={tarjeta.name}>
-                          <div className="flex items-start gap-1">
-                            {editando === tarjeta.id ? (
-                              <Input
-                                autoFocus
-                                aria-label="Editar pendiente"
-                                defaultValue={tarjeta.texto}
-                                maxLength={500}
-                                className="h-7 flex-1 text-sm"
+                      {(tarjeta: Tarjeta) => {
+                        const perfil = tarjeta.perfil_id ? perfilesPorId.get(tarjeta.perfil_id) : null
+                        return (
+                          <KanbanCard column={columna.id} id={tarjeta.id} key={tarjeta.id} name={tarjeta.name}>
+                            <div className="flex items-start gap-1">
+                              {editando === tarjeta.id ? (
+                                <Input
+                                  autoFocus
+                                  aria-label="Editar pendiente"
+                                  defaultValue={tarjeta.texto}
+                                  maxLength={500}
+                                  className="h-7 flex-1 text-sm"
+                                  {...noArrastrar}
+                                  onKeyDown={(event) => {
+                                    event.stopPropagation()
+                                    if (event.key === "Enter") event.currentTarget.blur()
+                                    if (event.key === "Escape") {
+                                      cancelarEdicion.current = true
+                                      event.currentTarget.blur()
+                                    }
+                                  }}
+                                  onBlur={(event) => {
+                                    if (cancelarEdicion.current) {
+                                      cancelarEdicion.current = false
+                                      setEditando(null)
+                                    } else {
+                                      guardarTexto(tarjeta, event.currentTarget.value)
+                                    }
+                                  }}
+                                />
+                              ) : (
+                                <p
+                                  className="m-0 flex-1 text-sm font-medium break-words"
+                                  onDoubleClick={() => setEditando(tarjeta.id)}
+                                >
+                                  {tarjeta.texto}
+                                </p>
+                              )}
+                              <Button
+                                variant="ghost"
+                                size="icon-xs"
+                                className="text-muted-foreground"
+                                aria-label={`Editar "${tarjeta.texto}"`}
                                 {...noArrastrar}
-                                onKeyDown={(event) => {
-                                  event.stopPropagation()
-                                  if (event.key === "Enter") event.currentTarget.blur()
-                                  if (event.key === "Escape") {
-                                    cancelarEdicion.current = true
-                                    event.currentTarget.blur()
-                                  }
-                                }}
-                                onBlur={(event) => {
-                                  if (cancelarEdicion.current) {
-                                    cancelarEdicion.current = false
-                                    setEditando(null)
-                                  } else {
-                                    guardarTexto(tarjeta, event.currentTarget.value)
-                                  }
-                                }}
-                              />
-                            ) : (
-                              <p
-                                className="m-0 flex-1 text-sm font-medium break-words"
-                                onDoubleClick={() => setEditando(tarjeta.id)}
+                                onClick={() => setEditando(tarjeta.id)}
                               >
-                                {tarjeta.texto}
-                              </p>
-                            )}
-                            <Button
-                              variant="ghost"
-                              size="icon-xs"
-                              className="text-muted-foreground"
-                              aria-label={`Editar "${tarjeta.texto}"`}
-                              {...noArrastrar}
-                              onClick={() => setEditando(tarjeta.id)}
-                            >
-                              <Pencil />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon-xs"
-                              className="text-muted-foreground hover:text-destructive"
-                              aria-label={`Borrar "${tarjeta.texto}"`}
-                              {...noArrastrar}
-                              onClick={() => borrar(tarjeta)}
-                            >
-                              <Trash2 />
-                            </Button>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            {tarjeta.proyecto && <Badge variant="secondary">{tarjeta.proyecto}</Badge>}
-                            <span className="ml-auto text-xs text-muted-foreground">
-                              {fecha.format(new Date(tarjeta.creado_en))}
-                            </span>
-                          </div>
-                        </KanbanCard>
-                      )}
+                                <Pencil />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-xs"
+                                className="text-muted-foreground hover:text-destructive"
+                                aria-label={`Borrar "${tarjeta.texto}"`}
+                                {...noArrastrar}
+                                onClick={() => borrar(tarjeta)}
+                              >
+                                <Trash2 />
+                              </Button>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {tarjeta.proyecto && <Badge variant="secondary">{tarjeta.proyecto}</Badge>}
+                              <span className="ml-auto text-xs text-muted-foreground">
+                                {fecha.format(new Date(tarjeta.creado_en))}
+                              </span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <button
+                                    type="button"
+                                    className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                    aria-label={perfil ? `Asignado a ${perfil.nombre}; cambiar` : "Asignar a alguien"}
+                                    {...noArrastrar}
+                                  >
+                                    <PerfilAvatar perfil={perfil} size="sm" />
+                                  </button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" className="min-w-44">
+                                  <DropdownMenuLabel>Asignar a</DropdownMenuLabel>
+                                  <DropdownMenuRadioGroup
+                                    value={tarjeta.perfil_id ?? NADIE}
+                                    onValueChange={(valor) => asignar(tarjeta, valor === NADIE ? null : valor)}
+                                  >
+                                    {perfiles.map((opcion) => (
+                                      <DropdownMenuRadioItem key={opcion.id} value={opcion.id}>
+                                        <PerfilAvatar perfil={opcion} size="sm" /> {opcion.nombre}
+                                      </DropdownMenuRadioItem>
+                                    ))}
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuRadioItem value={NADIE}>
+                                      <PerfilAvatar perfil={null} size="sm" /> Sin asignar
+                                    </DropdownMenuRadioItem>
+                                  </DropdownMenuRadioGroup>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </KanbanCard>
+                        )
+                      }}
                     </KanbanCards>
                     {cantidad === 0 && <p className="m-0 px-3 pb-3 text-muted-foreground">Nada por aquí</p>}
                   </KanbanBoard>
@@ -342,7 +496,7 @@ export function Tablero({ credenciales, onSalir }: { credenciales: string; onSal
         )}
 
         <p className="text-xs text-muted-foreground">
-          Arrastra las tarjetas entre columnas. Doble clic o el lápiz para editar.
+          Arrastra las tarjetas entre columnas. Toca el círculo de una tarjeta para asignarla. Doble clic o el lápiz para editar.
         </p>
       </main>
     </div>
