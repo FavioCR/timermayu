@@ -530,6 +530,11 @@ export const api = {
         proyecto_id: proyectoId,
         imagenes: imagenes.map((datos) => ({ datos })),
       }).then((data) => data.sugerencias),
+    // Un borrador (o lo que ya está escrito) bien redactado para el chat o la descripción de un pendiente.
+    redactar: (credenciales: string, pendienteId: string, donde: "chat" | "descripcion", texto: string) =>
+      pedir<{ redaccion: { texto: string } }>(credenciales, "POST", "/ia/redactar", { texto, donde, pendiente_id: pendienteId }).then(
+        (data) => data.redaccion.texto
+      ),
   },
   proyectos: {
     listar: (credenciales: string) =>

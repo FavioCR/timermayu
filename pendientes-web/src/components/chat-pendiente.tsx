@@ -4,6 +4,7 @@ import { cn } from "cn"
 
 import { ChipArchivo, esImagenVisible, MiniaturaArchivo } from "@/components/archivos"
 import { PerfilAvatar } from "@/components/perfil-avatar"
+import { RedactarIA } from "@/components/redactar-ia"
 import { Button } from "@/components/ui/button"
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
@@ -144,6 +145,8 @@ export function ChatPendiente({
   // La mención que se está escribiendo: desde la @ hasta el cursor.
   const [mencion, setMencion] = useState<{ inicio: number; fin: number; consulta: string } | null>(null)
   const [elegido, setElegido] = useState(0)
+  // /ia abierto: dónde estaba escrito (ahí va lo que redacte la IA) y lo que ya había en el mensaje.
+  const [ia, setIa] = useState<{ posicion: number; previo: string } | null>(null)
   const [adjuntos, setAdjuntos] = useState<Adjunto[]>([])
   const [encima, setEncima] = useState(false)
   const [respondiendo, setRespondiendo] = useState<Comentario | null>(null)
@@ -157,6 +160,9 @@ export function ChatPendiente({
   const lista = useRef<HTMLDivElement>(null)
   const formulario = useRef<HTMLFormElement>(null)
   const campo = useRef<HTMLTextAreaElement>(null)
+  const anclaMensaje = useRef({ getBoundingClientRect: () => campo.current?.getBoundingClientRect() ?? new DOMRect() })
+  // Dónde queda el cursor del mensaje al cerrar el campo de /ia: donde estaba el /ia, o al final de lo redactado.
+  const cursorTrasIA = useRef(0)
   // Si se está leyendo más arriba, los mensajes nuevos no lo bajan.
   const abajo = useRef(true)
   const avisarCantidad = useRef(onCantidad)
@@ -228,6 +234,35 @@ export function ChatPendiente({
     const consulta = encontrada[1]
     if (consulta !== mencion?.consulta) setElegido(0)
     setMencion({ inicio: fin - consulta.length - 1, fin, consulta })
+  }
+
+  // Escribir /ia (al principio o después de un espacio) lo borra y abre el campo de la IA en ese lugar.
+  function revisarIA(elemento: HTMLTextAreaElement) {
+    const cursor = elemento.selectionStart
+    if (cursor !== elemento.selectionEnd || !/(^|\s)\/ia$/i.test(elemento.value.slice(0, cursor))) return false
+    const sinComando = elemento.value.slice(0, cursor - 3) + elemento.value.slice(cursor)
+    setTexto(sinComando)
+    setMencion(null)
+    setIa({ posicion: cursor - 3, previo: sinComando })
+    cursorTrasIA.current = cursor - 3
+    return true
+  }
+
+  async function redactar(borrador: string) {
+    try {
+      return await api.ia.redactar(credenciales, pendienteId, "chat", borrador)
+    } catch (err) {
+      if (esNoAutorizado(err)) onSalir()
+      throw err
+    }
+  }
+
+  function usarRedaccion(redactado: string, reemplaza: boolean) {
+    if (!ia) return
+    const nuevo = (reemplaza ? redactado : texto.slice(0, ia.posicion) + redactado + texto.slice(ia.posicion)).slice(0, 2000)
+    cursorTrasIA.current = Math.min(reemplaza ? redactado.length : ia.posicion + redactado.length, nuevo.length)
+    setTexto(nuevo)
+    setIa(null)
   }
 
   function mencionar(perfil: Perfil) {
@@ -551,11 +586,11 @@ export function ChatPendiente({
                 aria-label="Mensaje"
                 aria-autocomplete="list"
                 aria-controls={sugerencias.length > 0 ? idSugerencias : undefined}
-                placeholder="Escribe un mensaje… (@ para mencionar)"
+                placeholder="Escribe un mensaje… (@ para mencionar, /ia para redactar con IA)"
                 value={texto}
                 onChange={(event) => {
                   setTexto(event.target.value)
-                  revisarMencion(event.target)
+                  if (!revisarIA(event.target)) revisarMencion(event.target)
                 }}
                 onSelect={(event) => revisarMencion(event.currentTarget)}
                 onPaste={(event) => {
@@ -628,6 +663,22 @@ export function ChatPendiente({
               </CommandGroup>
             </CommandList>
           </Command>
+        </PopoverContent>
+      </Popover>
+      {/* El campo de /ia sale encima del mensaje; al cerrarlo, el foco vuelve al mensaje. */}
+      <Popover open={ia !== null} onOpenChange={(abierto) => !abierto && setIa(null)}>
+        <PopoverAnchor virtualRef={anclaMensaje} />
+        <PopoverContent
+          side="top"
+          align="start"
+          className="w-[min(28rem,calc(100vw-2rem))] p-3"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            campo.current?.focus()
+            campo.current?.setSelectionRange(cursorTrasIA.current, cursorTrasIA.current)
+          }}
+        >
+          {ia && <RedactarIA previo={ia.previo} redactar={redactar} onUsar={usarRedaccion} />}
         </PopoverContent>
       </Popover>
     </div>

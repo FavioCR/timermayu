@@ -12,6 +12,8 @@ export const PROVEEDORES_IA = {
 
 export const MAX_SUGERENCIAS = 30;
 const ESPERA_MS = 60_000;
+// Redactar es interactivo: mejor un error claro antes de que nginx corte la respuesta (a los 12 s).
+const ESPERA_REDACCION_MS = 11_000;
 const ESTADOS = ['pendiente', 'haciendo', 'hecho'];
 const TIPOS = ['feat', 'fix', 'refactor', 'perf', 'docs', 'test', 'style', 'chore', 'ci'];
 const MAX_TITULO = 500;
@@ -58,6 +60,16 @@ export const ESQUEMA_TIPO = {
   additionalProperties: false,
 };
 
+// Un borrador del chat o de la descripción, bien redactado.
+export const ESQUEMA_REDACCION = {
+  type: 'object',
+  properties: {
+    texto: { type: 'string', description: 'El texto final, listo para usar tal cual.' },
+  },
+  required: ['texto'],
+  additionalProperties: false,
+};
+
 function iaError(status, codigo, detalle) {
   return Object.assign(new Error(codigo), { statusCode: status, ...(detalle && { detalle }) });
 }
@@ -96,6 +108,21 @@ export function instruccionesTipo({ extra }) {
     '- feat: algo nuevo. fix: corregir un error. refactor: reordenar código sin cambiar lo que hace. perf: rendimiento. docs: documentación. test: pruebas. style: formato. chore: mantenimiento. ci: despliegue y automatización.',
     '- null si no es trabajo de software o no está claro.',
     ...(extra ? ['Indicaciones del equipo (síguelas si no contradicen lo anterior):', extra] : []),
+  ].join('\n');
+}
+
+export function instruccionesRedaccion({ donde, personas, pendiente, contexto }) {
+  return [
+    'Eres el asistente del tablero de pendientes de un equipo. Te pasan un borrador, o una indicación de lo que se quiere decir, y devuelves el texto bien redactado y listo para usar.',
+    '- Escribe en el idioma del borrador, claro y directo, con buena ortografía. Conserva el sentido, los datos, los enlaces y los nombres; no agregues nada que el borrador no diga.',
+    '- Si el borrador es una indicación ("dile a Junior que…", "anota los pasos para…"), escribe el texto final, no una explicación de lo que harías.',
+    '- Para nombrar a alguien del equipo usa @ y su nombre exacto de "Personas" (por ejemplo @Junior): así le llega el aviso.',
+    donde === 'chat'
+      ? '- Es un mensaje del chat del pendiente: breve, en tono de conversación entre compañeros, texto plano sin Markdown.'
+      : '- Es parte de la descripción del pendiente: usa Markdown sencillo (listas con -, pasos con 1., **negrita**) solo si ordena mejor la información; sin títulos salvo que el texto sea largo.',
+    `Pendiente: ${pendiente}`,
+    ...contexto,
+    `Personas: ${personas.length ? personas.join(', ') : '(ninguna)'}`,
   ].join('\n');
 }
 
@@ -201,10 +228,10 @@ function errorDelProveedor(status, data, clave) {
   return iaError(502, 'ia_fallo', mensaje || `HTTP ${status}`);
 }
 
-async function pedir(url, opciones, clave) {
+async function pedir(url, opciones, clave, espera = ESPERA_MS) {
   let respuesta;
   try {
-    respuesta = await fetch(url, { ...opciones, signal: AbortSignal.timeout(ESPERA_MS) });
+    respuesta = await fetch(url, { ...opciones, signal: AbortSignal.timeout(espera) });
   } catch (error) {
     if (error.name === 'TimeoutError') throw iaError(504, 'ia_tardo');
     throw iaError(502, 'ia_sin_conexion');
@@ -256,13 +283,19 @@ export function leerTipo(texto) {
   return TIPOS.includes(tipo) ? tipo : null;
 }
 
-async function consultar({ proveedor, modelo, clave, base, sistema, texto, esquema, nombre, imagenes }) {
+export function leerRedaccion(texto, maximo) {
+  const { texto: redactado } = leerJson(texto) ?? {};
+  if (typeof redactado !== 'string' || !redactado.trim()) throw iaError(502, 'ia_respuesta_invalida');
+  return redactado.trim().slice(0, maximo);
+}
+
+async function consultar({ proveedor, modelo, clave, base, sistema, texto, esquema, nombre, imagenes, espera }) {
   const pedido = PEDIDOS[proveedor]({ modelo, clave, sistema, texto, esquema, nombre, imagenes });
   const data = await pedir(`${base}${pedido.ruta}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...pedido.headers },
     body: JSON.stringify(pedido.body),
-  }, clave);
+  }, clave, espera);
   return pedido.leer(data);
 }
 
@@ -273,6 +306,11 @@ export async function pedirPendientes(opciones) {
 // El tipo de un pendiente (feat, fix…) a partir de su título y su proyecto, o null.
 export async function pedirTipo(opciones) {
   return leerTipo(await consultar({ ...opciones, esquema: ESQUEMA_TIPO, nombre: 'tipo' }));
+}
+
+// El borrador bien redactado, hasta `maximo` caracteres.
+export async function pedirRedaccion({ maximo, ...opciones }) {
+  return leerRedaccion(await consultar({ ...opciones, esquema: ESQUEMA_REDACCION, nombre: 'redaccion', espera: ESPERA_REDACCION_MS }), maximo);
 }
 
 // Los modelos de texto de cada proveedor, para elegir en la configuración. OpenRouter no pide clave para listarlos

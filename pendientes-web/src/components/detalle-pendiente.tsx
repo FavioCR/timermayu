@@ -142,12 +142,14 @@ function Contenido({
   }, [credenciales, id, onSalir, aplicarDescripcion])
 
   // Si el pendiente cambió (otra persona lo editó y el tablero se puso al día), trae la descripción otra vez. Solo la
-  // reemplaza si es distinta y aquí no se está escribiendo: nada sin guardar y el cursor fuera del editor.
+  // reemplaza si es distinta y aquí no se está escribiendo: nada sin guardar y el cursor fuera del editor (y de su /ia).
   const actualizadoVisto = useRef(pendiente.actualizado_en)
   useEffect(() => {
     if (actualizadoVisto.current === pendiente.actualizado_en) return
     actualizadoVisto.current = pendiente.actualizado_en
-    const escribiendo = () => porGuardar.current !== null || Boolean(seccionDescripcion.current?.contains(document.activeElement))
+    const escribiendo = () =>
+      porGuardar.current !== null ||
+      Boolean(seccionDescripcion.current?.contains(document.activeElement) || document.activeElement?.closest("[data-ia-descripcion]"))
     if (escribiendo()) return
     let vigente = true
     api
@@ -217,6 +219,16 @@ function Contenido({
   function resolverUrl(url: string) {
     const conContrasena = url.startsWith("/api/pendientes/imagenes/") || url.startsWith(PREFIJO_URL_ARCHIVO)
     return conContrasena ? api.urlDeImagen(credenciales, url) : Promise.resolve(url)
+  }
+
+  // Lo que pide /ia en la descripción.
+  async function redactarDescripcion(borrador: string) {
+    try {
+      return await api.ia.redactar(credenciales, id, "descripcion", borrador)
+    } catch (err) {
+      if (esNoAutorizado(err)) onSalir()
+      throw err
+    }
   }
 
   function abrirDeDescripcion(url: string, nombre: string) {
@@ -406,6 +418,7 @@ function Contenido({
                 abrirArchivo={abrirDeDescripcion}
                 perfiles={perfiles}
                 yo={usuario?.perfil_id ?? null}
+                redactar={redactarDescripcion}
               />
             </Suspense>
           ) : (

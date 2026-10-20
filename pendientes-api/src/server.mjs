@@ -7,7 +7,17 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { instruccionesIA, instruccionesTipo, listarModelos, MAX_SUGERENCIAS, pedirPendientes, pedirTipo, PROVEEDORES_IA } from './ia.mjs';
+import {
+  instruccionesIA,
+  instruccionesRedaccion,
+  instruccionesTipo,
+  listarModelos,
+  MAX_SUGERENCIAS,
+  pedirPendientes,
+  pedirRedaccion,
+  pedirTipo,
+  PROVEEDORES_IA,
+} from './ia.mjs';
 
 // Alcanza para el orden completo del tablero (hasta 5000 pendientes de ~60 bytes cada uno).
 const MAX_BODY_BYTES = 512 * 1024;
@@ -38,6 +48,9 @@ const MIN_CONTRASENA = 8;
 const MAX_CONTRASENA = 200;
 // Lo que se le puede pasar a la IA de una vez y las indicaciones propias del equipo.
 const MAX_TEXTO_IA = 20000;
+// Lo que se manda a redactar, lo que vuelve para la descripción y cuánto de ella va de contexto.
+const MAX_REDACCION = 4000;
+const MAX_CONTEXTO_REDACCION = 1500;
 const MAX_INSTRUCCIONES_IA = 2000;
 const MAX_CLAVE_IA = 500;
 const MAX_MODELO_IA = 200;
@@ -75,6 +88,7 @@ const LEIDAS_PATH = '/api/pendientes/notificaciones/leidas';
 const IA_PATH = '/api/pendientes/ia';
 const IA_MODELOS_PATH = '/api/pendientes/ia/modelos';
 const IA_SUGERIR_PATH = '/api/pendientes/ia/sugerir';
+const IA_REDACTAR_PATH = '/api/pendientes/ia/redactar';
 const ETIQUETAS_PATH = '/api/pendientes/etiquetas';
 const EVENTOS_PATH = '/api/pendientes/eventos';
 const ITEM_PATH = new RegExp(`^/api/pendientes/${UUID}$`);
@@ -92,7 +106,7 @@ const ARCHIVO_PATH = new RegExp(`^/api/pendientes/archivos/${UUID}$`);
 const TRASPASO_PATH = new RegExp(`^/api/pendientes/${UUID}/traspaso$`);
 const ETIQUETA_PATH = new RegExp(`^/api/pendientes/etiquetas/${UUID}$`);
 const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
-  IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, ETIQUETAS_PATH, EVENTOS_PATH];
+  IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
   ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, ETIQUETA_PATH];
 const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en, hecho_en,
@@ -402,7 +416,7 @@ export function nombreDeArchivo(cabecera) {
 }
 
 // Texto plano para la vista previa de la tarjeta y cantidad de imágenes del documento del editor.
-export function resumirDescripcion(bloques) {
+export function resumirDescripcion(bloques, maximo = MAX_RESUMEN) {
   const textos = [];
   let imagenes = 0;
   const visitar = (nodo) => {
@@ -414,7 +428,7 @@ export function resumirDescripcion(bloques) {
     for (const hijo of [nodo.content, nodo.children, nodo.rows, nodo.cells]) visitar(hijo);
   };
   visitar(bloques);
-  const resumen = textos.join(' ').replace(/\s+/g, ' ').trim().slice(0, MAX_RESUMEN);
+  const resumen = textos.join(' ').replace(/\s+/g, ' ').trim().slice(0, maximo);
   return { resumen: resumen || null, num_imagenes: imagenes };
 }
 
@@ -634,6 +648,14 @@ export function parseSugerencia(input) {
   if (total > MAX_BYTES_IMAGENES_IA) throw httpError(413, 'imagenes_ia_muy_grandes');
   if ((!texto && imagenes.length === 0) || texto.length > MAX_TEXTO_IA) throw httpError(422, 'texto_ia_invalido');
   return { texto, imagenes, proyecto_id: 'proyecto_id' in input ? idOpcional(input, 'proyecto_id', 'proyecto_invalido') : null };
+}
+
+export function parseRedaccion(input) {
+  const texto = typeof input.texto === 'string' ? input.texto.trim() : '';
+  if (!texto || texto.length > MAX_REDACCION) throw httpError(422, 'texto_ia_invalido');
+  if (input.donde !== 'chat' && input.donde !== 'descripcion') throw httpError(422, 'donde_invalido');
+  if (typeof input.pendiente_id !== 'string' || !input.pendiente_id) throw httpError(422, 'pendiente_invalido');
+  return { texto, donde: input.donde, pendiente_id: input.pendiente_id };
 }
 
 // La clave con la que se listan los modelos: la que se está escribiendo (va en el cuerpo, no en la URL) o la guardada.
@@ -1016,6 +1038,46 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         estado: sugerencia.estado,
         imagenes: deLaTarea(sugerencia.imagenes, lista.length === 1),
       }));
+    },
+
+    // Redacta mejor un borrador para el chat o la descripción de un pendiente que ve quien pregunta. Viajan el borrador,
+    // el título, el proyecto, el responsable, el principio de la descripción y, en el chat, los últimos mensajes; de las
+    // personas solo sus nombres (para escribir bien las @menciones), nunca correos ni teléfonos.
+    async redactar(yo, { texto, donde, pendiente_id: pendienteId }, bases) {
+      const item = pendiente(yo, pendienteId);
+      if (!item) return null;
+      const { proveedor, modelos, claves } = this.ajustesIA();
+      if (!proveedor) throw httpError(422, 'ia_no_configurada');
+      if (!claves[proveedor]) throw httpError(422, 'ia_sin_clave');
+      const personas = db.prepare('SELECT id, nombre FROM perfiles ORDER BY creado_en, rowid').all();
+      const responsable = personas.find((p) => p.id === item.perfil_id)?.nombre;
+      const proyecto = etiquetaDeProyecto(item.proyecto_id);
+      const { descripcion } = db.prepare('SELECT descripcion FROM pendientes WHERE id = ?').get(pendienteId);
+      const resumen = descripcion ? resumirDescripcion(JSON.parse(descripcion), MAX_CONTEXTO_REDACCION).resumen : null;
+      const mensajes = donde === 'chat'
+        ? db.prepare(`SELECT autor, texto FROM comentarios WHERE pendiente_id = ? AND texto != '' ORDER BY creado_en DESC, rowid DESC LIMIT 6`)
+          .all(pendienteId).reverse()
+        : [];
+      const sistema = instruccionesRedaccion({
+        donde,
+        personas: personas.map((p) => p.nombre),
+        pendiente: [`«${item.texto}»`, proyecto && `proyecto ${proyecto}`, `estado ${item.estado}`, responsable && `responsable ${responsable}`]
+          .filter(Boolean).join(', '),
+        contexto: [
+          ...(resumen ? [`Descripción (el principio): ${resumen}`] : []),
+          ...(mensajes.length ? ['Últimos mensajes del chat:', ...mensajes.map((m) => `${m.autor}: ${m.texto.slice(0, 300)}`)] : []),
+        ],
+      });
+      const redactado = await pedirRedaccion({
+        proveedor,
+        modelo: modelos[proveedor] ?? PROVEEDORES_IA[proveedor].modelo,
+        clave: claves[proveedor],
+        base: bases[proveedor],
+        sistema,
+        texto,
+        maximo: donde === 'chat' ? MAX_COMENTARIO : MAX_REDACCION,
+      });
+      return { texto: redactado };
     },
 
     // Le pide a la IA el tipo de un pendiente que se creó sin tipo. Solo viajan su título y su proyecto. Si mientras
@@ -1642,6 +1704,9 @@ export function createApp(options = {}) {
         const clave = pedido.clave ?? repo.ajustesIA().claves[proveedor];
         if (!clave && proveedor !== 'openrouter') throw httpError(422, 'ia_sin_clave');
         return json(res, 200, { modelos: await listarModelos({ proveedor, clave, base: basesIA[proveedor] }) });
+      }
+      if (url.pathname === IA_REDACTAR_PATH && req.method === 'POST') {
+        return enviar(200, 'redaccion', await repo.redactar(yo, parseRedaccion(await readJson(req)), basesIA));
       }
       if (url.pathname === IA_SUGERIR_PATH && req.method === 'POST') {
         return json(res, 200, { sugerencias: await repo.sugerirPendientes(yo, parseSugerencia(await readJson(req, MAX_BODY_IA_BYTES)), basesIA) });

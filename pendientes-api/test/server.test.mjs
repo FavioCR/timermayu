@@ -1165,6 +1165,60 @@ test('IA: elige el tipo de lo que se crea sin tipo, sin pisar lo que se pone a m
   assert.equal((await call('GET', '/ia')).status, 200);
 });
 
+test('IA: redacta mejor un borrador del chat o de la descripción, con el pendiente de contexto', async (t) => {
+  const pedidos = [];
+  const proveedor = await startProveedor(t, async (ruta, cuerpo) => {
+    pedidos.push(cuerpo);
+    const texto = cuerpo.input.includes('largo') ? 'x'.repeat(2500) : '@Junior, ¿puedes revisar el botón «Aceptar invitación»? Redirige a localhost.';
+    return { json: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: JSON.stringify({ texto }) }] }] } };
+  });
+  const { call, data, entrarComo } = await startServer(t, { basesIA: { gemini: proveedor.url } });
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const junior = await entrarComo('Junior');
+  await data('PATCH', `/perfiles/${junior.perfil.id}`, { correo: 'junior@example.com', telefono: '+50688887777' });
+  const { organizacion } = await diego.data('POST', '/organizaciones', { nombre: 'Mayugo', compartida: true });
+  const { proyecto } = await diego.data('POST', '/proyectos', { nombre: 'Vendeizi', organizacion_id: organizacion.id });
+  const { pendiente } = await diego.data('POST', '', { texto: 'Corregir la redirección del botón', perfil_id: junior.perfil.id, proyecto_id: proyecto.id });
+  const descripcion = JSON.stringify([{ type: 'paragraph', content: [{ type: 'text', text: 'En el correo de invitación el botón lleva a localhost.' }], children: [] }]);
+  await diego.data('PATCH', `/${pendiente.id}`, { descripcion });
+  await favio.data('POST', `/${pendiente.id}/comentarios`, { texto: 'Ya lo vi en staging' });
+  const redactar = (quien, cuerpo) => quien.call('POST', '/ia/redactar', cuerpo);
+
+  assert.equal((await (await redactar(diego, { texto: 'hola', donde: 'chat', pendiente_id: pendiente.id })).json()).error, 'ia_no_configurada');
+  await data('PUT', '/ia', { proveedor: 'gemini', claves: { gemini: 'AIza-falsa-redactar' } });
+
+  const res = await redactar(diego, { texto: '  dile a junior que lo revise  ', donde: 'chat', pendiente_id: pendiente.id });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { redaccion: { texto: '@Junior, ¿puedes revisar el botón «Aceptar invitación»? Redirige a localhost.' } });
+  const [chat] = pedidos;
+  assert.equal(chat.input, 'dile a junior que lo revise');
+  for (const parte of ['mensaje del chat', '«Corregir la redirección del botón», proyecto Mayugo › Vendeizi, estado pendiente, responsable Junior',
+    'Descripción (el principio): En el correo de invitación el botón lleva a localhost.', 'Favio: Ya lo vi en staging']) {
+    assert.ok(chat.system_instruction.includes(parte), parte);
+  }
+  assert.match(chat.system_instruction, /Personas: (?=.*Diego)(?=.*Favio)(?=.*Junior)/);
+  // Nunca correos ni teléfonos.
+  assert.ok(!/junior@example|88887777/.test(JSON.stringify(chat)));
+
+  // En la descripción puede usar Markdown y no van los mensajes del chat. Lo que vuelve se recorta: 2000 en el chat.
+  await redactar(diego, { texto: 'pasos para probar', donde: 'descripcion', pendiente_id: pendiente.id });
+  assert.ok(pedidos[1].system_instruction.includes('Markdown') && !pedidos[1].system_instruction.includes('Ya lo vi'));
+  assert.equal((await diego.data('POST', '/ia/redactar', { texto: 'algo largo', donde: 'chat', pendiente_id: pendiente.id })).redaccion.texto.length, 2000);
+  assert.equal((await diego.data('POST', '/ia/redactar', { texto: 'algo largo', donde: 'descripcion', pendiente_id: pendiente.id })).redaccion.texto.length, 2500);
+
+  assert.equal((await diego.data('POST', '/ia/redactar', { texto: 'hola', donde: 'titulo', pendiente_id: pendiente.id })).error, 'donde_invalido');
+  assert.equal((await diego.data('POST', '/ia/redactar', { texto: '   ', donde: 'chat', pendiente_id: pendiente.id })).error, 'texto_ia_invalido');
+  assert.equal((await diego.data('POST', '/ia/redactar', { texto: 'x'.repeat(4001), donde: 'chat', pendiente_id: pendiente.id })).error, 'texto_ia_invalido');
+  // Lo que no se ve no se redacta (ni deja saber que existe).
+  const { organizacion: privada } = await favio.data('POST', '/organizaciones', { nombre: 'Lo mío', compartida: false });
+  const { proyecto: suyo } = await favio.data('POST', '/proyectos', { nombre: 'Secreto', organizacion_id: privada.id });
+  const { pendiente: ajeno } = await favio.data('POST', '', { texto: 'Privado', proyecto_id: suyo.id });
+  assert.equal((await redactar(diego, { texto: 'hola', donde: 'chat', pendiente_id: ajeno.id })).status, 404);
+  // (El pendiente privado se creó sin tipo y la IA eligió uno: ese pedido no es de redactar.)
+  assert.equal(pedidos.filter((p) => p.response_format.schema.required.join() === 'texto').length, 4);
+});
+
 test('IA: los errores del proveedor se traducen y no repiten la clave', async (t) => {
   let respuesta;
   const proveedor = await startProveedor(t, () => respuesta);
