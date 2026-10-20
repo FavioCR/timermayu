@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Bell, BellRing, CheckCheck, UsersRound, Volume2, VolumeX } from "lucide-react"
 import { cn } from "cn"
+import { toast } from "sonner"
 
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { Button } from "@/components/ui/button"
@@ -58,6 +59,15 @@ export function Notificaciones({
     actuales.current = { abribles, onAbrir, onNovedades, onSinLeer }
   })
   useEffect(() => actuales.current.onSinLeer(sinLeer), [sinLeer])
+  // Lo recién asignado puede no haber llegado aún al tablero: se abre en cuanto llegue (o se olvida a los 10 s, por
+  // ejemplo si lo borraron).
+  const porAbrir = useRef<string | null>(null)
+  useEffect(() => {
+    const id = porAbrir.current
+    if (!id || !abribles.has(id)) return
+    porAbrir.current = null
+    onAbrir(id)
+  }, [abribles, onAbrir])
 
   const abrir = useCallback(
     (notificacion: Notificacion) => {
@@ -68,7 +78,13 @@ export function Notificaciones({
         api.notificaciones.marcarLeidas(credenciales, [notificacion.id]).then(setNoLeidas).catch(() => {})
       }
       const id = notificacion.actividad.pendiente_id
-      if (id && actuales.current.abribles.has(id)) actuales.current.onAbrir(id)
+      if (!id) return
+      if (actuales.current.abribles.has(id)) return actuales.current.onAbrir(id)
+      porAbrir.current = id
+      actuales.current.onNovedades()
+      window.setTimeout(() => {
+        if (porAbrir.current === id) porAbrir.current = null
+      }, 10_000)
     },
     [credenciales]
   )
@@ -84,12 +100,32 @@ export function Notificaciones({
       if (nuevas.length === 0) return
       // Si alguien cambió algo de uno, el tablero se pone al día.
       actuales.current.onNovedades()
-      if (nuevas.some((notificacion) => esParaSonar(notificacion, yo))) sonarAviso()
-      if (document.hidden && permisoActual() === "granted") {
+      // Te asignaron algo o te mencionaron: suena y, con el tablero a la vista, sale también en la página.
+      const importantes = nuevas.filter((notificacion) => esParaSonar(notificacion, yo))
+      const sono = importantes.length === 0 || (await sonarAviso())
+      if (importantes.length > 0 && document.visibilityState === "visible") {
+        const [primera] = importantes
+        const otras = importantes.length - 1
+        toast(`${primera.actividad.autor} ${describir(primera.actividad, { yo })}`, {
+          id: `aviso-${primera.id}`,
+          description: [
+            otras > 0 ? `Y ${otras === 1 ? "1 aviso más" : `${otras} avisos más`} en la campana.` : null,
+            sono ? null : "No sonó: el navegador espera un clic en la página. Desde ese clic, suena.",
+          ]
+            .filter(Boolean)
+            .join(" ") || undefined,
+          action: primera.actividad.pendiente_id ? { label: "Abrir", onClick: () => abrir(primera) } : undefined,
+          duration: 8000,
+        })
+      }
+      // En otra pestaña o en otra app: aviso del sistema. Solo suena el de una asignación o mención, y solo si el
+      // tablero no pudo sonar (así no suena dos veces).
+      if ((document.hidden || !document.hasFocus()) && permisoActual() === "granted") {
         for (const notificacion of nuevas.slice(0, 3)) {
           const aviso = new Notification(`${notificacion.actividad.autor} ${describir(notificacion.actividad, { yo })}`, {
             body: detalleDe(notificacion.actividad) ?? "",
             tag: notificacion.id,
+            silent: importantes.includes(notificacion) ? sono : true,
           })
           aviso.onclick = () => {
             window.focus()

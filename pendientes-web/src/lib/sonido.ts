@@ -1,21 +1,33 @@
 import type { Notificacion } from "@/lib/api"
 
 // El sonido de los avisos: dos notas cortas hechas con Web Audio (sin archivos). Los navegadores no dejan sonar una
-// página hasta que la persona la toca, así que el audio se prepara con el primer clic o tecla.
+// página hasta que la persona la toca (https://developer.chrome.com/blog/autoplay). Chrome sí deja si ya la tocó
+// antes, por ejemplo al escribir la contraseña, o si el tablero está instalado como app: entonces se prepara enseguida.
+// Si no, con el primer clic o tecla.
 const GUARDADO = "pendientes.sonido"
 
 let contexto: AudioContext | null = null
 
+const sonando = () => contexto?.state === "running"
+
+function arrancar() {
+  if (!("AudioContext" in window)) return Promise.resolve()
+  contexto ??= new AudioContext()
+  return sonando() ? Promise.resolve() : contexto.resume().catch(() => {})
+}
+
 export function prepararSonido() {
   const desbloquear = () => {
-    window.removeEventListener("pointerdown", desbloquear)
-    window.removeEventListener("keydown", desbloquear)
-    if (!("AudioContext" in window)) return
-    contexto ??= new AudioContext()
-    contexto.resume().catch(() => {})
+    arrancar().then(() => {
+      if (!sonando()) return
+      window.removeEventListener("pointerdown", desbloquear)
+      window.removeEventListener("keydown", desbloquear)
+    })
   }
   window.addEventListener("pointerdown", desbloquear)
   window.addEventListener("keydown", desbloquear)
+  const instalada = window.matchMedia("(display-mode: standalone)").matches
+  if (navigator.userActivation?.hasBeenActive || instalada) desbloquear()
   return desbloquear
 }
 
@@ -35,8 +47,12 @@ export function activarSonido(activado: boolean) {
   }
 }
 
-export function sonarAviso() {
-  if (!contexto || contexto.state !== "running" || !sonidoActivado()) return
+// Devuelve si sonó. Con el sonido apagado a propósito cuenta como que sí (no hay nada que avisar).
+export async function sonarAviso() {
+  if (!sonidoActivado()) return true
+  // Por si el navegador ya lo permite; si no, no se queda esperando.
+  if (!sonando()) await Promise.race([arrancar(), new Promise((listo) => setTimeout(listo, 300))])
+  if (!contexto || !sonando()) return false
   const inicio = contexto.currentTime
   for (const [frecuencia, desde] of [
     [880, 0],
@@ -53,6 +69,7 @@ export function sonarAviso() {
     oscilador.start(inicio + desde)
     oscilador.stop(inicio + desde + 0.4)
   }
+  return true
 }
 
 // Suena cuando te asignan algo (al crearlo, al reasignarlo o al pasártelo) o te mencionan en un chat o una descripción.
