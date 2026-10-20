@@ -22,7 +22,7 @@ export function ChipArchivo({
   onQuitar,
   className,
 }: {
-  archivo: Pick<Archivo, "nombre" | "tipo" | "tamano">
+  archivo: Pick<Archivo, "nombre" | "tipo"> & { tamano?: number }
   subiendo?: boolean
   nota?: string
   onAbrir?: () => void
@@ -36,7 +36,7 @@ export function ChipArchivo({
         type="button"
         disabled={!onAbrir}
         onClick={onAbrir}
-        title={`${archivo.nombre} · ${tamanoLegible(archivo.tamano)}`}
+        title={archivo.tamano === undefined ? archivo.nombre : `${archivo.nombre} · ${tamanoLegible(archivo.tamano)}`}
         className="flex min-w-0 items-center gap-1.5 rounded-sm outline-none enabled:hover:underline focus-visible:ring-2 focus-visible:ring-ring"
       >
         {subiendo ? (
@@ -45,10 +45,11 @@ export function ChipArchivo({
           <Icono className="size-3.5 shrink-0 text-muted-foreground" />
         )}
         <span className="truncate font-medium">{archivo.nombre}</span>
-        <span className="shrink-0 text-muted-foreground">
-          {tamanoLegible(archivo.tamano)}
-          {nota && ` · ${nota}`}
-        </span>
+        {(archivo.tamano !== undefined || nota) && (
+          <span className="shrink-0 text-muted-foreground">
+            {[archivo.tamano !== undefined && tamanoLegible(archivo.tamano), nota].filter(Boolean).join(" · ")}
+          </span>
+        )}
       </button>
       {onQuitar && (
         <button

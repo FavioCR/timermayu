@@ -30,6 +30,7 @@ export function describir(actividad: Actividad, { conTitulo = true, yo = null }:
     case "descripcion":
       return conTitulo ? `editó la descripción de ${titulo}` : "editó la descripción"
     case "comentario": {
+      if (yo && datos.respondido_id === yo) return conTitulo ? `te respondió en ${titulo}` : "te respondió"
       if (yo && datos.menciones?.includes(yo)) return conTitulo ? `te mencionó en ${titulo}` : "te mencionó"
       const archivos = datos.adjuntos?.length ?? 0
       if (!datos.extracto && archivos > 0) {

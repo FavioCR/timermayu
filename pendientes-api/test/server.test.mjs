@@ -80,8 +80,11 @@ test('valida pendientes, perfiles, organizaciones, proyectos y orden', () => {
   assert.deepEqual(parsePerfil({ nombre: 'Ana', telefono: '' }), { nombre: 'Ana', telefono: null });
   assert.throws(() => parsePerfil({ nombre: 'Ana', telefono: '8888 8888' }), /telefono_invalido/);
   assert.throws(() => parsePerfil({ nombre: 'Ana', telefono: '+506 8888 abcd' }), /telefono_invalido/);
-  assert.deepEqual(parseComentario({ texto: '  hola  ' }), { texto: 'hola', archivos: [] });
-  assert.deepEqual(parseComentario({ archivos: ['a', 'a'] }), { texto: '', archivos: ['a'] });
+  assert.deepEqual(parseComentario({ texto: '  hola  ' }), { texto: 'hola', archivos: [], respuesta_a: null });
+  assert.deepEqual(parseComentario({ archivos: ['a', 'a'] }), { texto: '', archivos: ['a'], respuesta_a: null });
+  assert.equal(parseComentario({ texto: 'sí', respuesta_a: 'abc' }).respuesta_a, 'abc');
+  assert.throws(() => parseComentario({ texto: 'sí', respuesta_a: 5 }), /respuesta_invalida/);
+  assert.throws(() => parseComentario({ texto: 'sí', respuesta_a: '' }), /respuesta_invalida/);
   assert.throws(() => parseComentario({ texto: '   ' }), /comentario_invalido/);
   assert.throws(() => parseComentario({ texto: 'x'.repeat(2001) }), /comentario_invalido/);
   assert.throws(() => parseComentario({ texto: 'hola', archivos: 'a' }), /archivos_invalidos/);
@@ -572,6 +575,32 @@ test('chat por pendiente: avisa a los que participan y a los @mencionados; cada 
   // Al borrar el pendiente se van sus mensajes.
   await diego.call('DELETE', `/${pendiente.id}`);
   assert.equal((await diego.call('GET', `/${pendiente.id}/comentarios`)).status, 404);
+});
+
+test('responder a un mensaje: queda enlazado, avisa "te respondió" y sobrevive al borrado del original', async (t) => {
+  const { entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const junior = await entrarComo('Junior');
+  const { pendiente } = await diego.data('POST', '', { texto: 'Login con Google' });
+  const { pendiente: otro } = await diego.data('POST', '', { texto: 'Otro' });
+
+  const { comentario: pregunta } = await junior.data('POST', `/${pendiente.id}/comentarios`, { texto: '¿Uso el SDK nuevo?' });
+  assert.equal(pregunta.respuesta_a, null);
+  const respuesta = await diego.call('POST', `/${pendiente.id}/comentarios`, { texto: 'Sí, el nuevo', respuesta_a: pregunta.id });
+  assert.equal(respuesta.status, 201);
+  const { comentario } = await respuesta.json();
+  assert.equal(comentario.respuesta_a, pregunta.id);
+  const aviso = (await junior.data('GET', '/notificaciones')).notificaciones[0];
+  assert.deepEqual([aviso.actividad.autor, aviso.actividad.datos.respondido_id], ['Diego', junior.perfil.id]);
+
+  // Solo se responde a un mensaje del mismo pendiente.
+  assert.equal((await diego.call('POST', `/${otro.id}/comentarios`, { texto: 'x', respuesta_a: pregunta.id })).status, 422);
+  assert.equal((await diego.call('POST', `/${pendiente.id}/comentarios`, { texto: 'x', respuesta_a: crypto.randomUUID() })).status, 422);
+
+  // Si el original se borra, la respuesta queda y sigue apuntándolo.
+  assert.equal((await junior.call('DELETE', `/comentarios/${pregunta.id}`)).status, 200);
+  const { comentarios } = await diego.data('GET', `/${pendiente.id}/comentarios`);
+  assert.deepEqual(comentarios.map((c) => [c.texto, c.respuesta_a]), [['Sí, el nuevo', pregunta.id]]);
 });
 
 test('el historial, el chat y los avisos de lo privado solo los ve su dueño, también después de borrarlo', async (t) => {

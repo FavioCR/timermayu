@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react"
-import { Paperclip, SendHorizontal, Trash2 } from "lucide-react"
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type TouchEvent } from "react"
+import { Paperclip, Reply, SendHorizontal, Trash2, X } from "lucide-react"
 import { cn } from "cn"
 
 import { ChipArchivo } from "@/components/archivos"
@@ -17,6 +17,62 @@ import { comprimirImagen } from "@/lib/comprimir-imagen"
 const CADA_MS = 10_000
 const MAX_SUGERENCIAS = 6
 const MAX_ADJUNTOS = 10
+
+// Deslizar un mensaje hacia la derecha lo responde, como en WhatsApp: se mueve hasta ARRASTRE_MAXIMO y responde desde ARRASTRE_RESPONDER.
+const ARRASTRE_MAXIMO = 80
+const ARRASTRE_RESPONDER = 56
+// Responder y borrar aparecen al pasar el mouse; en pantallas táctiles se ven siempre.
+const ACCION_DE_MENSAJE =
+  "rounded-sm opacity-0 outline-none group-hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:opacity-100"
+
+const resumenDe = (comentario: Comentario) =>
+  comentario.texto ||
+  (comentario.archivos.length === 1 ? `📎 ${comentario.archivos[0].nombre}` : `📎 ${comentario.archivos.length} archivos`)
+
+// La cita del mensaje respondido: su autor en su color y un extracto. Si el original se borró, lo dice.
+function CitaMensaje({
+  original,
+  perfil,
+  deMi,
+  enMio,
+  onIr,
+  className,
+}: {
+  original: Comentario | undefined
+  perfil: Perfil | null | undefined
+  deMi: boolean
+  enMio: boolean
+  onIr?: () => void
+  className?: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onIr}
+      disabled={!original || !onIr}
+      aria-label={original ? `Ir al mensaje de ${original.autor}` : undefined}
+      className={cn(
+        "flex w-full min-w-0 flex-col rounded-lg border-l-4 px-2 py-1 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring enabled:cursor-pointer",
+        enMio ? "bg-primary-foreground/15" : "bg-background/60",
+        className
+      )}
+      style={{ borderLeftColor: perfil?.color ?? "currentColor" }}
+    >
+      {original ? (
+        <>
+          <span className="font-semibold" style={enMio ? undefined : { color: perfil?.color }}>
+            {deMi ? "Tú" : original.autor}
+          </span>
+          <span className={cn("line-clamp-2 break-words", enMio ? "text-primary-foreground/80" : "text-muted-foreground")}>
+            {resumenDe(original)}
+          </span>
+        </>
+      ) : (
+        <span className="italic opacity-80">Mensaje borrado</span>
+      )}
+    </button>
+  )
+}
 
 // Un archivo elegido para el próximo mensaje: mientras sube no tiene `archivo`.
 type Adjunto = { clave: string; nombre: string; tipo: string; tamano: number; archivo?: Archivo }
@@ -88,7 +144,13 @@ export function ChatPendiente({
   const [elegido, setElegido] = useState(0)
   const [adjuntos, setAdjuntos] = useState<Adjunto[]>([])
   const [encima, setEncima] = useState(false)
+  const [respondiendo, setRespondiendo] = useState<Comentario | null>(null)
+  // El mensaje al que se saltó desde una cita, resaltado un momento.
+  const [resaltado, setResaltado] = useState<string | null>(null)
+  const [deslizado, setDeslizado] = useState<{ id: string; dx: number } | null>(null)
+  const toque = useRef<{ x: number; y: number; horizontal: boolean | null } | null>(null)
   const idSugerencias = useId()
+  const idChat = useId()
   const entrada = useRef<HTMLInputElement>(null)
   const lista = useRef<HTMLDivElement>(null)
   const formulario = useRef<HTMLFormElement>(null)
@@ -135,7 +197,9 @@ export function ChatPendiente({
   }, [comentarios])
 
   const perfiles = useMemo(() => [...perfilesPorId.values()], [perfilesPorId])
+  const porId = useMemo(() => new Map((comentarios ?? []).map((comentario) => [comentario.id, comentario])), [comentarios])
   const yo = usuario?.perfil_id ?? null
+  const perfilDe = (comentario: Comentario | undefined) => (comentario?.perfil_id ? perfilesPorId.get(comentario.perfil_id) : null)
 
   // Los que empiezan como lo escrito van primero; quien escribe no sale (no se avisa a sí mismo).
   const sugerencias = useMemo(() => {
@@ -175,6 +239,41 @@ export function ChatPendiente({
   const esMio = (comentario: Comentario) =>
     comentario.perfil_id ? comentario.perfil_id === usuario?.perfil_id : usuario?.perfil_id === null && comentario.autor === usuario.nombre
 
+  function responder(comentario: Comentario) {
+    setRespondiendo(comentario)
+    requestAnimationFrame(() => campo.current?.focus())
+  }
+
+  function irAlMensaje(id: string) {
+    document.getElementById(`${idChat}-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })
+    setResaltado(id)
+    window.setTimeout(() => setResaltado((actual) => (actual === id ? null : actual)), 1500)
+  }
+
+  // En pantallas táctiles: deslizar hacia la derecha responde; el desplazamiento vertical sigue siendo del navegador.
+  const deslizable = (comentario: Comentario) => ({
+    onTouchStart: (event: TouchEvent) => {
+      toque.current = { x: event.touches[0].clientX, y: event.touches[0].clientY, horizontal: null }
+    },
+    onTouchMove: (event: TouchEvent) => {
+      const inicio = toque.current
+      if (!inicio) return
+      const dx = event.touches[0].clientX - inicio.x
+      const dy = event.touches[0].clientY - inicio.y
+      if (inicio.horizontal === null && Math.hypot(dx, dy) > 8) inicio.horizontal = Math.abs(dx) > Math.abs(dy)
+      if (inicio.horizontal) setDeslizado({ id: comentario.id, dx: Math.max(0, Math.min(dx, ARRASTRE_MAXIMO)) })
+    },
+    onTouchEnd: () => {
+      if (deslizado?.id === comentario.id && deslizado.dx >= ARRASTRE_RESPONDER) responder(comentario)
+      toque.current = null
+      setDeslizado(null)
+    },
+    onTouchCancel: () => {
+      toque.current = null
+      setDeslizado(null)
+    },
+  })
+
   // Se suben apenas se eligen (como borradores del próximo mensaje); el mensaje solo los nombra al enviarse.
   async function adjuntar(lista: FileList | File[]) {
     const archivos = [...lista].slice(0, Math.max(MAX_ADJUNTOS - adjuntos.length, 0))
@@ -211,11 +310,12 @@ export function ChatPendiente({
     setEnviando(true)
     setMencion(null)
     try {
-      const nuevo = await api.comentarios.crear(credenciales, pendienteId, limpio, listos)
+      const nuevo = await api.comentarios.crear(credenciales, pendienteId, limpio, listos, respondiendo?.id ?? null)
       abajo.current = true
       setComentarios((actuales) => [...(actuales ?? []), nuevo])
       setTexto("")
       setAdjuntos([])
+      setRespondiendo(null)
       setError("")
     } catch (err) {
       fallar(err)
@@ -243,7 +343,7 @@ export function ChatPendiente({
           const elemento = event.currentTarget
           abajo.current = elemento.scrollHeight - elemento.scrollTop - elemento.clientHeight < 40
         }}
-        className="flex max-h-[55svh] min-h-48 flex-col gap-4 overflow-y-auto p-4 lg:max-h-none lg:flex-1"
+        className="flex max-h-[55svh] min-h-48 flex-col gap-4 overflow-x-hidden overflow-y-auto p-4 lg:max-h-none lg:flex-1"
         role="log"
         aria-label="Mensajes"
       >
@@ -256,54 +356,94 @@ export function ChatPendiente({
         ) : (
           comentarios.map((comentario) => {
             const mio = esMio(comentario)
-            const perfil = comentario.perfil_id ? perfilesPorId.get(comentario.perfil_id) : null
+            const perfil = perfilDe(comentario)
+            const original = comentario.respuesta_a ? porId.get(comentario.respuesta_a) : undefined
+            const dx = deslizado?.id === comentario.id ? deslizado.dx : 0
             return (
-              <div key={comentario.id} className={cn("group flex gap-2", mio && "flex-row-reverse")}>
-                <PerfilAvatar perfil={perfil} size="sm" />
-                <div className={cn("flex max-w-[85%] min-w-0 flex-col gap-1", mio && "items-end")}>
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    {!mio && <span className="font-medium text-foreground">{comentario.autor}</span>}
-                    <time dateTime={comentario.creado_en} title={fechaCompleta.format(new Date(comentario.creado_en))}>
-                      {haceCuanto(comentario.creado_en)}
-                    </time>
-                    {mio &&
-                      (confirmando === comentario.id ? (
-                        <span className="flex items-center gap-1">
-                          <Button size="xs" variant="destructive" onClick={() => borrar(comentario)}>
-                            Borrar
-                          </Button>
-                          <Button size="xs" variant="ghost" onClick={() => setConfirmando(null)}>
-                            No
-                          </Button>
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          aria-label="Borrar mensaje"
-                          className="rounded-sm opacity-0 outline-none group-hover:opacity-100 hover:text-destructive focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring"
-                          onClick={() => setConfirmando(comentario.id)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </button>
-                      ))}
-                  </div>
-                  {comentario.texto && (
-                    <p
-                      className={cn(
-                        "m-0 rounded-2xl px-3 py-2 text-sm break-words whitespace-pre-wrap",
-                        mio ? "rounded-tr-sm bg-primary text-primary-foreground" : "rounded-tl-sm bg-muted"
-                      )}
-                    >
-                      {formatear(comentario.texto, perfiles, yo, mio)}
-                    </p>
-                  )}
-                  {comentario.archivos.length > 0 && (
-                    <div className={cn("flex max-w-full flex-col gap-1", mio && "items-end")}>
-                      {comentario.archivos.map((archivo) => (
-                        <ChipArchivo key={archivo.id} archivo={archivo} onAbrir={() => abrirArchivo(credenciales, archivo).catch(fallar)} />
-                      ))}
+              <div
+                key={comentario.id}
+                id={`${idChat}-${comentario.id}`}
+                className={cn("relative -m-1 rounded-xl p-1 transition-colors duration-700", resaltado === comentario.id && "bg-primary/15")}
+                style={{ touchAction: "pan-y" }}
+                {...deslizable(comentario)}
+              >
+                {dx > 0 && (
+                  <Reply
+                    aria-hidden
+                    className="absolute top-1/2 left-1 size-5 -translate-y-1/2 text-muted-foreground"
+                    style={{ opacity: Math.min(dx / ARRASTRE_RESPONDER, 1) }}
+                  />
+                )}
+                <div
+                  className={cn("group flex gap-2", mio && "flex-row-reverse")}
+                  style={{ transform: dx ? `translateX(${dx}px)` : undefined, transition: dx ? "none" : "transform 200ms" }}
+                >
+                  <PerfilAvatar perfil={perfil} size="sm" />
+                  <div className={cn("flex max-w-[85%] min-w-0 flex-col gap-1", mio && "items-end")}>
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      {!mio && <span className="font-medium text-foreground">{comentario.autor}</span>}
+                      <time dateTime={comentario.creado_en} title={fechaCompleta.format(new Date(comentario.creado_en))}>
+                        {haceCuanto(comentario.creado_en)}
+                      </time>
+                      <button
+                        type="button"
+                        aria-label={`Responder a ${mio ? "tu mensaje" : comentario.autor}`}
+                        title="Responder"
+                        className={cn(ACCION_DE_MENSAJE, "hover:text-foreground")}
+                        onClick={() => responder(comentario)}
+                      >
+                        <Reply className="size-3.5" />
+                      </button>
+                      {mio &&
+                        (confirmando === comentario.id ? (
+                          <span className="flex items-center gap-1">
+                            <Button size="xs" variant="destructive" onClick={() => borrar(comentario)}>
+                              Borrar
+                            </Button>
+                            <Button size="xs" variant="ghost" onClick={() => setConfirmando(null)}>
+                              No
+                            </Button>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            aria-label="Borrar mensaje"
+                            className={cn(ACCION_DE_MENSAJE, "hover:text-destructive")}
+                            onClick={() => setConfirmando(comentario.id)}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </button>
+                        ))}
                     </div>
-                  )}
+                    {(comentario.texto || comentario.respuesta_a) && (
+                      <div
+                        className={cn(
+                          "flex max-w-full min-w-0 flex-col gap-1 rounded-2xl px-3 py-2 text-sm",
+                          mio ? "rounded-tr-sm bg-primary text-primary-foreground" : "rounded-tl-sm bg-muted"
+                        )}
+                      >
+                        {comentario.respuesta_a && (
+                          <CitaMensaje
+                            original={original}
+                            perfil={perfilDe(original)}
+                            deMi={Boolean(original && esMio(original))}
+                            enMio={mio}
+                            onIr={original && (() => irAlMensaje(original.id))}
+                          />
+                        )}
+                        {comentario.texto && (
+                          <p className="m-0 break-words whitespace-pre-wrap">{formatear(comentario.texto, perfiles, yo, mio)}</p>
+                        )}
+                      </div>
+                    )}
+                    {comentario.archivos.length > 0 && (
+                      <div className={cn("flex max-w-full flex-col gap-1", mio && "items-end")}>
+                        {comentario.archivos.map((archivo) => (
+                          <ChipArchivo key={archivo.id} archivo={archivo} onAbrir={() => abrirArchivo(credenciales, archivo).catch(fallar)} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             )
@@ -334,6 +474,28 @@ export function ChatPendiente({
               adjuntar(event.dataTransfer.files)
             }}
           >
+            {respondiendo && (
+              <div className="flex items-start gap-1" aria-label="Respondiendo a">
+                <CitaMensaje
+                  original={respondiendo}
+                  perfil={perfilDe(respondiendo)}
+                  deMi={esMio(respondiendo)}
+                  enMio={false}
+                  onIr={() => irAlMensaje(respondiendo.id)}
+                  className="bg-muted"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="text-muted-foreground"
+                  aria-label="No responder"
+                  onClick={() => setRespondiendo(null)}
+                >
+                  <X />
+                </Button>
+              </div>
+            )}
             {adjuntos.length > 0 && (
               <div className="flex flex-wrap gap-1.5" aria-label="Archivos para enviar">
                 {adjuntos.map((adjunto) => (

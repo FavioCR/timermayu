@@ -24,10 +24,13 @@ import {
   type Usuario,
 } from "@/lib/api"
 import { enlaceWhatsApp } from "@/lib/actividad"
+import { abrirArchivo, PREFIJO_URL_ARCHIVO, tipoPorNombre, urlDeArchivo } from "@/lib/archivos"
 import { comprimirImagen } from "@/lib/comprimir-imagen"
 import { involucrados, organizacionDe, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
+// Lo que el servidor guarda como imagen de la descripción; lo demás va a Archivos.
+const TIPOS_DE_IMAGEN = ["image/png", "image/jpeg", "image/gif", "image/webp"]
 const EditorDescripcion = lazy(() => import("@/components/editor-descripcion"))
 
 // La descripción se guarda sola cuando se deja de escribir este tiempo.
@@ -147,11 +150,14 @@ function Contenido({
     temporizador.current = window.setTimeout(guardarDescripcion, GUARDAR_DESPUES_MS)
   }
 
-  async function subirImagen(archivo: File) {
+  // Las imágenes quedan como imagen de la descripción (achicadas a WebP); lo demás se sube a Archivos y la línea lo enlaza.
+  async function subirArchivo(archivo: File) {
     try {
-      const imagen = await api.subirImagen(credenciales, id, await comprimirImagen(archivo))
+      const url = TIPOS_DE_IMAGEN.includes(archivo.type)
+        ? (await api.subirImagen(credenciales, id, await comprimirImagen(archivo))).url
+        : urlDeArchivo((await api.archivos.subir(credenciales, id, archivo)).id)
       setAviso("")
-      return imagen.url
+      return url
     } catch (err) {
       if (esNoAutorizado(err)) onSalir()
       const mensaje = mensajeDeError(err)
@@ -168,7 +174,19 @@ function Contenido({
   }
 
   function resolverUrl(url: string) {
-    return url.startsWith("/api/pendientes/imagenes/") ? api.urlDeImagen(credenciales, url) : Promise.resolve(url)
+    const conContrasena = url.startsWith("/api/pendientes/imagenes/") || url.startsWith(PREFIJO_URL_ARCHIVO)
+    return conContrasena ? api.urlDeImagen(credenciales, url) : Promise.resolve(url)
+  }
+
+  function abrirDeDescripcion(url: string, nombre: string) {
+    if (url.startsWith(PREFIJO_URL_ARCHIVO)) {
+      abrirArchivo(credenciales, { id: url.slice(PREFIJO_URL_ARCHIVO.length), nombre, tipo: tipoPorNombre(nombre) }).catch((err) => {
+        if (esNoAutorizado(err)) onSalir()
+        else setAviso(mensajeDeError(err))
+      })
+    } else if (/^https?:\/\//.test(url)) {
+      window.open(url, "_blank", "noopener,noreferrer")
+    }
   }
 
   function guardarTitulo(valor: string) {
@@ -319,8 +337,9 @@ function Contenido({
                 inicial={inicial.bloques as Parameters<typeof EditorDescripcion>[0]["inicial"]}
                 oscuro={document.documentElement.classList.contains("dark")}
                 onCambio={alCambiarDescripcion}
-                subirImagen={subirImagen}
+                subirArchivo={subirArchivo}
                 resolverUrl={resolverUrl}
+                abrirArchivo={abrirDeDescripcion}
               />
             </Suspense>
           ) : (

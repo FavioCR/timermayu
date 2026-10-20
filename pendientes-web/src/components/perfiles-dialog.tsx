@@ -1,5 +1,7 @@
 import { useId, useState, type FormEvent } from "react"
 import { KeyRound, Lock, Pencil, Plus, Trash2 } from "lucide-react"
+import { formatPhoneNumberIntl, isValidPhoneNumber, parsePhoneNumber } from "react-phone-number-input"
+import paises from "react-phone-number-input/locale/es.json"
 
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { SelectorColor } from "@/components/selector-color"
@@ -12,11 +14,45 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { PhoneInput } from "@/components/ui/phone-input"
 import { colorLibre, type Perfil, type Usuario } from "@/lib/api"
 
 export type CambiosPerfil = { nombre: string; correo: string | null; telefono: string | null; color: string; contrasena: string }
+
+const telefonoValido = (telefono: string) => !telefono || isValidPhoneNumber(telefono)
+
+// El WhatsApp con su país (Costa Rica primero y por defecto). Llega en E.164 (+50688887777); el servidor guarda solo los dígitos.
+function CampoWhatsApp({
+  valor,
+  onCambiar,
+  invalido,
+  ...props
+}: {
+  id?: string
+  "aria-label"?: string
+  valor: string
+  onCambiar: (valor: string) => void
+  invalido?: boolean
+}) {
+  // El país del número guardado, para que el campo muestre solo el número nacional.
+  const [pais] = useState(() => (valor && parsePhoneNumber(valor)?.country) || "CR")
+  return (
+    <PhoneInput
+      {...props}
+      defaultCountry={pais}
+      international={false}
+      labels={paises}
+      countryOptionsOrder={["CR", "|", "..."]}
+      placeholder="Número"
+      autoComplete="off"
+      value={valor}
+      onChange={onCambiar}
+      aria-invalid={invalido || undefined}
+    />
+  )
+}
 
 function EditorPerfil({
   perfil,
@@ -36,9 +72,14 @@ function EditorPerfil({
   const [color, setColor] = useState(perfil.color.toUpperCase())
   const [contrasena, setContrasena] = useState("")
   const [guardando, setGuardando] = useState(false)
+  const [telefonoMal, setTelefonoMal] = useState(false)
 
   async function guardar(event: FormEvent) {
     event.preventDefault()
+    if (!telefonoValido(telefono)) {
+      setTelefonoMal(true)
+      return
+    }
     setGuardando(true)
     const listo = await onGuardar({ nombre: nombre.trim(), correo: correo.trim() || null, telefono: telefono.trim() || null, color, contrasena })
     setGuardando(false)
@@ -70,16 +111,20 @@ function EditorPerfil({
           <FieldLabel htmlFor={`${id}-telefono`}>
             WhatsApp <span className="font-normal text-muted-foreground">(opcional)</span>
           </FieldLabel>
-          <Input
+          <CampoWhatsApp
             id={`${id}-telefono`}
-            type="tel"
-            autoComplete="off"
-            placeholder="+506 8888 8888"
-            value={telefono}
-            onChange={(event) => setTelefono(event.target.value)}
-            maxLength={24}
+            valor={telefono}
+            onCambiar={(valor) => {
+              setTelefono(valor)
+              setTelefonoMal(false)
+            }}
+            invalido={telefonoMal}
           />
-          <FieldDescription>Con código de país. Sirve para avisarle por WhatsApp cuando le asignan algo.</FieldDescription>
+          {telefonoMal ? (
+            <FieldError>Revisa el número: no corresponde a ese país.</FieldError>
+          ) : (
+            <FieldDescription>Elige el país y escribe el número. Sirve para avisarle por WhatsApp cuando le asignan algo.</FieldDescription>
+          )}
         </Field>
         <Field>
           <FieldLabel htmlFor={`${id}-contrasena`}>{perfil.tiene_contrasena ? "Nueva contraseña" : "Contraseña"}</FieldLabel>
@@ -146,6 +191,10 @@ export function PerfilesDialog({
   async function agregar(event: FormEvent) {
     event.preventDefault()
     if (!nombre.trim()) return
+    if (!telefonoValido(telefono)) {
+      setError("Revisa el WhatsApp: el número no corresponde a ese país.")
+      return
+    }
     const fallo = await onCrear({ nombre: nombre.trim(), color: colorElegido, correo: correo.trim() || null, telefono: telefono.trim() || null })
     setError(fallo ?? "")
     if (!fallo) {
@@ -214,7 +263,7 @@ export function PerfilesDialog({
                             : "No tiene pendientes asignados"
                         : [
                             perfil.correo,
-                            perfil.telefono && `+${perfil.telefono}`,
+                            perfil.telefono && (formatPhoneNumberIntl(`+${perfil.telefono}`) || `+${perfil.telefono}`),
                             cantidad === 0 ? "Sin pendientes asignados" : `${cantidad} pendiente${cantidad === 1 ? "" : "s"}`,
                           ]
                             .filter(Boolean)
@@ -293,15 +342,7 @@ export function PerfilesDialog({
               onChange={(event) => setCorreo(event.target.value)}
               maxLength={120}
             />
-            <Input
-              type="tel"
-              aria-label="WhatsApp del perfil nuevo (opcional)"
-              placeholder="WhatsApp: +506 8888 8888"
-              autoComplete="off"
-              value={telefono}
-              onChange={(event) => setTelefono(event.target.value)}
-              maxLength={24}
-            />
+            <CampoWhatsApp aria-label="WhatsApp del perfil nuevo (opcional)" valor={telefono} onCambiar={setTelefono} />
           </div>
           <SelectorColor valor={colorElegido} onCambiar={setColor} etiqueta="Color del perfil" />
           {error && (

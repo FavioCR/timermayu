@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -60,7 +62,7 @@ import {
 import { Notificaciones } from "@/components/notificaciones"
 import { PasarDialog } from "@/components/pasar-dialog"
 import { PerfilAvatar } from "@/components/perfil-avatar"
-import { PerfilesDialog, type CambiosPerfil } from "@/components/perfiles-dialog"
+import type { CambiosPerfil } from "@/components/perfiles-dialog"
 import { ProyectoCombobox } from "@/components/proyecto-combobox"
 import { ProyectosDialog } from "@/components/proyectos-dialog"
 import {
@@ -106,6 +108,8 @@ import {
 import { enlaceWhatsApp } from "@/lib/actividad"
 import { agrupar, conOrganizacion, conProyecto, involucrados, organizacionDe, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
+
+const PerfilesDialog = lazy(() => import("@/components/perfiles-dialog").then((modulo) => ({ default: modulo.PerfilesDialog })))
 
 const ICONOS: Record<Estado, typeof Inbox> = { pendiente: Inbox, haciendo: RotateCw, hecho: CircleCheck }
 
@@ -240,6 +244,9 @@ export function Tablero({
   // Un enlace con ?p=<id> (el de WhatsApp, por ejemplo) abre ese pendiente.
   const [abierto, setAbierto] = useState(() => new URLSearchParams(window.location.search).get("p"))
   const [ventana, setVentana] = useState<Ventana | null>(null)
+  // Abierta una vez, Perfiles queda montada para que se cierre con su animación.
+  const [perfilesAbiertos, setPerfilesAbiertos] = useState(false)
+  if (ventana === "perfiles" && !perfilesAbiertos) setPerfilesAbiertos(true)
   // El pendiente hecho que se está pasando a otra persona.
   const [pasando, setPasando] = useState<Pendiente | null>(null)
   const [confirmarLimpieza, setConfirmarLimpieza] = useState(false)
@@ -1209,16 +1216,21 @@ export function Tablero({
         pendientesPorProyecto={porProyecto}
         onSalir={onSalir}
       />
-      <PerfilesDialog
-        abierto={ventana === "perfiles"}
-        onAbiertoChange={(siguiente) => setVentana(siguiente ? "perfiles" : null)}
-        perfiles={perfiles}
-        asignados={asignados}
-        usuario={usuario}
-        onCrear={crearPerfil}
-        onActualizar={actualizarPerfil}
-        onBorrar={borrarPerfil}
-      />
+      {/* Se carga al abrirla: el campo de WhatsApp trae las banderas y los formatos de cada país. */}
+      {perfilesAbiertos && (
+        <Suspense fallback={null}>
+          <PerfilesDialog
+            abierto={ventana === "perfiles"}
+            onAbiertoChange={(siguiente) => setVentana(siguiente ? "perfiles" : null)}
+            perfiles={perfiles}
+            asignados={asignados}
+            usuario={usuario}
+            onCrear={crearPerfil}
+            onActualizar={actualizarPerfil}
+            onBorrar={borrarPerfil}
+          />
+        </Suspense>
+      )}
       <ActividadSheet
         credenciales={credenciales}
         abierto={ventana === "actividad"}

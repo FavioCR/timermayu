@@ -19,17 +19,33 @@ export function claseDeArchivo(nombre: string, tipo: string): ClaseDeArchivo {
   return "otro"
 }
 
+// Los archivos enlazados en la descripción guardan esta url; el servidor la sirve con la contraseña.
+export const PREFIJO_URL_ARCHIVO = "/api/pendientes/archivos/"
+export const urlDeArchivo = (id: string) => `${PREFIJO_URL_ARCHIVO}${id}`
+
+const seMuestra = (tipo: string) => tipo === "application/pdf" || tipo.startsWith("image/")
+
+// Para lo que solo se conoce por su nombre, como un archivo de la descripción.
+export function tipoPorNombre(nombre: string) {
+  const extension = nombre.split(".").pop()?.toLowerCase() ?? ""
+  if (extension === "pdf") return "application/pdf"
+  if (["png", "jpg", "jpeg", "gif", "webp"].includes(extension)) return `image/${extension === "jpg" ? "jpeg" : extension}`
+  return "application/octet-stream"
+}
+
 // Se bajan con la contraseña. Imágenes y PDF se abren en otra pestaña; lo demás se descarga con su nombre.
-export async function abrirArchivo(credenciales: string, archivo: Archivo) {
-  const enPestana = archivo.tipo !== "application/octet-stream"
+export async function abrirArchivo(credenciales: string, archivo: Pick<Archivo, "id" | "nombre" | "tipo">) {
   // La pestaña se abre dentro del clic, para que el navegador no la bloquee, y se llena cuando llega el archivo.
-  const pestana = enPestana ? window.open("", "_blank") : null
+  const pestana = seMuestra(archivo.tipo) ? window.open("", "_blank") : null
   try {
-    const url = URL.createObjectURL(await api.archivos.descargar(credenciales, archivo.id))
-    if (pestana) {
+    const contenido = await api.archivos.descargar(credenciales, archivo.id)
+    const url = URL.createObjectURL(contenido)
+    // Manda lo que dice el servidor: si al final no es imagen ni PDF, se descarga.
+    if (pestana && seMuestra(contenido.type)) {
       pestana.opener = null
       pestana.location.href = url
     } else {
+      pestana?.close()
       const enlace = document.createElement("a")
       enlace.href = url
       enlace.download = archivo.nombre

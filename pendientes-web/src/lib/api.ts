@@ -79,6 +79,7 @@ export type DatosActividad = {
   comentario_id?: string
   extracto?: string
   menciones?: string[]
+  respondido_id?: string
   adjuntos?: string[]
   de_id?: string | null
   nota?: string
@@ -107,6 +108,8 @@ export type Comentario = {
   perfil_id: string | null
   autor: string
   texto: string
+  // El mensaje al que responde, como en WhatsApp; puede ya no estar si se borró.
+  respuesta_a: string | null
   creado_en: string
   archivos: Archivo[]
 }
@@ -173,6 +176,7 @@ const MENSAJES: Record<string, string> = {
   archivo_de_mensaje: "Ese archivo es de un mensaje del chat: se quita borrando el mensaje.",
   nombre_archivo_invalido: "El nombre del archivo no se pudo leer. Cámbialo y vuelve a intentar.",
   nota_invalida: "La nota puede tener hasta 500 caracteres.",
+  respuesta_invalida: "El mensaje al que respondías ya no está.",
 }
 
 export const MAX_IMAGEN_BYTES = 10 * 1024 * 1024
@@ -354,8 +358,10 @@ export const api = {
   comentarios: {
     listar: (credenciales: string, pendienteId: string) =>
       pedir<{ comentarios: Comentario[] }>(credenciales, "GET", `/${pendienteId}/comentarios`).then((data) => data.comentarios),
-    crear: (credenciales: string, pendienteId: string, texto: string, archivos: string[] = []) =>
-      pedir<{ comentario: Comentario }>(credenciales, "POST", `/${pendienteId}/comentarios`, { texto, archivos }).then((data) => data.comentario),
+    crear: (credenciales: string, pendienteId: string, texto: string, archivos: string[] = [], respuestaA: string | null = null) =>
+      pedir<{ comentario: Comentario }>(credenciales, "POST", `/${pendienteId}/comentarios`, { texto, archivos, respuesta_a: respuestaA }).then(
+        (data) => data.comentario
+      ),
     borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/comentarios/${id}`),
   },
   archivos: {

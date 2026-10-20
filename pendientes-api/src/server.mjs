@@ -85,7 +85,7 @@ const PENDIENTE_VISIBLE = `(proyecto_id IS NULL OR proyecto_id IN (${PROYECTOS_V
 const ACTIVIDAD_VISIBLE = `(a.pendiente_id IN (SELECT id FROM pendientes WHERE ${PENDIENTE_VISIBLE})
   OR (a.pendiente_id IS NULL AND (a.privado_de IS NULL OR a.privado_de = ?)))`;
 const SELECT_ACTIVIDAD = 'SELECT a.id, a.pendiente_id, a.texto_pendiente, a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en FROM actividad a';
-const SELECT_COMENTARIO = 'SELECT id, pendiente_id, perfil_id, autor, texto, creado_en FROM comentarios';
+const SELECT_COMENTARIO = 'SELECT id, pendiente_id, perfil_id, autor, texto, respuesta_a, creado_en FROM comentarios';
 const SELECT_ARCHIVO = 'SELECT id, pendiente_id, comentario_id, nombre, tipo, tamano, perfil_id, autor, creado_en FROM archivos';
 
 // Cada función lleva la base de una versión a la siguiente; la versión vive en PRAGMA user_version.
@@ -237,6 +237,11 @@ const MIGRACIONES = [
       CREATE INDEX archivos_pendiente ON archivos (pendiente_id, creado_en);
       CREATE INDEX archivos_comentario ON archivos (comentario_id);
     `);
+  },
+  // Responder a un mensaje del chat, como en WhatsApp. Sin clave foránea: si el original se borra,
+  // la respuesta sigue apuntándolo y el tablero muestra "Mensaje borrado".
+  (db) => {
+    db.exec('ALTER TABLE comentarios ADD COLUMN respuesta_a TEXT');
   },
 ];
 
@@ -420,7 +425,7 @@ export function parsePerfil(input, { partial = false } = {}) {
   return changes;
 }
 
-// Un mensaje lleva texto, archivos ya subidos para él, o las dos cosas.
+// Un mensaje lleva texto, archivos ya subidos para él, o las dos cosas; puede responder a otro mensaje.
 export function parseComentario(input) {
   const texto = typeof input.texto === 'string' ? input.texto.trim() : '';
   const archivos = input.archivos ?? [];
@@ -428,7 +433,9 @@ export function parseComentario(input) {
     throw httpError(422, 'archivos_invalidos');
   }
   if ((!texto && archivos.length === 0) || texto.length > MAX_COMENTARIO) throw httpError(422, 'comentario_invalido');
-  return { texto, archivos: [...new Set(archivos)] };
+  const respuestaA = input.respuesta_a ?? null;
+  if (respuestaA !== null && (typeof respuestaA !== 'string' || !respuestaA)) throw httpError(422, 'respuesta_invalida');
+  return { texto, archivos: [...new Set(archivos)], respuesta_a: respuestaA };
 }
 
 // Pasar un pendiente a otra persona: vuelve a Por hacer con su nuevo responsable y, si se quiere, una nota de lo que le toca.
@@ -803,9 +810,9 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         .map((row) => ({ ...fila(row), archivos: adjuntos.get(row.id) ?? [] }));
     },
 
-    // Avisa al responsable, a quien lo creó, a quienes ya escribieron y a los @mencionados.
+    // Avisa al responsable, a quien lo creó, a quienes ya escribieron, a los @mencionados y a quien escribió el mensaje respondido.
     // Los archivos tienen que ser borradores de quien escribe, subidos para este mismo pendiente.
-    crearComentario(quien, pendienteId, { texto, archivos: archivoIds = [] }) {
+    crearComentario(quien, pendienteId, { texto, archivos: archivoIds = [], respuesta_a: respuestaA = null }) {
       const item = pendiente(quien.perfil_id, pendienteId);
       if (!item) return null;
       const id = randomUUID();
@@ -813,8 +820,10 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         const adjuntos = archivoIds.map((archivoId) => fila(db.prepare(`${SELECT_ARCHIVO} WHERE id = ? AND pendiente_id = ? AND borrador = 1`)
           .get(archivoId, pendienteId)));
         if (adjuntos.some((archivo) => !archivo || !esAutor(quien, archivo))) throw httpError(422, 'archivos_invalidos');
-        db.prepare('INSERT INTO comentarios (id, pendiente_id, perfil_id, autor, texto, creado_en) VALUES (?, ?, ?, ?, ?, ?)')
-          .run(id, pendienteId, quien.perfil_id, quien.nombre, texto, new Date().toISOString());
+        const respondido = respuestaA && db.prepare('SELECT perfil_id FROM comentarios WHERE id = ? AND pendiente_id = ?').get(respuestaA, pendienteId);
+        if (respuestaA && !respondido) throw httpError(422, 'respuesta_invalida');
+        db.prepare('INSERT INTO comentarios (id, pendiente_id, perfil_id, autor, texto, respuesta_a, creado_en) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(id, pendienteId, quien.perfil_id, quien.nombre, texto, respuestaA, new Date().toISOString());
         const adjuntar = db.prepare('UPDATE archivos SET comentario_id = ?, borrador = 0 WHERE id = ?');
         for (const archivo of adjuntos) adjuntar.run(id, archivo.id);
         const participantes = db.prepare('SELECT DISTINCT perfil_id FROM comentarios WHERE pendiente_id = ? AND perfil_id IS NOT NULL').all(pendienteId)
@@ -826,8 +835,10 @@ function createRepo(db, dataDir, graciaImagenesMs) {
           extracto: texto.slice(0, MAX_EXTRACTO),
           ...(menciones.length > 0 && { menciones }),
           ...(adjuntos.length > 0 && { adjuntos: adjuntos.map((archivo) => archivo.nombre) }),
+          // Para que el aviso de quien escribió el original diga "te respondió".
+          ...(respondido?.perfil_id && { respondido_id: respondido.perfil_id }),
         };
-        registrar(quien, item, 'comentario', datos, [item.perfil_id, item.creado_por, ...participantes, ...menciones]);
+        registrar(quien, item, 'comentario', datos, [item.perfil_id, item.creado_por, ...participantes, ...menciones, respondido?.perfil_id]);
         return { ...fila(db.prepare(`${SELECT_COMENTARIO} WHERE id = ?`).get(id)), archivos: adjuntos.map((archivo) => ({ ...archivo, comentario_id: id })) };
       });
     },
