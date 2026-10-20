@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, writeFile } from 'node:fs/promises';
+import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,13 +11,16 @@ import {
   createApp,
   nombreDeArchivo,
   openDb,
+  parseAjustesIA,
   parseComentario,
+  parseEtiqueta,
   parseLeidas,
   parseOrden,
   parseOrganizacion,
   parsePendiente,
   parsePerfil,
   parseProyecto,
+  parseSugerencia,
   parseTraspaso,
   resumirDescripcion,
   tipoDeArchivo,
@@ -27,6 +31,62 @@ const password = 'test-password';
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
 const basic = (usuario, contrasena) => `Basic ${Buffer.from(`${usuario}:${contrasena}`).toString('base64')}`;
 const auth = basic('pendientes', password);
+
+// Un proveedor de IA falso: anota lo que le piden y contesta lo que diga `responder(ruta, cuerpo, headers)`.
+async function startProveedor(t, responder) {
+  const pedidos = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const cuerpo = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null;
+    pedidos.push({ ruta: req.url, metodo: req.method, headers: req.headers, cuerpo });
+    const { status = 200, json } = responder(req.url, cuerpo, req.headers);
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(json));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  return { url: `http://127.0.0.1:${server.address().port}`, pedidos };
+}
+
+// Lee los eventos de GET /eventos hasta juntar `cantidad` (o hasta que pase el tiempo) y cierra.
+async function leerEventos(base, headers, { cliente = '', cantidad = 1, esperaMs = 1500, alConectar = async () => {} } = {}) {
+  const control = new AbortController();
+  const respuesta = await fetch(`${base}/api/pendientes/eventos?cliente=${cliente}`, { headers, signal: control.signal });
+  assert.equal(respuesta.status, 200);
+  assert.match(respuesta.headers.get('content-type'), /^text\/event-stream/);
+  const eventos = [];
+  const lector = respuesta.body.pipeThrough(new TextDecoderStream()).getReader();
+  let resto = '';
+  const temporizador = setTimeout(() => control.abort(), esperaMs);
+  let conectado = false;
+  try {
+    while (eventos.length < cantidad) {
+      const { value, done } = await lector.read();
+      if (done) break;
+      resto += value;
+      const bloques = resto.split('\n\n');
+      resto = bloques.pop();
+      for (const bloque of bloques) {
+        const datos = bloque.split('\n').find((linea) => linea.startsWith('data: '));
+        if (!datos) continue;
+        const evento = JSON.parse(datos.slice(6));
+        if (evento.tipo === 'conectado' && !conectado) {
+          conectado = true;
+          await alConectar();
+        } else {
+          eventos.push(evento);
+        }
+      }
+    }
+  } catch (error) {
+    if (error.name !== 'AbortError') throw error;
+  } finally {
+    clearTimeout(temporizador);
+    control.abort();
+  }
+  return eventos;
+}
 
 async function startServer(t, options = {}) {
   const dataDir = options.dataDir ?? await mkdtemp(path.join(tmpdir(), 'timermayu-pendientes-test-'));
@@ -718,4 +778,226 @@ test('rechaza JSON roto y rutas desconocidas', async (t) => {
   assert.equal((await call('PUT', '/organizaciones')).status, 405);
   assert.equal((await call('DELETE', '/actividad')).status, 405);
   assert.equal((await fetch(`${base}/otra-cosa`)).status, 404);
+});
+
+test('valida etiquetas, ajustes de IA y textos para la IA', () => {
+  assert.deepEqual(parseEtiqueta({ nombre: ' Sprint 12 ' }), { nombre: 'Sprint 12' });
+  assert.throws(() => parseEtiqueta({ nombre: 'x'.repeat(41) }), { message: 'nombre_invalido' });
+  assert.throws(() => parseEtiqueta({ nombre: 'Sprint', color: 'rojo' }), { message: 'color_invalido' });
+  assert.deepEqual(parsePendiente({ texto: 'A', etiquetas: ['a', 'a', 'b'] }).etiquetas, ['a', 'b']);
+  assert.throws(() => parsePendiente({ texto: 'A', etiquetas: 'a' }), { message: 'etiquetas_invalidas' });
+  assert.equal(parsePendiente({ texto: 'A', tipo: 'feat' }).tipo, 'feat');
+  assert.equal(parsePendiente({ texto: 'A', tipo: null }, { partial: true }).tipo, null);
+  assert.throws(() => parsePendiente({ texto: 'A', tipo: 'feature' }), { message: 'tipo_invalido' });
+
+  assert.deepEqual(parseAjustesIA({ proveedor: 'openai', claves: { openai: ' sk-1234 ' }, modelos: { gemini: null } }),
+    { proveedor: 'openai', claves: { openai: 'sk-1234' }, modelos: { gemini: null } });
+  assert.deepEqual(parseAjustesIA({ instrucciones: '  ' }), { instrucciones: null });
+  assert.throws(() => parseAjustesIA({ proveedor: 'anthropic' }), { message: 'proveedor_invalido' });
+  assert.throws(() => parseAjustesIA({ claves: { otro: 'x' } }), { message: 'proveedor_invalido' });
+  assert.throws(() => parseAjustesIA({ claves: { openai: 'con espacio' } }), { message: 'clave_invalida' });
+  assert.throws(() => parseAjustesIA({ modelos: { openai: '' } }), { message: 'modelo_invalido' });
+  assert.throws(() => parseAjustesIA({ instrucciones: 'x'.repeat(2001) }), { message: 'instrucciones_invalidas' });
+
+  assert.deepEqual(parseSugerencia({ texto: ' hola ' }), { texto: 'hola', proyecto_id: null });
+  assert.throws(() => parseSugerencia({ texto: ' ' }), { message: 'texto_ia_invalido' });
+  assert.throws(() => parseSugerencia({ texto: 'x'.repeat(20001) }), { message: 'texto_ia_invalido' });
+});
+
+test('hecho_en: se anota al pasar a Hecho por cualquier camino y se borra al salir', async (t) => {
+  const { data, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const junior = await entrarComo('Junior');
+  const { pendiente: creado } = await data('POST', '', { texto: 'Ya estaba', estado: 'hecho' });
+  assert.ok(creado.hecho_en);
+  const { pendiente: otro } = await data('POST', '', { texto: 'Nuevo' });
+  assert.equal(otro.hecho_en, null);
+
+  const { pendiente: terminado } = await data('PATCH', `/${otro.id}`, { estado: 'hecho' });
+  assert.ok(terminado.hecho_en >= otro.creado_en);
+  // Cambiar otra cosa no mueve la fecha; salir de Hecho la borra.
+  assert.equal((await data('PATCH', `/${otro.id}`, { texto: 'Nuevo 2', estado: 'hecho' })).pendiente.hecho_en, terminado.hecho_en);
+  assert.equal((await data('PATCH', `/${otro.id}`, { estado: 'haciendo' })).pendiente.hecho_en, null);
+
+  const { pendientes } = await data('PUT', '/orden', { items: [{ id: otro.id, estado: 'hecho' }, { id: creado.id, estado: 'hecho' }] });
+  const porId = new Map(pendientes.map((p) => [p.id, p]));
+  assert.ok(porId.get(otro.id).hecho_en);
+  assert.equal(porId.get(creado.id).hecho_en, creado.hecho_en);
+
+  const { pendiente: pasado } = await diego.data('POST', `/${otro.id}/traspaso`, { perfil_id: junior.perfil.id });
+  assert.equal(pasado.hecho_en, null);
+});
+
+test('etiquetas: se crean una vez, se ponen y quitan de los pendientes y quedan en el historial', async (t) => {
+  const { call, data, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const { etiqueta: sprint } = await diego.data('POST', '/etiquetas', { nombre: 'Sprint 12' });
+  assert.match(sprint.color, /^#[0-9A-F]{6}$/);
+  assert.equal((await call('POST', '/etiquetas', { nombre: 'sprint 12' })).status, 409);
+  const { etiqueta: urgente } = await diego.data('POST', '/etiquetas', { nombre: 'Urgente', color: '#DC2626' });
+  assert.deepEqual((await data('GET', '/etiquetas')).etiquetas.map((e) => e.nombre), ['Sprint 12', 'Urgente']);
+
+  const descripcion = JSON.stringify([{ type: 'paragraph', content: [{ type: 'text', text: 'Con detalle' }] }]);
+  const { pendiente } = await diego.data('POST', '', { texto: 'Login', etiquetas: [sprint.id], descripcion });
+  assert.deepEqual(pendiente.etiquetas, [sprint.id]);
+  assert.equal(pendiente.resumen, 'Con detalle');
+  assert.equal((await data('GET', `/${pendiente.id}`)).pendiente.descripcion, descripcion);
+
+  const { pendiente: cambiado } = await diego.data('PATCH', `/${pendiente.id}`, { etiquetas: [urgente.id], tipo: 'feat' });
+  assert.deepEqual([cambiado.etiquetas, cambiado.tipo], [[urgente.id], 'feat']);
+  const historial = (await data('GET', `/${pendiente.id}/actividad`)).actividad;
+  assert.deepEqual(historial.slice(0, 2).map((a) => [a.tipo, a.datos]), [
+    ['etiquetas', { agregadas: ['Urgente'], quitadas: ['Sprint 12'] }],
+    ['tipo', { de: null, a: 'feat' }],
+  ]);
+  assert.equal((await call('PATCH', `/${pendiente.id}`, { etiquetas: [crypto.randomUUID()] })).status, 422);
+
+  assert.equal((await diego.data('PATCH', `/etiquetas/${urgente.id}`, { nombre: 'Prioridad' })).etiqueta.nombre, 'Prioridad');
+  assert.equal((await call('PATCH', `/etiquetas/${urgente.id}`, { nombre: 'Sprint 12' })).status, 409);
+  assert.equal((await call('DELETE', `/etiquetas/${urgente.id}`)).status, 200);
+  assert.deepEqual((await data('GET')).pendientes[0].etiquetas, []);
+  assert.equal((await call('DELETE', `/etiquetas/${urgente.id}`)).status, 404);
+});
+
+test('IA: las claves nunca salen del servidor y se configuran por proveedor', async (t) => {
+  const { call, data } = await startServer(t);
+  const inicial = (await data('GET', '/ia')).ia;
+  assert.equal(inicial.proveedor, null);
+  assert.equal(inicial.lista, false);
+  assert.deepEqual(inicial.proveedores.map((p) => p.id), ['gemini', 'openai', 'openrouter']);
+
+  const clave = 'sk-proj-secreta-abcd1234';
+  const { ia } = await data('PUT', '/ia', { proveedor: 'openai', claves: { openai: clave }, modelos: { openai: 'gpt-6-astra' }, instrucciones: 'En español' });
+  const openai = ia.proveedores.find((p) => p.id === 'openai');
+  assert.deepEqual([ia.lista, openai.tiene_clave, openai.clave_final, openai.modelo], [true, true, '1234', 'gpt-6-astra']);
+  assert.ok(!JSON.stringify(await data('GET', '/ia')).includes('secreta'));
+
+  // Sin clave en el cambio, la clave se queda; null la borra y el modelo vuelve al de siempre.
+  await data('PUT', '/ia', { instrucciones: null });
+  assert.equal((await data('GET', '/ia')).ia.proveedores.find((p) => p.id === 'openai').tiene_clave, true);
+  const { ia: sinClave } = await data('PUT', '/ia', { claves: { openai: null }, modelos: { openai: null } });
+  const vacio = sinClave.proveedores.find((p) => p.id === 'openai');
+  assert.deepEqual([sinClave.lista, vacio.tiene_clave, vacio.modelo], [false, false, vacio.modelo_por_defecto]);
+  assert.equal((await call('POST', '/ia/sugerir', { texto: 'algo' })).status, 422);
+  assert.equal((await (await call('POST', '/ia/sugerir', { texto: 'algo' })).json()).error, 'ia_sin_clave');
+  assert.equal((await call('GET', '/ia/modelos?proveedor=openai')).status, 422);
+  assert.equal((await call('GET', '/ia/modelos?proveedor=otro')).status, 422);
+});
+
+test('IA: arma el pedido de cada proveedor y pasa los nombres que contesta a ids', async (t) => {
+  const propuesta = {
+    pendientes: [
+      { titulo: 'Arreglar el login', detalle: 'Falla con Google', responsable: 'diego', proyecto: 'Mayugo › Web', etiquetas: ['sprint 12', 'Inventada'], tipo: 'fix', estado: 'haciendo' },
+      { titulo: 'Escribir la nota', detalle: null, responsable: 'Alguien', proyecto: 'Web', etiquetas: [], tipo: 'otro', estado: 'raro' },
+      { titulo: '  ', detalle: null, responsable: null, proyecto: null, etiquetas: [], estado: 'pendiente' },
+    ],
+  };
+  const texto = JSON.stringify(propuesta);
+  const proveedor = await startProveedor(t, (ruta) => {
+    if (ruta === '/v1beta/interactions') return { json: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: texto }] }] } };
+    if (ruta === '/v1/responses') return { json: { status: 'completed', output: [{ type: 'reasoning' }, { type: 'message', content: [{ type: 'output_text', text: texto }] }] } };
+    if (ruta === '/api/v1/chat/completions') return { json: { choices: [{ message: { content: `\`\`\`json\n${texto}\n\`\`\`` } }] } };
+    if (ruta.startsWith('/v1beta/models')) return { json: { models: [{ name: 'models/gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash-Lite' }, { name: 'models/text-embedding-005' }] } };
+    return { status: 404, json: { error: { message: 'no' } } };
+  });
+  const bases = { gemini: proveedor.url, openai: proveedor.url, openrouter: proveedor.url };
+  const { data, entrarComo } = await startServer(t, { basesIA: bases });
+  const diego = await entrarComo('Diego');
+  const { organizacion } = await diego.data('POST', '/organizaciones', { nombre: 'Mayugo', compartida: true });
+  const { proyecto: web } = await diego.data('POST', '/proyectos', { nombre: 'Web', organizacion_id: organizacion.id });
+  const { proyecto: otro } = await diego.data('POST', '/proyectos', { nombre: 'Otro', organizacion_id: organizacion.id });
+  const { etiqueta: sprint } = await diego.data('POST', '/etiquetas', { nombre: 'Sprint 12' });
+
+  for (const [id, clave] of [['gemini', 'AIza-falsa-1'], ['openai', 'sk-falsa-2'], ['openrouter', 'sk-or-falsa-3']]) {
+    await data('PUT', '/ia', { proveedor: id, claves: { [id]: clave } });
+    const { sugerencias } = await diego.data('POST', '/ia/sugerir', { texto: 'Diego arregla el login', proyecto_id: otro.id });
+    assert.deepEqual(sugerencias, [
+      { texto: 'Arreglar el login', detalle: 'Falla con Google', perfil_id: diego.perfil.id, proyecto_id: web.id, tipo: 'fix', etiquetas: [sprint.id], estado: 'haciendo' },
+      // Responsable desconocido: nadie. Estado raro: pendiente. Proyecto "Web" a secas vale porque no se repite.
+      { texto: 'Escribir la nota', detalle: null, perfil_id: null, proyecto_id: web.id, tipo: null, etiquetas: [], estado: 'pendiente' },
+    ], id);
+    const pedido = proveedor.pedidos.at(-1);
+    const sistema = pedido.cuerpo.system_instruction ?? pedido.cuerpo.instructions ?? pedido.cuerpo.messages?.[0].content;
+    assert.match(sistema, /Personas: Favio, Diego, Junior/);
+    assert.match(sistema, /Mayugo › Otro \| Mayugo › Web/);
+    assert.match(sistema, /si no, "Mayugo › Otro"/);
+    assert.match(sistema, /Etiquetas: Sprint 12/);
+    assert.ok(!sistema.includes('@'), 'no se mandan correos');
+    if (id === 'gemini') {
+      assert.equal(pedido.headers['x-goog-api-key'], clave);
+      assert.equal(pedido.cuerpo.input, 'Diego arregla el login');
+      assert.equal(pedido.cuerpo.response_format.mime_type, 'application/json');
+      assert.equal(pedido.cuerpo.model, 'gemini-3.5-flash-lite');
+    } else {
+      assert.equal(pedido.headers.authorization, `Bearer ${clave}`);
+    }
+    if (id === 'openai') {
+      assert.deepEqual([pedido.cuerpo.text.format.type, pedido.cuerpo.text.format.strict], ['json_schema', true]);
+      assert.equal(pedido.cuerpo.input, 'Diego arregla el login');
+    }
+    if (id === 'openrouter') {
+      assert.equal(pedido.cuerpo.response_format.json_schema.strict, true);
+      assert.equal(pedido.cuerpo.messages[1].content, 'Diego arregla el login');
+      assert.equal(pedido.headers['x-openrouter-title'], 'Pendientes');
+    }
+  }
+
+  await data('PUT', '/ia', { proveedor: 'gemini' });
+  assert.deepEqual((await data('GET', '/ia/modelos?proveedor=gemini')).modelos, [{ id: 'gemini-3.5-flash-lite', nombre: 'Gemini 3.5 Flash-Lite' }]);
+});
+
+test('IA: los errores del proveedor se traducen y no repiten la clave', async (t) => {
+  let respuesta;
+  const proveedor = await startProveedor(t, () => respuesta);
+  const { call, data } = await startServer(t, { basesIA: { gemini: proveedor.url, openai: proveedor.url, openrouter: proveedor.url } });
+  const clave = 'sk-muy-secreta-9999';
+  await data('PUT', '/ia', { proveedor: 'openai', claves: { openai: clave } });
+  const sugerir = async () => {
+    const res = await call('POST', '/ia/sugerir', { texto: 'algo' });
+    return { status: res.status, ...(await res.json()) };
+  };
+
+  respuesta = { status: 401, json: { error: { message: `Incorrect API key provided: ${clave}`, code: 'invalid_api_key' } } };
+  assert.deepEqual(await sugerir(), { status: 422, error: 'ia_clave_invalida' });
+  respuesta = { status: 429, json: { error: { message: 'Rate limit reached' } } };
+  assert.deepEqual(await sugerir(), { status: 429, error: 'ia_limite', detalle: 'Rate limit reached' });
+  respuesta = { status: 500, json: { error: { message: `Algo raro con ${clave}` } } };
+  const fallo = await sugerir();
+  assert.equal(fallo.error, 'ia_fallo');
+  assert.ok(!fallo.detalle.includes('secreta'));
+  respuesta = { json: { status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'No puedo' }] }] } };
+  assert.equal((await sugerir()).error, 'ia_se_nego');
+  respuesta = { json: { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'no es json' }] }] } };
+  assert.equal((await sugerir()).error, 'ia_respuesta_invalida');
+});
+
+test('cambios en tiempo real: avisa a las otras pestañas lo que cambió, sin colar lo privado', async (t) => {
+  const { base, data, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const { organizacion } = await diego.data('POST', '/organizaciones', { nombre: 'Personal', compartida: false });
+  const { proyecto } = await diego.data('POST', '/proyectos', { nombre: 'Casa', organizacion_id: organizacion.id });
+  const { pendiente: privado } = await diego.data('POST', '', { texto: 'Pagar luz', proyecto_id: proyecto.id });
+  const { pendiente: compartido } = await diego.data('POST', '', { texto: 'Login' });
+
+  const cambiar = async () => {
+    await diego.data('PATCH', `/${privado.id}`, { texto: 'Pagar agua' });
+    await diego.data('POST', `/${compartido.id}/comentarios`, { texto: 'listo' });
+    await data('POST', '/etiquetas', { nombre: 'Sprint 1' });
+  };
+  const deFavio = await leerEventos(base, favio.headers, { cantidad: 2, alConectar: cambiar });
+  assert.deepEqual(deFavio, [{ tipo: 'comentarios', pendiente_id: compartido.id }, { tipo: 'catalogo' }]);
+
+  // La misma pestaña que hace el cambio no se avisa a sí misma; otra pestaña del mismo perfil sí.
+  const llamarComo = (cliente) => fetch(`${base}/api/pendientes/${compartido.id}`, {
+    method: 'PATCH',
+    headers: { ...diego.headers, 'Content-Type': 'application/json', 'X-Cliente': cliente },
+    body: JSON.stringify({ estado: 'haciendo' }),
+  });
+  const propios = await leerEventos(base, diego.headers, { cliente: 'pestana-1', esperaMs: 600, alConectar: () => llamarComo('pestana-1') });
+  assert.deepEqual(propios, []);
+  const otraPestana = await leerEventos(base, diego.headers, { cliente: 'pestana-2', alConectar: () => llamarComo('pestana-1') });
+  assert.deepEqual(otraPestana, [{ tipo: 'pendientes', pendiente_id: compartido.id }]);
+
+  assert.equal((await fetch(`${base}/api/pendientes/eventos`)).status, 401);
 });

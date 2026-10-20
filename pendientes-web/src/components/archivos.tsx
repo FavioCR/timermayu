@@ -4,7 +4,7 @@ import { cn } from "cn"
 
 import { Button } from "@/components/ui/button"
 import { api, esNoAutorizado, MAX_IMAGEN_BYTES, mensajeDeError, type Archivo, type Usuario } from "@/lib/api"
-import { abrirArchivo, claseDeArchivo, tamanoLegible, traeArchivos, type ClaseDeArchivo } from "@/lib/archivos"
+import { abrirArchivo, claseDeArchivo, tamanoLegible, traeArchivos, urlDeArchivo, type ClaseDeArchivo } from "@/lib/archivos"
 
 const ICONOS: Record<ClaseDeArchivo, typeof File> = {
   imagen: FileImage,
@@ -12,6 +12,61 @@ const ICONOS: Record<ClaseDeArchivo, typeof File> = {
   planilla: FileSpreadsheet,
   comprimido: FileArchive,
   otro: File,
+}
+
+// Las imágenes que el navegador muestra sin riesgo; las demás (SVG incluido) quedan como archivo.
+export const esImagenVisible = (archivo: Pick<Archivo, "tipo">) => /^image\/(png|jpeg|gif|webp)$/.test(archivo.tipo)
+
+// Una imagen adjunta, vista en pequeño; al tocarla se abre completa. Si no se puede cargar, queda como archivo.
+export function MiniaturaArchivo({
+  credenciales,
+  archivo,
+  onAbrir,
+  className,
+}: {
+  credenciales: string
+  archivo: Archivo
+  onAbrir: () => void
+  className?: string
+}) {
+  const [url, setUrl] = useState<string | null>(null)
+  const [fallo, setFallo] = useState(false)
+
+  useEffect(() => {
+    let vigente = true
+    // Pide contraseña, así que se baja con fetch y se muestra desde un blob (que queda guardado para la próxima).
+    api
+      .urlDeImagen(credenciales, urlDeArchivo(archivo.id))
+      .then((blob) => vigente && setUrl(blob))
+      .catch(() => vigente && setFallo(true))
+    return () => {
+      vigente = false
+    }
+  }, [credenciales, archivo.id])
+
+  if (fallo) return <ChipArchivo archivo={archivo} onAbrir={onAbrir} className={className} />
+  return (
+    <button
+      type="button"
+      onClick={onAbrir}
+      title={`${archivo.nombre} · ${tamanoLegible(archivo.tamano)}`}
+      aria-label={`Abrir la imagen ${archivo.nombre}`}
+      className={cn(
+        "block overflow-hidden rounded-xl border bg-muted outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        !url && "h-40 w-56 animate-pulse",
+        className
+      )}
+    >
+      {url && (
+        <img
+          src={url}
+          alt={archivo.nombre}
+          onError={() => setFallo(true)}
+          className="block max-h-60 w-auto max-w-full object-contain sm:max-w-60"
+        />
+      )}
+    </button>
+  )
 }
 
 export function ChipArchivo({

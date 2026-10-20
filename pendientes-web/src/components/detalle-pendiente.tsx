@@ -4,9 +4,11 @@ import { Forward, History, Lock, MessageCircle, MessageSquare, Trash2, Users } f
 import { ArchivosPendiente } from "@/components/archivos"
 import { ChatPendiente } from "@/components/chat-pendiente"
 import type { DocumentoDescripcion } from "@/components/editor-descripcion"
+import { EtiquetasSelector } from "@/components/etiquetas-selector"
 import { HistorialPendiente } from "@/components/historial"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { ProyectoCombobox } from "@/components/proyecto-combobox"
+import { TipoSelect } from "@/components/tipo-select"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
@@ -18,6 +20,7 @@ import {
   mensajeDeError,
   type CambiosPendiente,
   type Estado,
+  type Etiqueta,
   type Pendiente,
   type Perfil,
   type Proyecto,
@@ -44,7 +47,10 @@ type Props = {
   usuario: Usuario | null
   perfiles: Perfil[]
   catalogo: Catalogo
+  etiquetas: Etiqueta[]
   onCrearProyecto: (datos: { nombre: string; organizacion_id: string | null }) => Promise<Proyecto | null>
+  onCrearEtiqueta: (nombre: string) => Promise<Etiqueta | null>
+  onBorrarEtiqueta: (etiqueta: Etiqueta) => void
   onCambiar: (id: string, cambios: CambiosPendiente) => Promise<Pendiente | null>
   onCantidadComentarios: (id: string, cantidad: number) => void
   onCantidadArchivos: (id: string, cantidad: number) => void
@@ -83,7 +89,10 @@ function Contenido({
   usuario,
   perfiles,
   catalogo,
+  etiquetas,
   onCrearProyecto,
+  onCrearEtiqueta,
+  onBorrarEtiqueta,
   onCambiar,
   onCantidadComentarios,
   onCantidadArchivos,
@@ -91,28 +100,36 @@ function Contenido({
   onBorrar,
   onSalir,
 }: Omit<Props, "pendiente" | "onCerrar"> & { pendiente: Pendiente }) {
-  const [inicial, setInicial] = useState<{ bloques: unknown[] | undefined } | null>(null)
+  // `version` cambia cuando llega una descripción nueva de otra persona: el editor se vuelve a montar con ella.
+  const [inicial, setInicial] = useState<{ bloques: unknown[] | undefined; version: number } | null>(null)
   const [guardando, setGuardando] = useState(false)
   const [guardado, setGuardado] = useState(false)
   const [aviso, setAviso] = useState("")
   const [confirmarBorrado, setConfirmarBorrado] = useState(false)
   const porGuardar = useRef<DocumentoDescripcion | null>(null)
   const temporizador = useRef<number | undefined>(undefined)
+  // La última descripción que se cargó o se guardó desde aquí, para saber si la del servidor es de otra persona.
+  const descripcionConocida = useRef<string | null>(null)
+  const seccionDescripcion = useRef<HTMLElement>(null)
   const id = pendiente.id
+
+  const aplicarDescripcion = useCallback((descripcion: string | null) => {
+    descripcionConocida.current = descripcion
+    let bloques: unknown[] | undefined
+    try {
+      bloques = descripcion ? JSON.parse(descripcion) : undefined
+    } catch {
+      bloques = undefined
+    }
+    setInicial((actual) => ({ bloques, version: (actual?.version ?? 0) + 1 }))
+  }, [])
 
   useEffect(() => {
     let vigente = true
     api
       .detalle(credenciales, id)
       .then((detalle) => {
-        if (!vigente) return
-        let bloques: unknown[] | undefined
-        try {
-          bloques = detalle.descripcion ? JSON.parse(detalle.descripcion) : undefined
-        } catch {
-          bloques = undefined
-        }
-        setInicial({ bloques })
+        if (vigente) aplicarDescripcion(detalle.descripcion)
       })
       .catch((err) => {
         if (!vigente) return
@@ -122,7 +139,29 @@ function Contenido({
     return () => {
       vigente = false
     }
-  }, [credenciales, id, onSalir])
+  }, [credenciales, id, onSalir, aplicarDescripcion])
+
+  // Si el pendiente cambió (otra persona lo editó y el tablero se puso al día), trae la descripción otra vez. Solo la
+  // reemplaza si es distinta y aquí no se está escribiendo: nada sin guardar y el cursor fuera del editor.
+  const actualizadoVisto = useRef(pendiente.actualizado_en)
+  useEffect(() => {
+    if (actualizadoVisto.current === pendiente.actualizado_en) return
+    actualizadoVisto.current = pendiente.actualizado_en
+    const escribiendo = () => porGuardar.current !== null || Boolean(seccionDescripcion.current?.contains(document.activeElement))
+    if (escribiendo()) return
+    let vigente = true
+    api
+      .detalle(credenciales, id)
+      .then((detalle) => {
+        if (vigente && detalle.descripcion !== descripcionConocida.current && !escribiendo()) aplicarDescripcion(detalle.descripcion)
+      })
+      .catch(() => {
+        // La próxima vez que cambie se vuelve a intentar.
+      })
+    return () => {
+      vigente = false
+    }
+  }, [credenciales, id, pendiente.actualizado_en, aplicarDescripcion])
 
   const guardarDescripcion = useCallback(async () => {
     window.clearTimeout(temporizador.current)
@@ -130,7 +169,9 @@ function Contenido({
     if (!documento) return
     porGuardar.current = null
     setGuardando(true)
-    const actualizado = await onCambiar(id, { descripcion: JSON.stringify(documento) })
+    const descripcion = JSON.stringify(documento)
+    descripcionConocida.current = descripcion
+    const actualizado = await onCambiar(id, { descripcion })
     setGuardando(false)
     setGuardado(Boolean(actualizado))
     setAviso(actualizado ? "" : "No se pudo guardar la descripción. Vuelve a intentarlo.")
@@ -254,6 +295,16 @@ function Contenido({
             )}
           </dd>
 
+          <dt className="text-muted-foreground">Tipo</dt>
+          <dd>
+            <TipoSelect
+              etiqueta="Tipo del pendiente"
+              valor={pendiente.tipo}
+              onCambiar={(tipo) => onCambiar(id, { tipo })}
+              className="w-full sm:w-64"
+            />
+          </dd>
+
           <dt className="text-muted-foreground">Responsable</dt>
           <dd className="flex flex-wrap items-center gap-2">
             <Select
@@ -304,6 +355,18 @@ function Contenido({
             />
           </dd>
 
+          <dt className="text-muted-foreground">Etiquetas</dt>
+          <dd className="min-w-0">
+            <EtiquetasSelector
+              etiquetas={etiquetas}
+              seleccionadas={pendiente.etiquetas}
+              onCambiar={(ids) => onCambiar(id, { etiquetas: ids })}
+              onCrear={onCrearEtiqueta}
+              onBorrar={onBorrarEtiqueta}
+              className="w-full sm:w-80"
+            />
+          </dd>
+
           <dt className="text-muted-foreground">Lo ve</dt>
           <dd className="flex items-center gap-1.5 text-sm [&_svg]:size-3.5 [&_svg]:text-muted-foreground">
             {privado ? (
@@ -323,17 +386,18 @@ function Contenido({
               credenciales={credenciales}
               pendienteId={id}
               usuario={usuario}
-              version={`${pendiente.actualizado_en}:${pendiente.num_comentarios}`}
+              version={`${pendiente.actualizado_en}:${pendiente.num_comentarios}:${pendiente.num_archivos}`}
               onCantidad={(cantidad) => onCantidadArchivos(id, cantidad)}
               onSalir={onSalir}
             />
           </dd>
         </dl>
 
-        <section aria-label="Descripción" className="-mx-4 min-h-64 border-t pt-4">
+        <section ref={seccionDescripcion} aria-label="Descripción" className="-mx-4 min-h-64 border-t pt-4">
           {inicial ? (
             <Suspense fallback={<p className="px-4 text-sm text-muted-foreground">Cargando editor…</p>}>
               <EditorDescripcion
+                key={inicial.version}
                 inicial={inicial.bloques as Parameters<typeof EditorDescripcion>[0]["inicial"]}
                 oscuro={document.documentElement.classList.contains("dark")}
                 onCambio={alCambiarDescripcion}
@@ -405,7 +469,7 @@ function Contenido({
             <HistorialPendiente
               credenciales={credenciales}
               pendienteId={id}
-              version={`${pendiente.actualizado_en}:${pendiente.num_comentarios}`}
+              version={`${pendiente.actualizado_en}:${pendiente.num_comentarios}:${pendiente.num_archivos}`}
               yo={usuario?.perfil_id ?? null}
               onSalir={onSalir}
             />

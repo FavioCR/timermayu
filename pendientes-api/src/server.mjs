@@ -7,6 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { listarModelos, MAX_SUGERENCIAS, pedirPendientes, PROVEEDORES_IA, instruccionesIA } from './ia.mjs';
+
 // Alcanza para el orden completo del tablero (hasta 5000 pendientes de ~60 bytes cada uno).
 const MAX_BODY_BYTES = 512 * 1024;
 const MAX_IMAGEN_BYTES = 10 * 1024 * 1024;
@@ -28,6 +30,16 @@ const MAX_DESCRIPCION = 400 * 1024;
 const MAX_RESUMEN = 200;
 const MIN_CONTRASENA = 8;
 const MAX_CONTRASENA = 200;
+// Lo que se le puede pasar a la IA de una vez y las indicaciones propias del equipo.
+const MAX_TEXTO_IA = 20000;
+const MAX_INSTRUCCIONES_IA = 2000;
+const MAX_CLAVE_IA = 500;
+const MAX_MODELO_IA = 200;
+const MAX_ETIQUETA = 40;
+const MAX_ETIQUETAS_POR_PENDIENTE = 20;
+// Cambios en tiempo real: nginx corta una respuesta que pasa 12 s sin datos, así que el flujo manda un latido antes.
+const LATIDO_MS = 9000;
+const MAX_CONEXIONES = 500;
 // Tras tantos intentos fallidos seguidos con un mismo usuario, se rechaza ese usuario durante la ventana.
 const MAX_FALLOS = 10;
 const VENTANA_FALLOS_MS = 15 * 60 * 1000;
@@ -38,6 +50,8 @@ const GRACIA_IMAGENES_MS = 60 * 60 * 1000;
 // este tiempo, el historial actualiza su última entrada en vez de sumar una nueva.
 const UNIR_DESCRIPCION_MS = 10 * 60 * 1000;
 const ESTADOS = ['pendiente', 'haciendo', 'hecho'];
+// El tipo de trabajo, como en los commits convencionales.
+export const TIPOS = ['feat', 'fix', 'refactor', 'perf', 'docs', 'test', 'style', 'chore', 'ci'];
 const COLORES = ['#2563EB', '#DB2777', '#059669', '#7C3AED', '#EA580C', '#0891B2', '#CA8A04', '#DC2626'];
 const PERFILES_INICIALES = ['Favio', 'Diego', 'Junior'];
 const UUID = '([0-9a-f-]{36})';
@@ -50,6 +64,11 @@ const PROYECTOS_PATH = '/api/pendientes/proyectos';
 const ACTIVIDAD_PATH = '/api/pendientes/actividad';
 const NOTIFICACIONES_PATH = '/api/pendientes/notificaciones';
 const LEIDAS_PATH = '/api/pendientes/notificaciones/leidas';
+const IA_PATH = '/api/pendientes/ia';
+const IA_MODELOS_PATH = '/api/pendientes/ia/modelos';
+const IA_SUGERIR_PATH = '/api/pendientes/ia/sugerir';
+const ETIQUETAS_PATH = '/api/pendientes/etiquetas';
+const EVENTOS_PATH = '/api/pendientes/eventos';
 const ITEM_PATH = new RegExp(`^/api/pendientes/${UUID}$`);
 const PERFIL_PATH = new RegExp(`^/api/pendientes/perfiles/${UUID}$`);
 const CONTRASENA_PATH = new RegExp(`^/api/pendientes/perfiles/${UUID}/contrasena$`);
@@ -63,12 +82,15 @@ const COMENTARIO_PATH = new RegExp(`^/api/pendientes/comentarios/${UUID}$`);
 const ARCHIVOS_PATH = new RegExp(`^/api/pendientes/${UUID}/archivos$`);
 const ARCHIVO_PATH = new RegExp(`^/api/pendientes/archivos/${UUID}$`);
 const TRASPASO_PATH = new RegExp(`^/api/pendientes/${UUID}/traspaso$`);
-const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH];
+const ETIQUETA_PATH = new RegExp(`^/api/pendientes/etiquetas/${UUID}$`);
+const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
+  IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, ETIQUETAS_PATH, EVENTOS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
-  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH];
-const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en,
+  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, ETIQUETA_PATH];
+const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en, hecho_en,
   (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios,
-  (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0) AS num_archivos`;
+  (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0) AS num_archivos,
+  (SELECT json_group_array(pe.etiqueta_id) FROM pendiente_etiquetas pe WHERE pe.pendiente_id = pendientes.id) AS etiquetas`;
 const SELECT_PERFIL = 'SELECT id, nombre, correo, telefono, color, password_hash IS NOT NULL AS tiene_contrasena, creado_en FROM perfiles';
 const SELECT_ORGANIZACION = `SELECT id, nombre, color, duenio_id, compartida, creado_en,
   (SELECT json_group_array(perfil_id) FROM organizacion_miembros m WHERE m.organizacion_id = organizaciones.id) AS miembros FROM organizaciones`;
@@ -243,6 +265,36 @@ const MIGRACIONES = [
   (db) => {
     db.exec('ALTER TABLE comentarios ADD COLUMN respuesta_a TEXT');
   },
+  // Cuándo se terminó cada pendiente (el tablero solo muestra los hechos de la última semana), su tipo (feat, fix…),
+  // etiquetas de todo el equipo (el sprint, por ejemplo) y los ajustes del equipo, como la IA que crea pendientes. A lo que ya estaba
+  // hecho se le pone la fecha en que pasó a Hecho según el historial, o la de su último cambio.
+  (db) => {
+    db.exec(`
+      ALTER TABLE pendientes ADD COLUMN hecho_en TEXT;
+      ALTER TABLE pendientes ADD COLUMN tipo TEXT;
+      UPDATE pendientes SET hecho_en = COALESCE(
+        (SELECT MAX(a.creado_en) FROM actividad a
+          WHERE a.pendiente_id = pendientes.id AND a.tipo = 'estado' AND json_extract(a.datos, '$.a') = 'hecho'),
+        actualizado_en)
+      WHERE estado = 'hecho';
+      CREATE TABLE ajustes (
+        clave TEXT PRIMARY KEY,
+        valor TEXT NOT NULL
+      );
+      CREATE TABLE etiquetas (
+        id TEXT PRIMARY KEY,
+        nombre TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        color TEXT NOT NULL,
+        creado_en TEXT NOT NULL
+      );
+      CREATE TABLE pendiente_etiquetas (
+        pendiente_id TEXT NOT NULL REFERENCES pendientes(id) ON DELETE CASCADE,
+        etiqueta_id TEXT NOT NULL REFERENCES etiquetas(id) ON DELETE CASCADE,
+        PRIMARY KEY (pendiente_id, etiqueta_id)
+      );
+      CREATE INDEX pendiente_etiquetas_etiqueta ON pendiente_etiquetas (etiqueta_id);
+    `);
+  },
 ];
 
 function json(res, status, body) {
@@ -382,7 +434,18 @@ export function parsePendiente(input, { partial = false } = {}) {
     changes.estado = input.estado;
   }
   if ('perfil_id' in input) changes.perfil_id = idOpcional(input, 'perfil_id', 'perfil_invalido');
-  if (partial && 'descripcion' in input) {
+  if ('tipo' in input) {
+    if (input.tipo !== null && !TIPOS.includes(input.tipo)) throw httpError(422, 'tipo_invalido');
+    changes.tipo = input.tipo;
+  }
+  if ('etiquetas' in input) {
+    const { etiquetas } = input;
+    if (!Array.isArray(etiquetas) || etiquetas.length > MAX_ETIQUETAS_POR_PENDIENTE || etiquetas.some((id) => typeof id !== 'string' || id.length > 64)) {
+      throw httpError(422, 'etiquetas_invalidas');
+    }
+    changes.etiquetas = [...new Set(etiquetas)];
+  }
+  if ('descripcion' in input) {
     if (input.descripcion !== null) {
       if (typeof input.descripcion !== 'string' || input.descripcion.length > MAX_DESCRIPCION) throw httpError(422, 'descripcion_invalida');
       let bloques;
@@ -480,11 +543,70 @@ export function parseOrganizacion(input, { partial = false } = {}) {
   return changes;
 }
 
+export function parseEtiqueta(input, { partial = false } = {}) {
+  const changes = {};
+  if (!partial || 'nombre' in input) changes.nombre = nombreValido(input.nombre, MAX_ETIQUETA, 'nombre_invalido');
+  if ('color' in input) changes.color = colorValido(input.color);
+  return changes;
+}
+
 export function parseProyecto(input, { partial = false } = {}) {
   const changes = {};
   if (!partial || 'nombre' in input) changes.nombre = nombreValido(input.nombre, MAX_PROYECTO, 'nombre_invalido');
   if ('organizacion_id' in input) changes.organizacion_id = idOpcional(input, 'organizacion_id', 'organizacion_invalida');
   return changes;
+}
+
+// Cambios a la IA del equipo. Una clave solo se reemplaza si viene; null la borra (y en modelos, vuelve al de siempre).
+export function parseAjustesIA(input) {
+  const changes = {};
+  if ('proveedor' in input) {
+    if (input.proveedor !== null && !Object.hasOwn(PROVEEDORES_IA, input.proveedor)) throw httpError(422, 'proveedor_invalido');
+    changes.proveedor = input.proveedor;
+  }
+  if ('instrucciones' in input) {
+    const { instrucciones } = input;
+    if (instrucciones !== null && (typeof instrucciones !== 'string' || instrucciones.length > MAX_INSTRUCCIONES_IA)) {
+      throw httpError(422, 'instrucciones_invalidas');
+    }
+    changes.instrucciones = instrucciones?.trim() || null;
+  }
+  for (const [campo, maximo, error] of [['modelos', MAX_MODELO_IA, 'modelo_invalido'], ['claves', MAX_CLAVE_IA, 'clave_invalida']]) {
+    if (!(campo in input)) continue;
+    const valores = input[campo];
+    if (!valores || typeof valores !== 'object' || Array.isArray(valores)) throw httpError(422, error);
+    changes[campo] = {};
+    for (const [proveedor, valor] of Object.entries(valores)) {
+      if (!Object.hasOwn(PROVEEDORES_IA, proveedor)) throw httpError(422, 'proveedor_invalido');
+      // Ni los modelos ni las claves llevan espacios.
+      if (valor !== null && (typeof valor !== 'string' || !/^\S+$/.test(valor.trim()) || valor.trim().length > maximo)) throw httpError(422, error);
+      changes[campo][proveedor] = valor?.trim() ?? null;
+    }
+  }
+  return changes;
+}
+
+export function parseSugerencia(input) {
+  const texto = typeof input.texto === 'string' ? input.texto.trim() : '';
+  if (!texto || texto.length > MAX_TEXTO_IA) throw httpError(422, 'texto_ia_invalido');
+  return { texto, proyecto_id: 'proyecto_id' in input ? idOpcional(input, 'proyecto_id', 'proyecto_invalido') : null };
+}
+
+// Lo que se muestra de la IA: de cada clave, solo si hay una y sus últimos 4 caracteres.
+export function iaPublica({ proveedor, instrucciones, modelos, claves }) {
+  return {
+    proveedor,
+    instrucciones,
+    lista: Boolean(proveedor && claves[proveedor]),
+    proveedores: Object.entries(PROVEEDORES_IA).map(([id, { nombre, modelo }]) => ({
+      id,
+      nombre,
+      modelo: modelos[id] ?? modelo,
+      modelo_por_defecto: modelo,
+      tiene_clave: Boolean(claves[id]),
+      clave_final: claves[id] ? claves[id].slice(-4) : null,
+    })),
+  };
 }
 
 function transaction(db, work) {
@@ -504,6 +626,7 @@ const fila = (row) => (row ? { ...row } : null);
 const perfilFila = (row) => (row ? { ...row, tiene_contrasena: Boolean(row.tiene_contrasena) } : null);
 const organizacionFila = (row) => (row ? { ...row, compartida: Boolean(row.compartida), miembros: JSON.parse(row.miembros).sort() } : null);
 const actividadFila = (row) => (row ? { ...row, datos: row.datos ? JSON.parse(row.datos) : null } : null);
+const pendienteFila = (row) => (row ? { ...row, etiquetas: JSON.parse(row.etiquetas).sort() } : null);
 
 // Proyecto sin organización con ese nombre; se crea si no existe.
 function proyectoSuelto(db, nombre) {
@@ -519,11 +642,13 @@ function importarJson(db, dataDir) {
   const file = path.join(dataDir, 'pendientes.json');
   if (!existsSync(file)) return;
   const items = JSON.parse(readFileSync(file, 'utf8'));
-  const insert = db.prepare(`INSERT OR IGNORE INTO pendientes (id, texto, proyecto_id, estado, perfil_id, posicion, creado_en, actualizado_en)
-    VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`);
+  const insert = db.prepare(`INSERT OR IGNORE INTO pendientes (id, texto, proyecto_id, estado, perfil_id, posicion, creado_en, actualizado_en, hecho_en)
+    VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)`);
   transaction(db, () => items.forEach((item, i) => {
     const proyecto = item.proyecto?.trim().toLowerCase();
-    insert.run(item.id, item.texto, proyecto ? proyectoSuelto(db, proyecto) : null, item.estado ?? 'pendiente', i, item.creado_en, item.actualizado_en);
+    const estado = item.estado ?? 'pendiente';
+    insert.run(item.id, item.texto, proyecto ? proyectoSuelto(db, proyecto) : null, estado, i, item.creado_en, item.actualizado_en,
+      estado === 'hecho' ? item.actualizado_en : null);
   }));
   renameSync(file, `${file}.importado`);
 }
@@ -548,7 +673,8 @@ export function openDb(dataDir) {
 // que pregunta, o null si entró con la cuenta del equipo. Lo que no puede ver se trata como inexistente.
 function createRepo(db, dataDir, graciaImagenesMs) {
   const archivoDeImagen = (id) => path.join(dataDir, 'imagenes', id);
-  const pendiente = (yo, id) => fila(db.prepare(`SELECT ${COLUMNAS_PENDIENTE} FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo));
+  const pendiente = (yo, id) => pendienteFila(db.prepare(`SELECT ${COLUMNAS_PENDIENTE} FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo));
+  const etiqueta = (id) => fila(db.prepare('SELECT id, nombre, color, creado_en FROM etiquetas WHERE id = ?').get(id));
   const perfil = (id) => perfilFila(db.prepare(`${SELECT_PERFIL} WHERE id = ?`).get(id));
   const organizacion = (yo, id) => organizacionFila(db.prepare(`${SELECT_ORGANIZACION} WHERE id = ? AND (compartida = 1 OR duenio_id = ?)`).get(id, yo));
   const proyecto = (yo, id) => fila(db.prepare(`${SELECT_PROYECTO} WHERE id = ? AND id IN (${PROYECTOS_VISIBLES})`).get(id, yo));
@@ -607,6 +733,21 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       registrar(quien, despues, 'proyecto', { de: etiquetaDeProyecto(antes.proyecto_id), a: etiquetaDeProyecto(despues.proyecto_id) }, interesados);
     }
     if ('descripcion' in changes && changes.descripcion !== antes.descripcion) anotarDescripcion(quien, despues);
+    if (despues.tipo !== antes.tipo) registrar(quien, despues, 'tipo', { de: antes.tipo, a: despues.tipo });
+    const agregadas = despues.etiquetas.filter((id) => !antes.etiquetas.includes(id));
+    const quitadas = antes.etiquetas.filter((id) => !despues.etiquetas.includes(id));
+    if (agregadas.length || quitadas.length) {
+      const nombres = (ids) => ids.map((id) => etiqueta(id)?.nombre).filter(Boolean);
+      registrar(quien, despues, 'etiquetas', { agregadas: nombres(agregadas), quitadas: nombres(quitadas) });
+    }
+  }
+
+  // Las etiquetas de un pendiente se reemplazan completas. Los ids deben ser de etiquetas que existen.
+  function ponerEtiquetas(pendienteId, etiquetas) {
+    if (etiquetas.some((id) => !etiqueta(id))) throw httpError(422, 'etiquetas_invalidas');
+    db.prepare('DELETE FROM pendiente_etiquetas WHERE pendiente_id = ?').run(pendienteId);
+    const insertar = db.prepare('INSERT INTO pendiente_etiquetas (pendiente_id, etiqueta_id) VALUES (?, ?)');
+    for (const etiquetaId of etiquetas) insertar.run(pendienteId, etiquetaId);
   }
 
   function verificarPerfil(perfilId) {
@@ -681,10 +822,110 @@ function createRepo(db, dataDir, graciaImagenesMs) {
   }
 
   return {
-    listarPendientes: (yo) => db.prepare(`SELECT ${COLUMNAS_PENDIENTE} FROM pendientes WHERE ${PENDIENTE_VISIBLE} ORDER BY posicion, creado_en DESC`)
-      .all(yo).map(fila),
+    // Etiquetas de todo el equipo, para marcar pendientes (el sprint, por ejemplo).
+    listarEtiquetas: () => db.prepare('SELECT id, nombre, color, creado_en FROM etiquetas ORDER BY nombre, creado_en').all().map(fila),
 
-    detallePendiente: (yo, id) => fila(db.prepare(`SELECT ${COLUMNAS_PENDIENTE}, descripcion FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo)),
+    crearEtiqueta({ nombre, color }) {
+      const { total } = db.prepare('SELECT COUNT(*) AS total FROM etiquetas').get();
+      const id = randomUUID();
+      sinDuplicados('etiqueta_duplicada', () => db.prepare('INSERT INTO etiquetas (id, nombre, color, creado_en) VALUES (?, ?, ?, ?)')
+        .run(id, nombre, color ?? COLORES[total % COLORES.length], new Date().toISOString()));
+      return etiqueta(id);
+    },
+
+    actualizarEtiqueta(id, changes) {
+      if (!etiqueta(id)) return null;
+      const campos = Object.keys(changes);
+      if (campos.length) {
+        sinDuplicados('etiqueta_duplicada', () => db.prepare(`UPDATE etiquetas SET ${campos.map((campo) => `${campo} = ?`).join(', ')} WHERE id = ?`)
+          .run(...campos.map((campo) => changes[campo]), id));
+      }
+      return etiqueta(id);
+    },
+
+    // Se quita de todos los pendientes que la tenían (ON DELETE CASCADE).
+    borrarEtiqueta: (id) => db.prepare('DELETE FROM etiquetas WHERE id = ?').run(id).changes > 0,
+
+    // Para los cambios en tiempo real: de qué pendiente es un mensaje o un archivo, y si alguien puede ver un pendiente
+    // (uno que ya no existe no guarda secretos).
+    pendienteDeComentario: (id) => db.prepare('SELECT pendiente_id FROM comentarios WHERE id = ?').get(id)?.pendiente_id ?? null,
+    pendienteDeArchivo: (id) => db.prepare('SELECT pendiente_id FROM archivos WHERE id = ?').get(id)?.pendiente_id ?? null,
+    puedeVerPendiente: (yo, id) => !db.prepare('SELECT 1 FROM pendientes WHERE id = ?').get(id)
+      || Boolean(db.prepare(`SELECT 1 FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo)),
+
+    // La IA del equipo. Las claves solo salen de aquí hacia el proveedor elegido.
+    ajustesIA() {
+      const guardado = db.prepare("SELECT valor FROM ajustes WHERE clave = 'ia'").get();
+      const ajustes = guardado ? JSON.parse(guardado.valor) : {};
+      return { proveedor: ajustes.proveedor ?? null, instrucciones: ajustes.instrucciones ?? null, modelos: ajustes.modelos ?? {}, claves: ajustes.claves ?? {} };
+    },
+
+    guardarAjustesIA(changes) {
+      const actual = this.ajustesIA();
+      const juntar = (antes, nuevos = {}) => Object.fromEntries(Object.entries({ ...antes, ...nuevos }).filter(([, valor]) => valor !== null));
+      const nuevo = {
+        proveedor: 'proveedor' in changes ? changes.proveedor : actual.proveedor,
+        instrucciones: 'instrucciones' in changes ? changes.instrucciones : actual.instrucciones,
+        modelos: juntar(actual.modelos, changes.modelos),
+        claves: juntar(actual.claves, changes.claves),
+      };
+      db.prepare("INSERT INTO ajustes (clave, valor) VALUES ('ia', ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor")
+        .run(JSON.stringify(nuevo));
+      return nuevo;
+    },
+
+    // Le pasa el texto a la IA con los nombres de las personas y de los proyectos que ve quien pregunta (sin correos
+    // ni teléfonos) y devuelve los pendientes que propone, sin crear nada: el tablero los muestra para revisarlos.
+    async sugerirPendientes(yo, { texto, proyecto_id: proyectoId }, bases) {
+      verificarProyecto(yo, proyectoId);
+      const { proveedor, modelos, claves, instrucciones } = this.ajustesIA();
+      if (!proveedor) throw httpError(422, 'ia_no_configurada');
+      if (!claves[proveedor]) throw httpError(422, 'ia_sin_clave');
+      const personas = db.prepare('SELECT id, nombre FROM perfiles ORDER BY creado_en, rowid').all();
+      const proyectos = db.prepare(`SELECT id FROM proyectos WHERE id IN (${PROYECTOS_VISIBLES})`).all(yo)
+        .map(({ id }) => ({ id, etiqueta: etiquetaDeProyecto(id) }))
+        .sort((a, b) => a.etiqueta.localeCompare(b.etiqueta, 'es'));
+      const etiquetas = this.listarEtiquetas();
+      const sistema = instruccionesIA({
+        personas: personas.map((p) => p.nombre),
+        proyectos: proyectos.map((p) => p.etiqueta),
+        etiquetas: etiquetas.map((e) => e.nombre),
+        proyectoPorDefecto: proyectoId && etiquetaDeProyecto(proyectoId),
+        extra: instrucciones,
+        hoy: new Date().toLocaleDateString('es-CR', { timeZone: 'America/Costa_Rica', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }),
+      });
+      const sugerencias = await pedirPendientes({
+        proveedor,
+        modelo: modelos[proveedor] ?? PROVEEDORES_IA[proveedor].modelo,
+        clave: claves[proveedor],
+        base: bases[proveedor],
+        sistema,
+        texto,
+      });
+      // La IA contesta con nombres: se pasan a ids. Un proyecto vale con su etiqueta completa o, si no se repite, solo con su nombre.
+      const normal = (valor) => valor.trim().replace(/^@/, '').toLocaleLowerCase('es');
+      const perfilDe = (nombre) => (nombre && personas.find((p) => normal(p.nombre) === normal(nombre))?.id) ?? null;
+      const proyectoDe = (nombre) => {
+        if (!nombre) return null;
+        const exacto = proyectos.find((p) => normal(p.etiqueta) === normal(nombre));
+        const porNombre = proyectos.filter((p) => normal(p.etiqueta.split(' › ').pop()) === normal(nombre));
+        return exacto?.id ?? (porNombre.length === 1 ? porNombre[0].id : null);
+      };
+      return sugerencias.slice(0, MAX_SUGERENCIAS).map((sugerencia) => ({
+        texto: sugerencia.titulo.slice(0, MAX_TEXTO),
+        detalle: sugerencia.detalle,
+        perfil_id: perfilDe(sugerencia.responsable),
+        proyecto_id: proyectoDe(sugerencia.proyecto) ?? proyectoId,
+        tipo: sugerencia.tipo,
+        etiquetas: [...new Set(sugerencia.etiquetas.map((nombre) => etiquetas.find((e) => normal(e.nombre) === normal(nombre))?.id).filter(Boolean))],
+        estado: sugerencia.estado,
+      }));
+    },
+
+    listarPendientes: (yo) => db.prepare(`SELECT ${COLUMNAS_PENDIENTE} FROM pendientes WHERE ${PENDIENTE_VISIBLE} ORDER BY posicion, creado_en DESC`)
+      .all(yo).map(pendienteFila),
+
+    detallePendiente: (yo, id) => pendienteFila(db.prepare(`SELECT ${COLUMNAS_PENDIENTE}, descripcion FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo)),
 
     // `quien` es { perfil_id, nombre } de quien hace el cambio, para el historial y los avisos.
     crearPendiente(quien, changes) {
@@ -696,9 +937,15 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       return transaction(db, () => {
         // Lo nuevo va arriba de todo.
         const { minimo } = db.prepare('SELECT COALESCE(MIN(posicion), 0) AS minimo FROM pendientes').get();
-        db.prepare(`INSERT INTO pendientes (id, texto, proyecto_id, estado, perfil_id, creado_por, posicion, creado_en, actualizado_en)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-          .run(id, changes.texto, changes.proyecto_id ?? null, changes.estado ?? 'pendiente', changes.perfil_id ?? null, yo, minimo - 1, now, now);
+        const estado = changes.estado ?? 'pendiente';
+        const descripcion = changes.descripcion ?? null;
+        const { resumen = null, num_imagenes: numImagenes = 0 } = descripcion ? resumirDescripcion(JSON.parse(descripcion)) : {};
+        db.prepare(`INSERT INTO pendientes (id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, posicion, creado_en, actualizado_en, hecho_en,
+            descripcion, resumen, num_imagenes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(id, changes.texto, changes.proyecto_id ?? null, estado, changes.tipo ?? null, changes.perfil_id ?? null, yo, minimo - 1, now, now,
+            estado === 'hecho' ? now : null, descripcion, resumen, numImagenes);
+        if (changes.etiquetas) ponerEtiquetas(id, changes.etiquetas);
         const creado = pendiente(yo, id);
         registrar(quien, creado, 'creado', {
           estado: creado.estado,
@@ -712,22 +959,26 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
     async actualizarPendiente(quien, id, changes) {
       const yo = quien.perfil_id;
-      const antes = fila(db.prepare(`SELECT texto, estado, perfil_id, proyecto_id, creado_por, descripcion FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`)
-        .get(id, yo));
-      if (!antes) return null;
+      const filaAntes = db.prepare(`SELECT texto, estado, tipo, perfil_id, proyecto_id, creado_por, descripcion FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`)
+        .get(id, yo);
+      if (!filaAntes) return null;
+      const antes = { ...filaAntes, etiquetas: pendiente(yo, id).etiquetas };
       verificarPerfil(changes.perfil_id);
       verificarProyecto(yo, changes.proyecto_id);
-      const columnas = { ...changes };
+      const now = new Date().toISOString();
+      const { etiquetas, ...columnas } = changes;
+      if ('estado' in changes && changes.estado !== antes.estado) columnas.hecho_en = changes.estado === 'hecho' ? now : null;
       if ('descripcion' in changes) {
         Object.assign(columnas, changes.descripcion === null
           ? { resumen: null, num_imagenes: 0 }
           : resumirDescripcion(JSON.parse(changes.descripcion)));
       }
-      // Las columnas salen de parsePendiente y resumirDescripcion, que solo producen campos conocidos.
+      // Las columnas salen de parsePendiente, resumirDescripcion y hecho_en: solo campos conocidos.
       const campos = Object.keys(columnas);
       const actualizado = transaction(db, () => {
         db.prepare(`UPDATE pendientes SET ${[...campos.map((campo) => `${campo} = ?`), 'actualizado_en = ?'].join(', ')} WHERE id = ?`)
-          .run(...campos.map((campo) => columnas[campo]), new Date().toISOString(), id);
+          .run(...campos.map((campo) => columnas[campo]), now, id);
+        if (etiquetas) ponerEtiquetas(id, etiquetas);
         const despues = pendiente(yo, id);
         anotarCambios(quien, antes, despues, changes);
         return despues;
@@ -762,7 +1013,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       verificarPerfil(perfilId);
       return transaction(db, () => {
         const { minimo } = db.prepare('SELECT COALESCE(MIN(posicion), 0) AS minimo FROM pendientes').get();
-        db.prepare("UPDATE pendientes SET estado = 'pendiente', perfil_id = ?, posicion = ?, actualizado_en = ? WHERE id = ?")
+        db.prepare("UPDATE pendientes SET estado = 'pendiente', hecho_en = NULL, perfil_id = ?, posicion = ?, actualizado_en = ? WHERE id = ?")
           .run(perfilId, minimo - 1, new Date().toISOString(), id);
         const despues = pendiente(yo, id);
         registrar(quien, despues, 'traspaso', {
@@ -780,15 +1031,17 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     ordenar(quien, orden) {
       const yo = quien.perfil_id;
       const now = new Date().toISOString();
+      // Todo el SET lee la fila de antes: `estado <> ?` compara con el estado previo.
       const update = db.prepare(`UPDATE pendientes
-        SET posicion = ?, actualizado_en = CASE WHEN estado <> ? THEN ? ELSE actualizado_en END, estado = ?
+        SET posicion = ?, actualizado_en = CASE WHEN estado <> ? THEN ? ELSE actualizado_en END,
+          hecho_en = CASE WHEN estado = ? THEN hecho_en WHEN ? = 'hecho' THEN ? ELSE NULL END, estado = ?
         WHERE id = ? AND ${PENDIENTE_VISIBLE}`);
       const antes = new Map(db.prepare(`SELECT id, texto, estado, perfil_id, creado_por FROM pendientes WHERE ${PENDIENTE_VISIBLE}`).all(yo)
         .map((row) => [row.id, fila(row)]));
       transaction(db, () => {
         // Lo que el tablero no conocía (otro lo creó mientras tanto, o no lo puede ver) queda al final, en su mismo orden.
         db.exec('UPDATE pendientes SET posicion = posicion + 1000000');
-        orden.forEach(({ id, estado }, i) => update.run(i, estado, now, estado, id, yo));
+        orden.forEach(({ id, estado }, i) => update.run(i, estado, now, estado, estado, now, estado, id, yo));
         db.exec(`WITH r AS (SELECT id, ROW_NUMBER() OVER (ORDER BY posicion) - 1 AS n FROM pendientes)
           UPDATE pendientes SET posicion = (SELECT n FROM r WHERE r.id = pendientes.id)`);
         // Arrastrar a otra columna también es un cambio de estado.
@@ -1108,10 +1361,50 @@ export function createApp(options = {}) {
   const authPassword = options.authPassword ?? process.env.AUTH_PASSWORD ?? '';
   const db = openDb(dataDir);
   const repo = createRepo(db, dataDir, options.graciaImagenesMs ?? GRACIA_IMAGENES_MS);
+  // Las pruebas apuntan cada proveedor de IA a un servidor falso (IA_URL_GEMINI, IA_URL_OPENAI, IA_URL_OPENROUTER).
+  const basesIA = Object.fromEntries(Object.entries(PROVEEDORES_IA).map(([id, { url }]) =>
+    [id, options.basesIA?.[id] ?? process.env[`IA_URL_${id.toUpperCase()}`] ?? url]));
   // Credenciales de perfil ya verificadas (huella del encabezado → hash contra el que se verificaron),
   // para no correr scrypt en cada petición. Si la contraseña cambia, el hash ya no coincide.
   const verificadas = new Map();
   const fallos = new Map();
+
+  // Cambios en tiempo real (SSE): cada pestaña abierta deja una conexión en GET /api/pendientes/eventos y, cuando
+  // alguien cambia algo, se le avisa qué cambió (pendientes, un chat, archivos, el catálogo) para que lo vuelva a
+  // pedir con sus permisos. No viaja el cambio en sí. La pestaña que hizo el cambio (X-Cliente) no se avisa a sí misma.
+  const conexiones = new Set();
+  const latido = setInterval(() => {
+    for (const conexion of conexiones) conexion.res.write(': latido\n\n');
+  }, LATIDO_MS);
+  latido.unref();
+
+  function avisarCambio(cambio, cliente) {
+    const mensaje = `event: cambio\ndata: ${JSON.stringify(cambio)}\n\n`;
+    for (const conexion of conexiones) {
+      if (cliente && conexion.cliente === cliente) continue;
+      if (cambio.pendiente_id && !repo.puedeVerPendiente(conexion.yo, cambio.pendiente_id)) continue;
+      conexion.res.write(mensaje);
+    }
+  }
+
+  // Qué avisar si la petición sale bien. Lo de un mensaje o archivo que se borra se busca antes de borrarlo.
+  function cambioDe(pathname, method) {
+    if (method === 'GET') return null;
+    const deRuta = (ruta) => pathname.match(ruta)?.[1];
+    if (pathname === API_PATH || pathname === ORDER_PATH) return { tipo: 'pendientes' };
+    const pendienteId = deRuta(ITEM_PATH) ?? deRuta(TRASPASO_PATH);
+    if (pendienteId) return { tipo: 'pendientes', pendiente_id: pendienteId };
+    if (deRuta(COMENTARIOS_PATH)) return { tipo: 'comentarios', pendiente_id: deRuta(COMENTARIOS_PATH) };
+    if (deRuta(COMENTARIO_PATH)) return { tipo: 'comentarios', pendiente_id: repo.pendienteDeComentario(deRuta(COMENTARIO_PATH)) };
+    if (deRuta(ARCHIVOS_PATH)) return { tipo: 'archivos', pendiente_id: deRuta(ARCHIVOS_PATH) };
+    if (deRuta(ARCHIVO_PATH)) return { tipo: 'archivos', pendiente_id: repo.pendienteDeArchivo(deRuta(ARCHIVO_PATH)) };
+    if ([PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ETIQUETAS_PATH].includes(pathname)
+      || [PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, ETIQUETA_PATH].some((ruta) => ruta.test(pathname))) {
+      return { tipo: 'catalogo' };
+    }
+    if (pathname === IA_PATH) return { tipo: 'ia' };
+    return null;
+  }
 
   // Devuelve { perfil_id, nombre } de quien llama, o null. La cuenta del equipo (AUTH_USER) no es un perfil.
   async function autenticar(req) {
@@ -1156,10 +1449,31 @@ export function createApp(options = {}) {
       const usuario = await autenticar(req);
       if (!usuario) return json(res, 401, { error: 'authentication_required' });
       const yo = usuario.perfil_id;
+      const cambio = cambioDe(url.pathname, req.method);
+      if (cambio) {
+        const cliente = String(req.headers['x-cliente'] ?? '').slice(0, 64);
+        res.on('finish', () => res.statusCode < 400 && avisarCambio(cambio, cliente));
+      }
       const enviar = (status, clave, valor) => (valor ? json(res, status, { [clave]: valor }) : json(res, 404, { error: 'not_found' }));
       const listo = (hecho) => (hecho ? json(res, 200, { ok: true }) : json(res, 404, { error: 'not_found' }));
 
       if (url.pathname === YO_PATH && req.method === 'GET') return json(res, 200, { usuario });
+
+      if (url.pathname === EVENTOS_PATH && req.method === 'GET') {
+        if (conexiones.size >= MAX_CONEXIONES) throw httpError(503, 'demasiadas_conexiones');
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          // Que nginx lo pase tal cual llega, sin juntarlo en su búfer.
+          'X-Accel-Buffering': 'no',
+        });
+        res.write('event: conectado\ndata: {"tipo":"conectado"}\n\n');
+        const conexion = { res, yo, cliente: (url.searchParams.get('cliente') ?? '').slice(0, 64) };
+        conexiones.add(conexion);
+        res.on('close', () => conexiones.delete(conexion));
+        return;
+      }
 
       if (url.pathname === API_PATH && req.method === 'GET') return json(res, 200, { pendientes: repo.listarPendientes(yo) });
       if (url.pathname === API_PATH && req.method === 'POST') {
@@ -1168,6 +1482,32 @@ export function createApp(options = {}) {
       if (url.pathname === ORDER_PATH && req.method === 'PUT') {
         return json(res, 200, { pendientes: repo.ordenar(usuario, parseOrden(await readJson(req))) });
       }
+
+      if (url.pathname === IA_PATH && req.method === 'GET') return json(res, 200, { ia: iaPublica(repo.ajustesIA()) });
+      if (url.pathname === IA_PATH && req.method === 'PUT') {
+        return json(res, 200, { ia: iaPublica(repo.guardarAjustesIA(parseAjustesIA(await readJson(req)))) });
+      }
+      if (url.pathname === IA_MODELOS_PATH && req.method === 'GET') {
+        const proveedor = url.searchParams.get('proveedor') ?? '';
+        if (!Object.hasOwn(PROVEEDORES_IA, proveedor)) throw httpError(422, 'proveedor_invalido');
+        // OpenRouter lista sus modelos sin clave.
+        const clave = repo.ajustesIA().claves[proveedor];
+        if (!clave && proveedor !== 'openrouter') throw httpError(422, 'ia_sin_clave');
+        return json(res, 200, { modelos: await listarModelos({ proveedor, clave, base: basesIA[proveedor] }) });
+      }
+      if (url.pathname === IA_SUGERIR_PATH && req.method === 'POST') {
+        return json(res, 200, { sugerencias: await repo.sugerirPendientes(yo, parseSugerencia(await readJson(req)), basesIA) });
+      }
+
+      if (url.pathname === ETIQUETAS_PATH && req.method === 'GET') return json(res, 200, { etiquetas: repo.listarEtiquetas() });
+      if (url.pathname === ETIQUETAS_PATH && req.method === 'POST') {
+        return json(res, 201, { etiqueta: repo.crearEtiqueta(parseEtiqueta(await readJson(req))) });
+      }
+      const etiquetaId = url.pathname.match(ETIQUETA_PATH)?.[1];
+      if (etiquetaId && req.method === 'PATCH') {
+        return enviar(200, 'etiqueta', repo.actualizarEtiqueta(etiquetaId, parseEtiqueta(await readJson(req), { partial: true })));
+      }
+      if (etiquetaId && req.method === 'DELETE') return listo(repo.borrarEtiqueta(etiquetaId));
 
       if (url.pathname === ACTIVIDAD_PATH && req.method === 'GET') {
         const antes = url.searchParams.get('antes');
@@ -1290,9 +1630,16 @@ export function createApp(options = {}) {
     } catch (error) {
       const status = error.statusCode || (error instanceof SyntaxError ? 400 : 500);
       if (status === 500) console.error(error);
-      return json(res, status, { error: status === 500 ? 'internal_error' : error.message });
+      return json(res, status, { error: status === 500 ? 'internal_error' : error.message, ...(error.detalle && { detalle: error.detalle }) });
     }
   });
+  // Las conexiones de los cambios en tiempo real no terminan solas: se cierran para que close() no espere por ellas.
+  const cerrar = server.close.bind(server);
+  server.close = (callback) => {
+    clearInterval(latido);
+    for (const conexion of conexiones) conexion.res.end();
+    return cerrar(callback);
+  };
   server.on('close', () => db.close());
   return server;
 }

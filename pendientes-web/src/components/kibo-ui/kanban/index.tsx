@@ -94,6 +94,8 @@ export const KanbanBoard = ({ id, children, className, style }: KanbanBoardProps
 export type KanbanCardProps<T extends KanbanItemProps = KanbanItemProps> = T & {
   children?: ReactNode;
   className?: string;
+  // Estilos de la tarjeta (no del contenedor que se arrastra): el tablero tiñe su borde con una variable CSS.
+  cardStyle?: CSSProperties;
 };
 
 export const KanbanCard = <T extends KanbanItemProps = KanbanItemProps>({
@@ -101,6 +103,7 @@ export const KanbanCard = <T extends KanbanItemProps = KanbanItemProps>({
   name,
   children,
   className,
+  cardStyle,
 }: KanbanCardProps<T>) => {
   const {
     attributes,
@@ -128,6 +131,7 @@ export const KanbanCard = <T extends KanbanItemProps = KanbanItemProps>({
             isDragging && "pointer-events-none cursor-grabbing opacity-30",
             className
           )}
+          style={cardStyle}
         >
           {children ?? <p className="m-0 font-medium text-sm">{name}</p>}
         </Card>
@@ -140,6 +144,7 @@ export const KanbanCard = <T extends KanbanItemProps = KanbanItemProps>({
               isDragging && "cursor-grabbing",
               className
             )}
+            style={cardStyle}
           >
             {children ?? <p className="m-0 font-medium text-sm">{name}</p>}
           </Card>

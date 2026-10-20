@@ -47,6 +47,17 @@ export function describir(actividad: Actividad, { conTitulo = true, yo = null }:
     }
     case "archivo":
       return conTitulo ? `adjuntó «${datos.nombre}» en ${titulo}` : `adjuntó «${datos.nombre}»`
+    case "etiquetas": {
+      const lista = (nombres: string[] = []) => nombres.map((nombre) => `«${nombre}»`).join(", ")
+      const partes = [
+        datos.agregadas?.length && `le puso ${lista(datos.agregadas)}`,
+        datos.quitadas?.length && `le quitó ${lista(datos.quitadas)}`,
+      ].filter(Boolean)
+      return conTitulo ? `${partes.join(" y ")} a ${titulo}` : partes.join(" y ")
+    }
+    case "tipo":
+      if (!datos.a) return conTitulo ? `le quitó el tipo a ${titulo}` : "le quitó el tipo"
+      return conTitulo ? `marcó ${titulo} como ${datos.a}` : `lo marcó como ${datos.a}`
     case "borrado":
       return `borró ${titulo}`
   }

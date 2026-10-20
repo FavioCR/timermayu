@@ -1,10 +1,14 @@
 export type Estado = "pendiente" | "haciendo" | "hecho"
 
+export type TipoTrabajo = "feat" | "fix" | "refactor" | "perf" | "docs" | "test" | "style" | "chore" | "ci"
+
 export type Pendiente = {
   id: string
   texto: string
   proyecto_id: string | null
   estado: Estado
+  // feat, fix… como en los commits convencionales; null si no se eligió.
+  tipo: TipoTrabajo | null
   perfil_id: string | null
   // Null si lo creó la cuenta del equipo o es de antes de que se anotara.
   creado_por: string | null
@@ -13,14 +17,62 @@ export type Pendiente = {
   // Archivos adjuntos al pendiente y a los mensajes de su chat.
   num_archivos: number
   num_comentarios: number
+  // Ids de sus etiquetas.
+  etiquetas: string[]
   creado_en: string
   actualizado_en: string
+  // Cuándo pasó a Hecho; null si no está hecho. El tablero solo muestra los hechos de la última semana.
+  hecho_en: string | null
 }
 
 // Solo el detalle trae la descripción: el documento del editor en JSON.
 export type PendienteDetalle = Pendiente & { descripcion: string | null }
 
-export type CambiosPendiente = Partial<Pick<Pendiente, "texto" | "proyecto_id" | "estado" | "perfil_id"> & { descripcion: string | null }>
+export type CambiosPendiente = Partial<
+  Pick<Pendiente, "texto" | "proyecto_id" | "estado" | "tipo" | "perfil_id" | "etiquetas"> & { descripcion: string | null }
+>
+
+// Etiquetas de todo el equipo: el sprint, por ejemplo.
+export type Etiqueta = { id: string; nombre: string; color: string; creado_en: string }
+
+export type ProveedorIA = "gemini" | "openai" | "openrouter"
+
+// La IA que crea pendientes. De las claves solo se sabe si hay una y sus últimos 4 caracteres: nunca salen del servidor.
+export type AjustesIA = {
+  proveedor: ProveedorIA | null
+  instrucciones: string | null
+  // Hay proveedor elegido y tiene clave.
+  lista: boolean
+  proveedores: {
+    id: ProveedorIA
+    nombre: string
+    modelo: string
+    modelo_por_defecto: string
+    tiene_clave: boolean
+    clave_final: string | null
+  }[]
+}
+
+// Una clave o un modelo en null se borra (el modelo vuelve al de siempre); lo que no viene no cambia.
+export type CambiosIA = {
+  proveedor?: ProveedorIA | null
+  instrucciones?: string | null
+  modelos?: Partial<Record<ProveedorIA, string | null>>
+  claves?: Partial<Record<ProveedorIA, string | null>>
+}
+
+export type ModeloIA = { id: string; nombre: string }
+
+// Un pendiente que propone la IA; no existe hasta que se crea.
+export type Sugerencia = {
+  texto: string
+  detalle: string | null
+  perfil_id: string | null
+  proyecto_id: string | null
+  tipo: TipoTrabajo | null
+  etiquetas: string[]
+  estado: Estado
+}
 
 export type Perfil = {
   id: string
@@ -66,6 +118,8 @@ export type TipoActividad =
   | "borrado"
   | "traspaso"
   | "archivo"
+  | "etiquetas"
+  | "tipo"
 
 // Lo que se anota según el tipo: de/a en los cambios, extracto y menciones (ids de perfil) en los mensajes, etc.
 export type DatosActividad = {
@@ -85,6 +139,8 @@ export type DatosActividad = {
   nota?: string
   archivo_id?: string
   nombre?: string
+  agregadas?: string[]
+  quitadas?: string[]
 }
 
 // Una entrada del historial. Guarda nombres (no solo ids) para leerse aunque el perfil o el proyecto ya no existan.
@@ -177,24 +233,50 @@ const MENSAJES: Record<string, string> = {
   nombre_archivo_invalido: "El nombre del archivo no se pudo leer. Cámbialo y vuelve a intentar.",
   nota_invalida: "La nota puede tener hasta 500 caracteres.",
   respuesta_invalida: "El mensaje al que respondías ya no está.",
+  etiqueta_duplicada: "Ya hay una etiqueta con ese nombre.",
+  tipo_invalido: "Ese tipo no existe. Recarga la página.",
+  etiquetas_invalidas: "Alguna de esas etiquetas ya no existe. Recarga la página.",
+  clave_invalida: "Esa clave no parece válida: pégala completa, sin espacios.",
+  modelo_invalido: "Escribe el nombre del modelo, sin espacios.",
+  instrucciones_invalidas: "Las indicaciones pueden tener hasta 2000 caracteres.",
+  texto_ia_invalido: "Escribe o pega el texto (hasta 20 000 caracteres).",
+  ia_no_configurada: "Todavía no hay una IA configurada.",
+  ia_sin_clave: "Falta la clave de ese proveedor. Agrégala en la configuración de la IA.",
+  ia_clave_invalida: "El proveedor rechazó la clave. Revísala en la configuración de la IA.",
+  ia_sin_saldo: "La cuenta del proveedor no tiene saldo.",
+  ia_limite: "El proveedor está limitando las peticiones. Espera un momento y vuelve a intentar.",
+  ia_modelo_invalido: "El proveedor no reconoce ese modelo. Elige otro en la configuración de la IA.",
+  ia_se_nego: "La IA no quiso procesar ese texto.",
+  ia_incompleta: "La respuesta de la IA quedó cortada. Prueba con un texto más corto.",
+  ia_respuesta_invalida: "La IA respondió algo que no se pudo leer. Vuelve a intentar.",
+  ia_tardo: "La IA tardó demasiado en responder. Vuelve a intentar.",
+  ia_sin_conexion: "El servidor no pudo conectarse con el proveedor de IA.",
+  ia_fallo: "El proveedor de IA devolvió un error.",
 }
+
+// Cada pestaña se identifica para que los cambios en tiempo real no le avisen de lo que ella misma hizo.
+export const CLIENTE = crypto.randomUUID()
 
 export const MAX_IMAGEN_BYTES = 10 * 1024 * 1024
 
 export class ApiError extends Error {
   code: string
   status: number
+  // Lo que dijo el proveedor de IA, cuando sirve para entender el error.
+  detalle?: string
 
-  constructor(code: string, status: number) {
+  constructor(code: string, status: number, detalle?: string) {
     super(code)
     this.code = code
     this.status = status
+    this.detalle = detalle
   }
 }
 
 export function mensajeDeError(error: unknown) {
   const code = error instanceof ApiError ? error.code : ""
-  return MENSAJES[code] ?? "Algo salió mal. Intenta de nuevo."
+  const mensaje = MENSAJES[code] ?? "Algo salió mal. Intenta de nuevo."
+  return error instanceof ApiError && error.detalle ? `${mensaje} (${error.detalle})` : mensaje
 }
 
 export function esNoAutorizado(error: unknown) {
@@ -238,6 +320,7 @@ async function pedir<T>(credenciales: string, method: string, ruta = "", body?: 
       method,
       headers: {
         Authorization: `Basic ${credenciales}`,
+        "X-Cliente": CLIENTE,
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -247,7 +330,7 @@ async function pedir<T>(credenciales: string, method: string, ruta = "", body?: 
     throw new ApiError("sin_conexion", 0)
   }
   const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new ApiError(data.error ?? `http_${response.status}`, response.status)
+  if (!response.ok) throw new ApiError(data.error ?? `http_${response.status}`, response.status, data.detalle)
   return data as T
 }
 
@@ -257,7 +340,7 @@ async function subirImagen(credenciales: string, pendienteId: string, archivo: F
   try {
     response = await fetch(`${BASE}/${pendienteId}/imagenes`, {
       method: "POST",
-      headers: { Authorization: `Basic ${credenciales}`, "Content-Type": archivo.type || "application/octet-stream" },
+      headers: { Authorization: `Basic ${credenciales}`, "X-Cliente": CLIENTE, "Content-Type": archivo.type || "application/octet-stream" },
       body: archivo,
     })
   } catch {
@@ -277,6 +360,7 @@ async function subirArchivo(credenciales: string, pendienteId: string, archivo: 
       method: "POST",
       headers: {
         Authorization: `Basic ${credenciales}`,
+        "X-Cliente": CLIENTE,
         "Content-Type": archivo.type || "application/octet-stream",
         "X-Nombre-Archivo": encodeURIComponent(archivo.name),
       },
@@ -322,7 +406,18 @@ export const api = {
   yo: (credenciales: string) => pedir<{ usuario: Usuario }>(credenciales, "GET", "/yo").then((data) => data.usuario),
   listar: (credenciales: string) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "GET").then((data) => data.pendientes),
-  crear: (credenciales: string, datos: { texto: string; proyecto_id: string | null; estado?: Estado; perfil_id: string | null }) =>
+  crear: (
+    credenciales: string,
+    datos: {
+      texto: string
+      proyecto_id: string | null
+      estado?: Estado
+      tipo?: TipoTrabajo | null
+      perfil_id: string | null
+      etiquetas?: string[]
+      descripcion?: string
+    }
+  ) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "POST", "", datos).then((data) => data.pendiente),
   detalle: (credenciales: string, id: string) =>
     pedir<{ pendiente: PendienteDetalle }>(credenciales, "GET", `/${id}`).then((data) => data.pendiente),
@@ -385,6 +480,25 @@ export const api = {
     actualizar: (credenciales: string, id: string, cambios: Partial<Pick<Organizacion, "nombre" | "color" | "compartida" | "miembros">>) =>
       pedir<{ organizacion: Organizacion }>(credenciales, "PATCH", `/organizaciones/${id}`, cambios).then((data) => data.organizacion),
     borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/organizaciones/${id}`),
+  },
+  etiquetas: {
+    listar: (credenciales: string) =>
+      pedir<{ etiquetas: Etiqueta[] }>(credenciales, "GET", "/etiquetas").then((data) => data.etiquetas),
+    crear: (credenciales: string, datos: { nombre: string; color?: string }) =>
+      pedir<{ etiqueta: Etiqueta }>(credenciales, "POST", "/etiquetas", datos).then((data) => data.etiqueta),
+    actualizar: (credenciales: string, id: string, cambios: Partial<Pick<Etiqueta, "nombre" | "color">>) =>
+      pedir<{ etiqueta: Etiqueta }>(credenciales, "PATCH", `/etiquetas/${id}`, cambios).then((data) => data.etiqueta),
+    borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/etiquetas/${id}`),
+  },
+  ia: {
+    leer: (credenciales: string) => pedir<{ ia: AjustesIA }>(credenciales, "GET", "/ia").then((data) => data.ia),
+    guardar: (credenciales: string, cambios: CambiosIA) =>
+      pedir<{ ia: AjustesIA }>(credenciales, "PUT", "/ia", cambios).then((data) => data.ia),
+    modelos: (credenciales: string, proveedor: ProveedorIA) =>
+      pedir<{ modelos: ModeloIA[] }>(credenciales, "GET", `/ia/modelos?proveedor=${proveedor}`).then((data) => data.modelos),
+    // Propone pendientes a partir de un texto; no crea nada.
+    sugerir: (credenciales: string, texto: string, proyectoId: string | null) =>
+      pedir<{ sugerencias: Sugerencia[] }>(credenciales, "POST", "/ia/sugerir", { texto, proyecto_id: proyectoId }).then((data) => data.sugerencias),
   },
   proyectos: {
     listar: (credenciales: string) =>

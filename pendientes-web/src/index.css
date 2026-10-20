@@ -135,6 +135,34 @@
   html {
     @apply font-sans;
     }
+  /* Barras de desplazamiento con los colores del tema (finas, del color del borde), también en los paneles. */
+  :root {
+    color-scheme: light;
+    }
+  .dark {
+    color-scheme: dark;
+    }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--muted-foreground) 45%, transparent) transparent;
+    }
+  /* Safari todavía no entiende scrollbar-color. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+    }
+  ::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 9999px;
+    background-clip: padding-box;
+    background-color: color-mix(in oklab, var(--muted-foreground) 45%, transparent);
+    }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
+    }
 }
 /* El editor de la descripción toma los colores del panel en vez de su propio fondo gris. */
 .bn-root.bn-container[data-color-scheme] {

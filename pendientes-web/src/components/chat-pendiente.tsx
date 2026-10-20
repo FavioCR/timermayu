@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEven
 import { Paperclip, Reply, SendHorizontal, Trash2, X } from "lucide-react"
 import { cn } from "cn"
 
-import { ChipArchivo } from "@/components/archivos"
+import { ChipArchivo, esImagenVisible, MiniaturaArchivo } from "@/components/archivos"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { Button } from "@/components/ui/button"
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
@@ -10,11 +10,13 @@ import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { Textarea } from "@/components/ui/textarea"
 import { api, esNoAutorizado, MAX_IMAGEN_BYTES, mensajeDeError, type Archivo, type Comentario, type Perfil, type Usuario } from "@/lib/api"
 import { fechaCompleta, haceCuanto } from "@/lib/actividad"
+import { useCambios } from "@/lib/cambios"
 import { abrirArchivo, traeArchivos } from "@/lib/archivos"
 import { comprimirImagen } from "@/lib/comprimir-imagen"
 
 // Mientras el chat está abierto se buscan mensajes nuevos cada tanto (y al volver a la pestaña).
-const CADA_MS = 10_000
+// Los mensajes nuevos llegan al instante por los cambios en tiempo real; esto es por si esa conexión se cae.
+const CADA_MS = 60_000
 const MAX_SUGERENCIAS = 6
 const MAX_ADJUNTOS = 10
 
@@ -177,6 +179,10 @@ export function ChatPendiente({
       fallar(err)
     }
   }, [credenciales, pendienteId, fallar])
+
+  useCambios((cambio) => {
+    if (cambio.tipo === "conectado" || ((cambio.tipo === "comentarios" || cambio.tipo === "archivos") && cambio.pendiente_id === pendienteId)) cargar()
+  })
 
   useEffect(() => {
     cargar()
@@ -438,9 +444,18 @@ export function ChatPendiente({
                     )}
                     {comentario.archivos.length > 0 && (
                       <div className={cn("flex max-w-full flex-col gap-1", mio && "items-end")}>
-                        {comentario.archivos.map((archivo) => (
-                          <ChipArchivo key={archivo.id} archivo={archivo} onAbrir={() => abrirArchivo(credenciales, archivo).catch(fallar)} />
-                        ))}
+                        {comentario.archivos.map((archivo) =>
+                          esImagenVisible(archivo) ? (
+                            <MiniaturaArchivo
+                              key={archivo.id}
+                              credenciales={credenciales}
+                              archivo={archivo}
+                              onAbrir={() => abrirArchivo(credenciales, archivo).catch(fallar)}
+                            />
+                          ) : (
+                            <ChipArchivo key={archivo.id} archivo={archivo} onAbrir={() => abrirArchivo(credenciales, archivo).catch(fallar)} />
+                          )
+                        )}
                       </div>
                     )}
                   </div>

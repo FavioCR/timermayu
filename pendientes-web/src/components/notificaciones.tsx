@@ -7,9 +7,11 @@ import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { api, esNoAutorizado, type Notificacion, type Perfil } from "@/lib/api"
 import { describir, detalleDe, haceCuanto } from "@/lib/actividad"
+import { useCambios } from "@/lib/cambios"
 
 // Cada cuánto se buscan avisos nuevos (también al volver a la pestaña).
-const CADA_MS = 15_000
+// Los avisos llegan al instante por los cambios en tiempo real; esto es por si esa conexión se cae.
+const CADA_MS = 60_000
 const TITULO = "Pendientes"
 
 type Permiso = NotificationPermission | "sin_soporte"
@@ -88,6 +90,9 @@ export function Notificaciones({
       if (esNoAutorizado(err)) onSalir()
     }
   }, [credenciales, yo, abrir, onSalir])
+
+  // Cualquier cambio de otra persona puede traer un aviso nuevo.
+  useCambios((cambio) => cambio.tipo !== "ia" && cargar())
 
   useEffect(() => {
     cargar()

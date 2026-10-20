@@ -38,6 +38,8 @@ import {
   Plus,
   RotateCw,
   Search,
+  Sparkles,
+  Tag,
   Timer,
   Trash2,
   UserPlus,
@@ -50,6 +52,8 @@ import { toast } from "sonner"
 
 import { ActividadSheet } from "@/components/actividad-sheet"
 import { DetallePendiente } from "@/components/detalle-pendiente"
+import { porNombre, PuntoEtiqueta } from "@/components/etiquetas-selector"
+import { HechosAnteriores } from "@/components/hechos-anteriores"
 import { IlustracionColumna } from "@/components/ilustraciones"
 import { InvolucradosMenu } from "@/components/involucrados-menu"
 import {
@@ -65,6 +69,7 @@ import { PerfilAvatar } from "@/components/perfil-avatar"
 import type { CambiosPerfil } from "@/components/perfiles-dialog"
 import { ProyectoCombobox } from "@/components/proyecto-combobox"
 import { ProyectosDialog } from "@/components/proyectos-dialog"
+import { InsigniaTipo } from "@/components/tipo-select"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -100,6 +105,7 @@ import {
   partesDe,
   type CambiosPendiente,
   type Estado,
+  type Etiqueta,
   type Organizacion,
   type Pendiente,
   type Perfil,
@@ -107,16 +113,25 @@ import {
 } from "@/lib/api"
 import { enlaceWhatsApp } from "@/lib/actividad"
 import { agrupar, conOrganizacion, conProyecto, involucrados, organizacionDe, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
+import { conectarCambios, useCambios } from "@/lib/cambios"
 import { COLUMNAS, NADIE } from "@/lib/estados"
+import { separarTipo, TIPOS, tipoDe } from "@/lib/tipos"
 
 const PerfilesDialog = lazy(() => import("@/components/perfiles-dialog").then((modulo) => ({ default: modulo.PerfilesDialog })))
+const IaDialog = lazy(() => import("@/components/ia-dialog").then((modulo) => ({ default: modulo.IaDialog })))
+const CrearConIaDialog = lazy(() => import("@/components/crear-con-ia-dialog").then((modulo) => ({ default: modulo.CrearConIaDialog })))
+
+// El tablero muestra los hechos de la última semana; los anteriores se buscan desde la columna Hecho.
+const SEMANA_MS = 7 * 24 * 60 * 60 * 1000
+// Filtro por tipo: "tipo:fix". Por etiqueta: su id.
+const PREFIJO_TIPO = "tipo:"
 
 const ICONOS: Record<Estado, typeof Inbox> = { pendiente: Inbox, haciendo: RotateCw, hecho: CircleCheck }
 
 const VACIO: Record<Estado, string> = {
   pendiente: "Agrega una tarea o arrastra una tarjeta a esta columna.",
   haciendo: "Arrastra una tarjeta o crea una nueva tarea para empezar.",
-  hecho: "Las tareas completadas aparecerán aquí automáticamente.",
+  hecho: "Aquí se ve lo terminado en los últimos 7 días.",
 }
 
 const fecha = new Intl.DateTimeFormat("es", { day: "numeric", month: "short" })
@@ -165,6 +180,8 @@ type Selecciones = {
   responsableNuevo: string
   // Organizaciones y proyectos comprimidos en una sola línea "Organización › Proyecto".
   compacto: boolean
+  // Tipo ("tipo:fix") o etiqueta (su id) por la que se filtra.
+  marca: string | null
 }
 
 function leerSelecciones(): Selecciones {
@@ -182,10 +199,11 @@ function leerSelecciones(): Selecciones {
     proyectoNuevo: texto(guardadas.proyectoNuevo),
     responsableNuevo: texto(guardadas.responsableNuevo) ?? NADIE,
     compacto: guardadas.compacto === true,
+    marca: texto(guardadas.marca),
   }
 }
 
-type Ventana = "proyectos" | "perfiles" | "actividad"
+type Ventana = "proyectos" | "perfiles" | "actividad" | "ia" | "crear-ia"
 
 // Tocar un botón dentro de la tarjeta no debe empezar a arrastrarla.
 const detener = (event: SyntheticEvent) => event.stopPropagation()
@@ -228,6 +246,9 @@ export function Tablero({
   const [tarjetas, setTarjetas] = useState<Tarjeta[]>([])
   const [perfiles, setPerfiles] = useState<Perfil[]>([])
   const [catalogo, setCatalogo] = useState<Catalogo>({ organizaciones: [], proyectos: [] })
+  const [etiquetas, setEtiquetas] = useState<Etiqueta[]>([])
+  // Desde cuándo un hecho es "de la última semana"; se pone al día con cada recarga.
+  const [ahora, setAhora] = useState(() => Date.now())
   const [usuario, setUsuario] = useState<Usuario | null>(null)
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState("")
@@ -235,6 +256,7 @@ export function Tablero({
   const [filtroOrganizacion, setFiltroOrganizacion] = useState(guardadas.organizacion)
   const [filtroProyecto, setFiltroProyecto] = useState(guardadas.proyecto)
   const [filtroPerfil, setFiltroPerfil] = useState(guardadas.perfil)
+  const [filtroMarca, setFiltroMarca] = useState(guardadas.marca)
   const [texto, setTexto] = useState("")
   const [proyectoId, setProyectoId] = useState(guardadas.proyectoNuevo)
   const [responsable, setResponsable] = useState(guardadas.responsableNuevo)
@@ -247,6 +269,12 @@ export function Tablero({
   // Abierta una vez, Perfiles queda montada para que se cierre con su animación.
   const [perfilesAbiertos, setPerfilesAbiertos] = useState(false)
   if (ventana === "perfiles" && !perfilesAbiertos) setPerfilesAbiertos(true)
+  // Igual con los de la IA, que se cargan aparte.
+  const [iaAbierta, setIaAbierta] = useState(false)
+  if ((ventana === "ia" || ventana === "crear-ia") && !iaAbierta) setIaAbierta(true)
+  // Al configurar la IA desde "Crear con IA", al guardar se vuelve ahí.
+  const volverACrear = useRef(false)
+  const [hechosAbiertos, setHechosAbiertos] = useState(false)
   // El pendiente hecho que se está pasando a otra persona.
   const [pasando, setPasando] = useState<Pendiente | null>(null)
   const [confirmarLimpieza, setConfirmarLimpieza] = useState(false)
@@ -254,6 +282,9 @@ export function Tablero({
   const ultimas = useRef<Tarjeta[]>([])
   const ordenAlEmpezar = useRef("")
   const arrastrando = useRef(false)
+  // Llegó un cambio de otra persona mientras se arrastraba: se recarga al soltar.
+  const recargarAlSoltar = useRef(false)
+  const recargaPendiente = useRef<number | undefined>(undefined)
   const campoTexto = useRef<HTMLInputElement>(null)
   // Lo que toca hacer cuando el menú de una columna termina de cerrarse (en vez de devolver el foco a su botón).
   const alCerrarMenu = useRef<(() => void) | null>(null)
@@ -270,13 +301,14 @@ export function Tablero({
       proyectoNuevo: proyectoId,
       responsableNuevo: responsable,
       compacto,
+      marca: filtroMarca,
     }
     try {
       localStorage.setItem(SELECCIONES, JSON.stringify(selecciones))
     } catch {
       // Sin almacenamiento las selecciones duran lo que dure la pestaña.
     }
-  }, [filtroOrganizacion, filtroProyecto, filtroPerfil, proyectoId, responsable, compacto])
+  }, [filtroOrganizacion, filtroProyecto, filtroPerfil, proyectoId, responsable, compacto, filtroMarca])
 
   // La dirección lleva el pendiente abierto, para poder compartirla o recargar sin perderlo.
   useEffect(() => {
@@ -296,16 +328,19 @@ export function Tablero({
 
   const recargar = useCallback(async () => {
     try {
-      const [pendientes, nuevosPerfiles, organizaciones, proyectos, yo] = await Promise.all([
+      const [pendientes, nuevosPerfiles, organizaciones, proyectos, nuevasEtiquetas, yo] = await Promise.all([
         api.listar(credenciales),
         api.perfiles.listar(credenciales),
         api.organizaciones.listar(credenciales),
         api.proyectos.listar(credenciales),
+        api.etiquetas.listar(credenciales),
         api.yo(credenciales),
       ])
       setTarjetas(pendientes.map(aTarjeta))
       setPerfiles(nuevosPerfiles)
       setCatalogo({ organizaciones, proyectos })
+      setEtiquetas(nuevasEtiquetas)
+      setAhora(Date.now())
       setUsuario(yo)
       // Un pendiente que ya no existe (o que no se puede ver) no queda abierto.
       setAbierto((actual) => (actual && pendientes.some((p) => p.id === actual) ? actual : null))
@@ -325,6 +360,19 @@ export function Tablero({
     return () => document.removeEventListener("visibilitychange", alVolver)
   }, [recargar])
 
+  // Cambios en tiempo real: cuando otra persona (u otra pestaña) cambia algo, el tablero se pone al día.
+  // Varios avisos seguidos se juntan en una sola recarga; mientras se arrastra, se espera a soltar.
+  useEffect(() => conectarCambios(credenciales, onSalir), [credenciales, onSalir])
+  const recargarPronto = useCallback(() => {
+    window.clearTimeout(recargaPendiente.current)
+    recargaPendiente.current = window.setTimeout(() => {
+      if (arrastrando.current) recargarAlSoltar.current = true
+      else recargar()
+    }, 250)
+  }, [recargar])
+  useEffect(() => () => window.clearTimeout(recargaPendiente.current), [])
+  useCambios((cambio) => cambio.tipo !== "ia" && recargarPronto())
+
   const perfilesPorId = useMemo(() => new Map(perfiles.map((perfil) => [perfil.id, perfil])), [perfiles])
   const proyectosPorId = useMemo(() => new Map(catalogo.proyectos.map((proyecto) => [proyecto.id, proyecto])), [catalogo])
   const organizacionesPorId = useMemo(
@@ -332,6 +380,8 @@ export function Tablero({
     [catalogo]
   )
   const grupos = useMemo(() => agrupar(catalogo), [catalogo])
+  const etiquetasPorId = useMemo(() => new Map(etiquetas.map((etiqueta) => [etiqueta.id, etiqueta])), [etiquetas])
+  const etiquetasOrdenadas = useMemo(() => [...etiquetas].sort(porNombre), [etiquetas])
 
   // Lo que no tiene proyecto, o tiene uno suelto, cae en "Sin organización".
   const claveOrganizacion = useCallback(
@@ -350,28 +400,61 @@ export function Tablero({
   const perfilFiltrado =
     filtroPerfil === null || filtroPerfil === NADIE || personasDelFiltro.some((perfil) => perfil.id === filtroPerfil) ? filtroPerfil : null
 
-  const filtrando = organizacionFiltrada !== null || proyectoFiltrado !== null || perfilFiltrado !== null
+  // Un tipo o una etiqueta que ya no existe deja de filtrar.
+  const marcaFiltrada =
+    filtroMarca !== null &&
+    (filtroMarca.startsWith(PREFIJO_TIPO) ? tipoDe(filtroMarca.slice(PREFIJO_TIPO.length) as Pendiente["tipo"]) : etiquetasPorId.has(filtroMarca))
+      ? filtroMarca
+      : null
 
-  // Lo que queda con la organización y el proyecto elegidos; de ahí salen los números de cada persona.
+  const filtrando = organizacionFiltrada !== null || proyectoFiltrado !== null || perfilFiltrado !== null || marcaFiltrada !== null
+
+  const enOrganizacionYProyecto = useCallback(
+    (tarjeta: Tarjeta) =>
+      (organizacionFiltrada === null || claveOrganizacion(tarjeta) === organizacionFiltrada) &&
+      (proyectoFiltrado === null || tarjeta.proyecto_id === proyectoFiltrado),
+    [organizacionFiltrada, proyectoFiltrado, claveOrganizacion]
+  )
+  const conPersona = useCallback((tarjeta: Tarjeta) => perfilFiltrado === null || (tarjeta.perfil_id ?? NADIE) === perfilFiltrado, [perfilFiltrado])
+  const conMarca = useCallback(
+    (tarjeta: Tarjeta) =>
+      marcaFiltrada === null ||
+      (marcaFiltrada.startsWith(PREFIJO_TIPO) ? tarjeta.tipo === marcaFiltrada.slice(PREFIJO_TIPO.length) : tarjeta.etiquetas.includes(marcaFiltrada)),
+    [marcaFiltrada]
+  )
+
+  // Los hechos de hace más de una semana salen del tablero (y de sus números); se buscan aparte.
+  const esAntiguo = useCallback(
+    (tarjeta: Tarjeta) => tarjeta.column === "hecho" && tarjeta.hecho_en !== null && Date.parse(tarjeta.hecho_en) < ahora - SEMANA_MS,
+    [ahora]
+  )
+  const recientes = useMemo(() => tarjetas.filter((tarjeta) => !esAntiguo(tarjeta)), [tarjetas, esAntiguo])
+  const antiguosVisibles = useMemo(
+    () => tarjetas.filter((tarjeta) => esAntiguo(tarjeta) && enOrganizacionYProyecto(tarjeta) && conPersona(tarjeta) && conMarca(tarjeta)),
+    [tarjetas, esAntiguo, enOrganizacionYProyecto, conPersona, conMarca]
+  )
+
+  // Lo que queda con la organización, el proyecto y el tipo o etiqueta elegidos; de ahí salen los números de cada persona.
   const enAlcance = useMemo(
-    () =>
-      tarjetas.filter(
-        (tarjeta) =>
-          (organizacionFiltrada === null || claveOrganizacion(tarjeta) === organizacionFiltrada) &&
-          (proyectoFiltrado === null || tarjeta.proyecto_id === proyectoFiltrado)
-      ),
-    [tarjetas, organizacionFiltrada, proyectoFiltrado, claveOrganizacion]
+    () => recientes.filter((tarjeta) => enOrganizacionYProyecto(tarjeta) && conMarca(tarjeta)),
+    [recientes, enOrganizacionYProyecto, conMarca]
   )
 
-  const visibles = useMemo(
-    () => (perfilFiltrado === null ? enAlcance : enAlcance.filter((tarjeta) => (tarjeta.perfil_id ?? NADIE) === perfilFiltrado)),
-    [enAlcance, perfilFiltrado]
-  )
+  const visibles = useMemo(() => enAlcance.filter(conPersona), [enAlcance, conPersona])
 
-  const porOrganizacion = useMemo(() => contar(tarjetas, claveOrganizacion), [tarjetas, claveOrganizacion])
-  const porProyecto = useMemo(() => contar(tarjetas, (tarjeta) => tarjeta.proyecto_id), [tarjetas])
+  const porOrganizacion = useMemo(() => contar(recientes, claveOrganizacion), [recientes, claveOrganizacion])
+  const porProyecto = useMemo(() => contar(recientes, (tarjeta) => tarjeta.proyecto_id), [recientes])
   const asignados = useMemo(() => contar(tarjetas, (tarjeta) => tarjeta.perfil_id ?? NADIE), [tarjetas])
   const asignadosEnAlcance = useMemo(() => contar(enAlcance, (tarjeta) => tarjeta.perfil_id ?? NADIE), [enAlcance])
+  // Los números de cada tipo y etiqueta, con los demás filtros.
+  const paraMarcas = useMemo(() => recientes.filter((tarjeta) => enOrganizacionYProyecto(tarjeta) && conPersona(tarjeta)), [recientes, enOrganizacionYProyecto, conPersona])
+  const porTipo = useMemo(() => contar(paraMarcas, (tarjeta) => tarjeta.tipo), [paraMarcas])
+  const porEtiqueta = useMemo(() => {
+    const conteo = new Map<string, number>()
+    for (const tarjeta of paraMarcas) for (const id of tarjeta.etiquetas) conteo.set(id, (conteo.get(id) ?? 0) + 1)
+    return conteo
+  }, [paraMarcas])
+  const tiposEnUso = TIPOS.filter((tipo) => porTipo.has(tipo.id) || marcaFiltrada === `${PREFIJO_TIPO}${tipo.id}`)
 
   // Los proyectos de la organización elegida en el filtro.
   const proyectosDelFiltro =
@@ -453,12 +536,17 @@ export function Tablero({
       campoTexto.current?.focus()
       return
     }
+    // "fix: el login falla" lo crea como fix; con un tipo o etiqueta en el filtro, lo nuevo lo lleva para no desaparecer.
+    const separado = separarTipo(texto)
+    const tipoDelFiltro = marcaFiltrada?.startsWith(PREFIJO_TIPO) ? (marcaFiltrada.slice(PREFIJO_TIPO.length) as Pendiente["tipo"]) : null
     try {
       const nuevo = await api.crear(credenciales, {
-        texto,
+        texto: separado.texto,
         proyecto_id: proyectoDelFormulario,
         estado: destino,
+        tipo: separado.tipo ?? tipoDelFiltro,
         perfil_id: responsableDelFormulario === NADIE ? null : responsableDelFormulario,
+        etiquetas: marcaFiltrada && !marcaFiltrada.startsWith(PREFIJO_TIPO) ? [marcaFiltrada] : [],
       })
       setTarjetas((actuales) => [aTarjeta(nuevo), ...actuales])
       setTexto("")
@@ -525,7 +613,9 @@ export function Tablero({
   const cambiarPendiente = useCallback(
     async (id: string, cambios: CambiosPendiente) => {
       const { descripcion: _descripcion, ...enLaTarjeta } = cambios
-      setTarjetas((actuales) => actuales.map((t) => (t.id === id ? aTarjeta({ ...t, ...enLaTarjeta }) : t)))
+      const fecha = (t: Tarjeta) =>
+        cambios.estado && cambios.estado !== t.estado ? { hecho_en: cambios.estado === "hecho" ? new Date().toISOString() : null } : {}
+      setTarjetas((actuales) => actuales.map((t) => (t.id === id ? aTarjeta({ ...t, ...enLaTarjeta, ...fecha(t) }) : t)))
       try {
         const actualizado = await api.actualizar(credenciales, id, cambios)
         setTarjetas((actuales) => actuales.map((t) => (t.id === id ? aTarjeta(actualizado) : t)))
@@ -579,6 +669,44 @@ export function Tablero({
     },
     [credenciales, fallar]
   )
+
+  const crearEtiqueta = useCallback(
+    async (nombre: string) => {
+      try {
+        const nueva = await api.etiquetas.crear(credenciales, { nombre })
+        setEtiquetas((actuales) => [...actuales, nueva])
+        setError("")
+        return nueva
+      } catch (err) {
+        fallar(err)
+        return null
+      }
+    },
+    [credenciales, fallar]
+  )
+
+  // Se quita de todo el tablero.
+  const borrarEtiqueta = useCallback(
+    async (etiqueta: Etiqueta) => {
+      setEtiquetas((actuales) => actuales.filter((e) => e.id !== etiqueta.id))
+      setTarjetas((actuales) =>
+        actuales.map((t) => (t.etiquetas.includes(etiqueta.id) ? { ...t, etiquetas: t.etiquetas.filter((id) => id !== etiqueta.id) } : t))
+      )
+      try {
+        await api.etiquetas.borrar(credenciales, etiqueta.id)
+      } catch (err) {
+        fallar(err)
+        recargar()
+      }
+    },
+    [credenciales, fallar, recargar]
+  )
+
+  // Lo que crea la IA entra arriba del tablero, en su orden.
+  function agregarCreados(nuevos: Pendiente[]) {
+    setTarjetas((actuales) => [...nuevos.map(aTarjeta), ...actuales.filter((t) => !nuevos.some((n) => n.id === t.id))])
+    toast.success(nuevos.length === 1 ? "Se creó 1 pendiente" : `Se crearon ${nuevos.length} pendientes`)
+  }
 
   async function crearPerfil(datos: { nombre: string; color: string; correo: string | null; telefono: string | null }) {
     try {
@@ -644,8 +772,15 @@ export function Tablero({
     }
   }
 
+  // El tablero nunca tiene todo (los hechos viejos no están): su nuevo orden se acomoda en la lista completa.
+  // Lo que cambia de columna anota (o borra) cuándo se terminó, como hará el servidor.
   function cambiarTablero(nuevas: Tarjeta[]) {
-    const todas = filtrando ? mezclar(ultimas.current, nuevas) : nuevas
+    const columnaAntes = new Map(ultimas.current.map((tarjeta) => [tarjeta.id, tarjeta.column]))
+    const momento = new Date().toISOString()
+    const conFecha = nuevas.map((tarjeta) =>
+      columnaAntes.get(tarjeta.id) === tarjeta.column ? tarjeta : { ...tarjeta, hecho_en: tarjeta.column === "hecho" ? momento : null }
+    )
+    const todas = mezclar(ultimas.current, conFecha)
     ultimas.current = todas
     setTarjetas(todas)
   }
@@ -660,9 +795,15 @@ export function Tablero({
     setTimeout(async () => {
       arrastrando.current = false
       const finales = ultimas.current
-      if (firmaDelOrden(finales) === ordenAlEmpezar.current) return
+      const pendienteDeRecarga = recargarAlSoltar.current
+      recargarAlSoltar.current = false
+      if (firmaDelOrden(finales) === ordenAlEmpezar.current) {
+        if (pendienteDeRecarga) recargar()
+        return
+      }
       try {
         await api.ordenar(credenciales, finales.map((tarjeta) => ({ id: tarjeta.id, estado: tarjeta.column as Estado })))
+        if (pendienteDeRecarga) recargar()
       } catch (err) {
         fallar(err)
         recargar()
@@ -708,7 +849,7 @@ export function Tablero({
                 perfilesPorId={perfilesPorId}
                 abribles={abribles}
                 onAbrir={abrirPendiente}
-                onNovedades={recargar}
+                onNovedades={recargarPronto}
                 onSalir={onSalir}
               />
             )}
@@ -739,6 +880,10 @@ export function Tablero({
                   </a>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator className="md:hidden" />
+                <DropdownMenuItem onSelect={() => setVentana("ia")}>
+                  <Sparkles /> Inteligencia artificial
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={onSalir}>
                   <LogOut /> Salir
                 </DropdownMenuItem>
@@ -757,7 +902,7 @@ export function Tablero({
             <InputGroupInput
               ref={campoTexto}
               aria-label="Nuevo pendiente"
-              placeholder="¿Qué falta hacer?"
+              placeholder="¿Qué falta hacer? (fix: o feat: le pone tipo)"
               value={texto}
               onChange={(event) => setTexto(event.target.value)}
               maxLength={500}
@@ -796,9 +941,15 @@ export function Tablero({
               </SelectItem>
             </SelectContent>
           </Select>
-          <Button type="submit" className="h-11 px-5">
-            <Plus /> Agregar
-          </Button>
+          <div className="flex gap-3">
+            <Button type="submit" className="h-11 flex-1 px-5 sm:flex-none">
+              <Plus /> Agregar
+            </Button>
+            <Button type="button" variant="outline" className="h-11 flex-1 sm:flex-none" aria-label="Crear con IA" onClick={() => setVentana("crear-ia")}>
+              <Sparkles className="text-primary" /> <span className="sm:hidden xl:inline">Crear con IA</span>
+              <span className="hidden sm:inline xl:hidden">IA</span>
+            </Button>
+          </div>
         </form>
 
         {usuario && usuario.perfil_id === null && !sinAvisoEquipo && (
@@ -826,7 +977,7 @@ export function Tablero({
           </div>
         )}
 
-        {(perfiles.length > 0 || hayCatalogo) && (
+        {(perfiles.length > 0 || hayCatalogo || etiquetas.length > 0) && (
           <div className="flex flex-col gap-2.5">
             {hayCatalogo && (
               <Collapsible open={!compacto} onOpenChange={(abierto) => setCompacto(!abierto)} className="flex flex-col gap-2.5">
@@ -947,6 +1098,31 @@ export function Tablero({
                 )}
               </div>
             )}
+            {(tiposEnUso.length > 0 || etiquetas.length > 0) && (
+              <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por tipo o etiqueta">
+                <Filtro activo={marcaFiltrada === null} onClick={() => setFiltroMarca(null)}>
+                  <Tag /> Todo
+                </Filtro>
+                {tiposEnUso.map((tipo) => {
+                  const clave = `${PREFIJO_TIPO}${tipo.id}`
+                  return (
+                    <Filtro key={clave} activo={marcaFiltrada === clave} title={tipo.descripcion} onClick={() => setFiltroMarca(marcaFiltrada === clave ? null : clave)}>
+                      <span className="size-2.5 rounded-full" style={{ backgroundColor: tipo.color }} />
+                      <span className="font-mono">{tipo.id}</span> <Contador valor={porTipo.get(tipo.id) ?? 0} />
+                    </Filtro>
+                  )
+                })}
+                {etiquetasOrdenadas.map((etiqueta) => (
+                  <Filtro
+                    key={etiqueta.id}
+                    activo={marcaFiltrada === etiqueta.id}
+                    onClick={() => setFiltroMarca(marcaFiltrada === etiqueta.id ? null : etiqueta.id)}
+                  >
+                    <PuntoEtiqueta etiqueta={etiqueta} className="size-2.5" /> {etiqueta.nombre} <Contador valor={porEtiqueta.get(etiqueta.id) ?? 0} />
+                  </Filtro>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -977,7 +1153,7 @@ export function Tablero({
                     key={columna.id}
                     // Cada columna se tiñe con su color: el fondo apenas, el encabezado un poco más.
                     style={{ "--tono": columna.color } as CSSProperties}
-                    className="min-h-[28rem] divide-y-0 rounded-xl border-[color-mix(in_oklab,var(--tono)_20%,var(--color-border))] bg-[color-mix(in_oklab,var(--tono)_4%,var(--color-columna))] text-sm shadow-none"
+                    className="min-h-[28rem] divide-y-0 rounded-none border-[color-mix(in_oklab,var(--tono)_20%,var(--color-border))] bg-[color-mix(in_oklab,var(--tono)_4%,var(--color-columna))] text-sm shadow-none"
                   >
                     <KanbanHeader className="flex items-center gap-2.5 bg-[color-mix(in_oklab,var(--tono)_10%,transparent)] py-3 pr-2 pl-4">
                       <span className="size-2.5 shrink-0 rounded-full bg-(--tono)" />
@@ -1013,6 +1189,13 @@ export function Tablero({
                           </DropdownMenuItem>
                           {columna.id === "hecho" && (
                             <>
+                              <DropdownMenuItem
+                                onSelect={() => {
+                                  alCerrarMenu.current = () => setHechosAbiertos(true)
+                                }}
+                              >
+                                <Search /> Buscar hechos anteriores
+                              </DropdownMenuItem>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
                                 variant="destructive"
@@ -1033,13 +1216,20 @@ export function Tablero({
                         const perfil = tarjeta.perfil_id ? perfilesPorId.get(tarjeta.perfil_id) : null
                         const proyecto = tarjeta.proyecto_id ? proyectosPorId.get(tarjeta.proyecto_id) : null
                         const organizacion = proyecto?.organizacion_id ? organizacionesPorId.get(proyecto.organizacion_id) : null
+                        const susEtiquetas = tarjeta.etiquetas.flatMap((id) => etiquetasPorId.get(id) ?? []).sort(porNombre)
+                        // El borde toma el color de su tipo; sin tipo, el de su primera etiqueta.
+                        const colorBorde = tipoDe(tarjeta.tipo)?.color ?? susEtiquetas[0]?.color
                         return (
                           <KanbanCard
                             column={columna.id}
                             id={tarjeta.id}
                             key={tarjeta.id}
                             name={tarjeta.name}
-                            className="rounded-lg ring-border transition-shadow hover:ring-primary/50"
+                            cardStyle={colorBorde ? ({ "--borde": colorBorde } as CSSProperties) : undefined}
+                            className={cn(
+                              "rounded-none transition-shadow",
+                              colorBorde ? "ring-(--borde)/70 hover:ring-2 hover:ring-(--borde)" : "ring-border hover:ring-primary/50"
+                            )}
                           >
                             <div
                               className="flex flex-col gap-2"
@@ -1054,6 +1244,7 @@ export function Tablero({
                                   onKeyDown={detener}
                                   onClick={() => !arrastrando.current && setAbierto(tarjeta.id)}
                                 >
+                                  {tarjeta.tipo && <InsigniaTipo tipo={tarjeta.tipo} className="mr-1.5 align-[1px]" />}
                                   {tarjeta.texto}
                                 </button>
                                 {tarjeta.column === "hecho" && (
@@ -1082,6 +1273,19 @@ export function Tablero({
                               </div>
                               {tarjeta.resumen && (
                                 <p className="m-0 line-clamp-2 text-xs text-muted-foreground">{tarjeta.resumen}</p>
+                              )}
+                              {susEtiquetas.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {susEtiquetas.map((etiqueta) => (
+                                    <span
+                                      key={etiqueta.id}
+                                      className="inline-flex max-w-full items-center gap-1 border px-1.5 py-0.5 text-[11px] leading-none text-muted-foreground"
+                                    >
+                                      <PuntoEtiqueta etiqueta={etiqueta} className="size-1.5" />
+                                      <span className="truncate">{etiqueta.nombre}</span>
+                                    </span>
+                                  ))}
+                                </div>
                               )}
                               <div className="flex min-w-0 items-center gap-2">
                                 {proyecto && (
@@ -1165,7 +1369,7 @@ export function Tablero({
                       }}
                     </KanbanCards>
                     {cantidad === 0 && (
-                      <Empty className="m-3 w-auto gap-3 border border-[color-mix(in_oklab,var(--tono)_22%,var(--color-border))] p-6">
+                      <Empty className="m-3 w-auto gap-3 rounded-none border border-[color-mix(in_oklab,var(--tono)_22%,var(--color-border))] p-6">
                         <EmptyHeader>
                           <EmptyMedia>
                             <IlustracionColumna estado={columna.id} />
@@ -1175,6 +1379,16 @@ export function Tablero({
                         </EmptyHeader>
                       </Empty>
                     )}
+                    {columna.id === "hecho" && antiguosVisibles.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setHechosAbiertos(true)}
+                        className="m-3 mt-auto flex items-center justify-center gap-2 border border-dashed border-[color-mix(in_oklab,var(--tono)_30%,var(--color-border))] px-3 py-2.5 text-sm text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+                      >
+                        <Search className="size-4" />
+                        {antiguosVisibles.length === 1 ? "1 hecho anterior" : `${antiguosVisibles.length} hechos anteriores`} · Buscar
+                      </button>
+                    )}
                   </KanbanBoard>
                 )
               }}
@@ -1182,9 +1396,10 @@ export function Tablero({
           </div>
         )}
 
-        <p className="m-0 flex items-center gap-4 rounded-xl border border-dashed px-5 py-4 text-sm text-muted-foreground">
+        <p className="m-0 flex items-center gap-4 rounded-none border border-dashed px-5 py-4 text-sm text-muted-foreground">
           <Keyboard className="size-6 shrink-0" />
           Arrastra las tarjetas entre columnas. Toca una tarjeta para abrir su detalle: descripción e imágenes (también se pegan con Ctrl+V o ⌘V).
+          Empieza con «fix:» o «feat:» para darle tipo. Hecho muestra los últimos 7 días; lo anterior se busca al pie de la columna.
         </p>
       </main>
 
@@ -1231,6 +1446,48 @@ export function Tablero({
           />
         </Suspense>
       )}
+      {iaAbierta && (
+        <Suspense fallback={null}>
+          <IaDialog
+            abierto={ventana === "ia"}
+            onAbiertoChange={(siguiente) => {
+              if (siguiente) return setVentana("ia")
+              setVentana(volverACrear.current ? "crear-ia" : null)
+              volverACrear.current = false
+            }}
+            credenciales={credenciales}
+            onGuardado={() => toast.success("IA configurada")}
+            onSalir={onSalir}
+          />
+          <CrearConIaDialog
+            abierto={ventana === "crear-ia"}
+            onAbiertoChange={(siguiente) => setVentana(siguiente ? "crear-ia" : null)}
+            credenciales={credenciales}
+            catalogo={catalogo}
+            perfiles={perfiles}
+            etiquetas={etiquetas}
+            proyectoPorDefecto={proyectoDelFormulario}
+            onCrearProyecto={crearProyecto}
+            onCrearEtiqueta={crearEtiqueta}
+            onCreados={agregarCreados}
+            onConfigurar={() => {
+              volverACrear.current = true
+              setVentana("ia")
+            }}
+            onSalir={onSalir}
+          />
+        </Suspense>
+      )}
+      <HechosAnteriores
+        abierto={hechosAbiertos}
+        onAbiertoChange={setHechosAbiertos}
+        pendientes={antiguosVisibles}
+        filtrando={filtrando}
+        perfilesPorId={perfilesPorId}
+        etiquetasPorId={etiquetasPorId}
+        etiquetaDeProyecto={etiquetaDeProyecto}
+        onAbrir={abrirPendiente}
+      />
       <ActividadSheet
         credenciales={credenciales}
         abierto={ventana === "actividad"}
@@ -1254,7 +1511,10 @@ export function Tablero({
         usuario={usuario}
         perfiles={perfiles}
         catalogo={catalogo}
+        etiquetas={etiquetas}
         onCrearProyecto={crearProyecto}
+        onCrearEtiqueta={crearEtiqueta}
+        onBorrarEtiqueta={borrarEtiqueta}
         onCambiar={cambiarPendiente}
         onCantidadComentarios={cambiarCantidadComentarios}
         onCantidadArchivos={cambiarCantidadArchivos}

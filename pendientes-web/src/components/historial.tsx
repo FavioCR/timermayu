@@ -5,10 +5,12 @@ import {
   FileText,
   Folder,
   Forward,
+  GitCommitHorizontal,
   MessageSquare,
   Paperclip,
   Pencil,
   Plus,
+  Tag,
   Trash2,
   UserRound,
 } from "lucide-react"
@@ -28,6 +30,8 @@ const ICONOS: Record<TipoActividad, typeof Plus> = {
   borrado: Trash2,
   traspaso: Forward,
   archivo: Paperclip,
+  etiquetas: Tag,
+  tipo: GitCommitHorizontal,
 }
 
 function agruparPorDia(items: Actividad[]) {

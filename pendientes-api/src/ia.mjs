@@ -1,0 +1,236 @@
+// Crear pendientes a partir de un texto con la IA que configure el equipo: Gemini, OpenAI u OpenRouter.
+// Cada proveedor se llama con su API nativa pidiendo JSON con esquema (structured outputs):
+// - Gemini: Interactions API, POST /v1beta/interactions con response_format (GA desde junio de 2026).
+// - OpenAI: Responses API, POST /v1/responses con text.format json_schema en modo estricto.
+// - OpenRouter: POST /api/v1/chat/completions con response_format json_schema (igual que OpenAI Chat Completions).
+
+export const PROVEEDORES_IA = {
+  gemini: { nombre: 'Gemini', modelo: 'gemini-3.5-flash-lite', url: 'https://generativelanguage.googleapis.com' },
+  openai: { nombre: 'OpenAI', modelo: 'gpt-6-luna', url: 'https://api.openai.com' },
+  openrouter: { nombre: 'OpenRouter', modelo: 'openai/gpt-6-luna', url: 'https://openrouter.ai' },
+};
+
+export const MAX_SUGERENCIAS = 30;
+const ESPERA_MS = 60_000;
+const ESTADOS = ['pendiente', 'haciendo', 'hecho'];
+const TIPOS = ['feat', 'fix', 'refactor', 'perf', 'docs', 'test', 'style', 'chore', 'ci'];
+const MAX_TITULO = 500;
+const MAX_DETALLE = 4000;
+const MAX_DETALLE_ERROR = 300;
+
+// Lo que tiene que devolver la IA. Cumple las reglas del modo estricto de OpenAI (todo requerido, sin propiedades
+// extra, null para "no se sabe") y el JSON Schema que aceptan Gemini y OpenRouter.
+export const ESQUEMA_PENDIENTES = {
+  type: 'object',
+  properties: {
+    pendientes: {
+      type: 'array',
+      description: 'Las tareas concretas que salen del texto, en el orden en que aparecen.',
+      items: {
+        type: 'object',
+        properties: {
+          titulo: { type: 'string', description: 'Qué hay que hacer: corto, accionable, empieza con un verbo.' },
+          detalle: { type: ['string', 'null'], description: 'Contexto útil del texto (fechas, enlaces, criterios) o null.' },
+          responsable: { type: ['string', 'null'], description: 'Nombre exacto de una persona de la lista, o null.' },
+          proyecto: { type: ['string', 'null'], description: 'Nombre exacto de un proyecto de la lista, o null.' },
+          etiquetas: { type: 'array', items: { type: 'string' }, description: 'Nombres exactos de etiquetas de la lista que apliquen.' },
+          // anyOf y no enum con null: Gemini solo acepta enum de textos.
+          tipo: { anyOf: [{ type: 'string', enum: TIPOS }, { type: 'null' }], description: 'Tipo de trabajo como en los commits convencionales, o null.' },
+          estado: { type: 'string', enum: ESTADOS },
+        },
+        required: ['titulo', 'detalle', 'responsable', 'proyecto', 'etiquetas', 'tipo', 'estado'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['pendientes'],
+  additionalProperties: false,
+};
+
+function iaError(status, codigo, detalle) {
+  return Object.assign(new Error(codigo), { statusCode: status, ...(detalle && { detalle }) });
+}
+
+// Los mensajes de error de los proveedores a veces repiten parte de la clave: nunca salen tal cual.
+function limpiar(mensaje, clave) {
+  let texto = typeof mensaje === 'string' ? mensaje : JSON.stringify(mensaje ?? '');
+  if (clave) texto = texto.split(clave).join('…');
+  return texto.replace(/\b(sk-|AIza)[\w*.-]{4,}/g, '…').slice(0, MAX_DETALLE_ERROR);
+}
+
+export function instruccionesIA({ personas, proyectos, etiquetas, proyectoPorDefecto, extra, hoy }) {
+  return [
+    'Eres el asistente del tablero de pendientes de un equipo. Del texto que te pasan, saca las tareas concretas que alguien tiene que hacer y devuélvelas como pendientes.',
+    '- Un pendiente por tarea. No repitas tareas ni inventes las que el texto no pide. Si no hay ninguna, devuelve la lista vacía.',
+    '- titulo: corto y accionable, empieza con un verbo, en el idioma del texto (máximo 120 caracteres).',
+    '- detalle: lo que haga falta para entenderla (fechas, enlaces, criterios de aceptación), o null si el título basta.',
+    '- responsable: solo si el texto lo dice o es evidente; escribe exactamente uno de los nombres de "Personas", o null.',
+    `- proyecto: escribe exactamente uno de los nombres de "Proyectos" si la tarea encaja ahí; si no, ${proyectoPorDefecto ? `"${proyectoPorDefecto}"` : 'null'}.`,
+    '- etiquetas: solo nombres exactos de "Etiquetas" que el texto mencione o que claramente apliquen (un sprint, por ejemplo); si ninguna, lista vacía.',
+    '- tipo: como en los commits convencionales: feat (algo nuevo), fix (corregir un error), refactor, perf, docs, test, style, chore (mantenimiento) o ci (despliegue); null si no es trabajo de software o no está claro.',
+    '- estado: "pendiente", salvo que el texto diga que ya se está haciendo ("haciendo") o que ya está terminado ("hecho").',
+    `Hoy es ${hoy}.`,
+    `Personas: ${personas.length ? personas.join(', ') : '(ninguna)'}`,
+    `Proyectos: ${proyectos.length ? proyectos.join(' | ') : '(ninguno)'}`,
+    `Etiquetas: ${etiquetas.length ? etiquetas.join(' | ') : '(ninguna)'}`,
+    ...(extra ? ['Indicaciones del equipo (síguelas si no contradicen lo anterior):', extra] : []),
+  ].join('\n');
+}
+
+const PEDIDOS = {
+  gemini: ({ modelo, clave, sistema, texto }) => ({
+    ruta: '/v1beta/interactions',
+    headers: { 'x-goog-api-key': clave },
+    body: {
+      model: modelo,
+      system_instruction: sistema,
+      input: texto,
+      response_format: { type: 'text', mime_type: 'application/json', schema: ESQUEMA_PENDIENTES },
+      store: false,
+    },
+    // La respuesta trae pasos; el texto del modelo está en los de tipo model_output.
+    leer: (data) => {
+      if (data.status === 'failed') throw iaError(502, 'ia_fallo', limpiar(data.errors ?? data.error, clave));
+      return data.output_text ?? (data.steps ?? [])
+        .filter((paso) => paso.type === 'model_output')
+        .flatMap((paso) => paso.content ?? [])
+        .filter((parte) => parte.type === 'text')
+        .map((parte) => parte.text)
+        .join('');
+    },
+  }),
+  openai: ({ modelo, clave, sistema, texto }) => ({
+    ruta: '/v1/responses',
+    headers: { Authorization: `Bearer ${clave}` },
+    body: {
+      model: modelo,
+      instructions: sistema,
+      input: texto,
+      text: { format: { type: 'json_schema', name: 'pendientes', schema: ESQUEMA_PENDIENTES, strict: true } },
+      store: false,
+    },
+    // El JSON llega en output[] → message → content[] de tipo output_text; si el modelo se niega, viene un refusal.
+    leer: (data) => {
+      const partes = (data.output ?? []).filter((item) => item.type === 'message').flatMap((item) => item.content ?? []);
+      const negativa = partes.find((parte) => parte.type === 'refusal');
+      if (negativa) throw iaError(422, 'ia_se_nego', limpiar(negativa.refusal));
+      if (data.status === 'incomplete') throw iaError(502, 'ia_incompleta', data.incomplete_details?.reason);
+      return partes.filter((parte) => parte.type === 'output_text').map((parte) => parte.text).join('');
+    },
+  }),
+  openrouter: ({ modelo, clave, sistema, texto }) => ({
+    ruta: '/api/v1/chat/completions',
+    // Opcionales: identifican la app en OpenRouter.
+    headers: { Authorization: `Bearer ${clave}`, 'HTTP-Referer': 'https://timer.practi.dev/pendientes/', 'X-OpenRouter-Title': 'Pendientes' },
+    body: {
+      model: modelo,
+      messages: [
+        { role: 'system', content: sistema },
+        { role: 'user', content: texto },
+      ],
+      response_format: { type: 'json_schema', json_schema: { name: 'pendientes', strict: true, schema: ESQUEMA_PENDIENTES } },
+    },
+    leer: (data) => {
+      // OpenRouter puede responder 200 con el error del proveedor de fondo.
+      if (data.error) throw iaError(502, 'ia_fallo', limpiar(data.error.message ?? data.error, clave));
+      const mensaje = data.choices?.[0]?.message;
+      if (mensaje?.refusal) throw iaError(422, 'ia_se_nego', limpiar(mensaje.refusal));
+      const contenido = mensaje?.content;
+      return Array.isArray(contenido) ? contenido.map((parte) => parte.text ?? '').join('') : contenido;
+    },
+  }),
+};
+
+function errorDelProveedor(status, data, clave) {
+  const mensaje = limpiar(data?.error?.message ?? data?.error ?? '', clave);
+  const crudo = JSON.stringify(data?.error ?? '');
+  if (status === 401 || status === 403 || /API_KEY_INVALID|invalid_api_key/.test(crudo)) return iaError(422, 'ia_clave_invalida');
+  if (status === 402) return iaError(422, 'ia_sin_saldo', mensaje);
+  if (status === 429) return iaError(429, 'ia_limite', mensaje);
+  if (status === 404 || /model/i.test(mensaje) && /not found|does not exist|not a valid|invalid model|unknown/i.test(mensaje)) {
+    return iaError(422, 'ia_modelo_invalido', mensaje);
+  }
+  return iaError(502, 'ia_fallo', mensaje || `HTTP ${status}`);
+}
+
+async function pedir(url, opciones, clave) {
+  let respuesta;
+  try {
+    respuesta = await fetch(url, { ...opciones, signal: AbortSignal.timeout(ESPERA_MS) });
+  } catch (error) {
+    if (error.name === 'TimeoutError') throw iaError(504, 'ia_tardo');
+    throw iaError(502, 'ia_sin_conexion');
+  }
+  const data = await respuesta.json().catch(() => null);
+  if (!respuesta.ok) throw errorDelProveedor(respuesta.status, data, clave);
+  if (!data || typeof data !== 'object') throw iaError(502, 'ia_respuesta_invalida');
+  return data;
+}
+
+// Lo que devolvió la IA, ya revisado: títulos no vacíos, textos recortados y estados válidos.
+export function leerPendientes(texto) {
+  if (typeof texto !== 'string' || !texto.trim()) throw iaError(502, 'ia_respuesta_invalida');
+  let datos;
+  try {
+    datos = JSON.parse(texto);
+  } catch {
+    // Algún modelo de OpenRouter ignora el esquema y lo envuelve en ```json … ```.
+    try {
+      datos = JSON.parse(texto.slice(texto.indexOf('{'), texto.lastIndexOf('}') + 1));
+    } catch {
+      throw iaError(502, 'ia_respuesta_invalida');
+    }
+  }
+  const lista = Array.isArray(datos) ? datos : datos?.pendientes;
+  if (!Array.isArray(lista)) throw iaError(502, 'ia_respuesta_invalida');
+  const textoO = (valor, maximo) => (typeof valor === 'string' && valor.trim() ? valor.trim().slice(0, maximo) : null);
+  return lista.slice(0, MAX_SUGERENCIAS).flatMap((item) => {
+    const titulo = textoO(item?.titulo, MAX_TITULO);
+    if (!titulo) return [];
+    return [{
+      titulo,
+      detalle: textoO(item.detalle, MAX_DETALLE),
+      responsable: textoO(item.responsable, 200),
+      proyecto: textoO(item.proyecto, 200),
+      etiquetas: (Array.isArray(item.etiquetas) ? item.etiquetas : []).map((nombre) => textoO(nombre, 200)).filter(Boolean),
+      tipo: TIPOS.includes(item.tipo) ? item.tipo : null,
+      estado: ESTADOS.includes(item.estado) ? item.estado : 'pendiente',
+    }];
+  });
+}
+
+export async function pedirPendientes({ proveedor, modelo, clave, base, sistema, texto }) {
+  const pedido = PEDIDOS[proveedor]({ modelo, clave, sistema, texto });
+  const data = await pedir(`${base}${pedido.ruta}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...pedido.headers },
+    body: JSON.stringify(pedido.body),
+  }, clave);
+  return leerPendientes(pedido.leer(data));
+}
+
+// Los modelos de texto de cada proveedor, para elegir en la configuración. OpenRouter no pide clave para listarlos
+// y se quedan solo los que aceptan JSON con esquema.
+const SIN_TEXTO = /(embedding|tts|image|banana|live|audio|realtime|transcribe|robotics|omni|veo|lyria|moderation|search|aqa|whisper|dall-e|sora)/i;
+
+export async function listarModelos({ proveedor, clave, base }) {
+  if (proveedor === 'gemini') {
+    const data = await pedir(`${base}/v1beta/models?pageSize=1000`, { headers: { 'x-goog-api-key': clave } }, clave);
+    return (data.models ?? [])
+      .map((modelo) => ({ id: String(modelo.name ?? '').replace(/^models\//, ''), nombre: modelo.displayName ?? null }))
+      .filter((modelo) => modelo.id.startsWith('gemini') && !SIN_TEXTO.test(modelo.id))
+      .map((modelo) => ({ id: modelo.id, nombre: modelo.nombre ?? modelo.id }));
+  }
+  if (proveedor === 'openai') {
+    const data = await pedir(`${base}/v1/models`, { headers: { Authorization: `Bearer ${clave}` } }, clave);
+    return (data.data ?? [])
+      .map((modelo) => String(modelo.id ?? ''))
+      .filter((id) => /^(gpt|o\d|chatgpt)/.test(id) && !SIN_TEXTO.test(id))
+      .sort((a, b) => b.localeCompare(a))
+      .map((id) => ({ id, nombre: id }));
+  }
+  const data = await pedir(`${base}/api/v1/models`, { headers: clave ? { Authorization: `Bearer ${clave}` } : {} }, clave);
+  return (data.data ?? [])
+    .filter((modelo) => (modelo.supported_parameters ?? []).some((parametro) => parametro === 'structured_outputs' || parametro === 'response_format'))
+    .map((modelo) => ({ id: String(modelo.id), nombre: modelo.name ?? String(modelo.id) }));
+}
