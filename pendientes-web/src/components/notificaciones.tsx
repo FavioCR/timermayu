@@ -5,7 +5,7 @@ import { cn } from "cn"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { api, esNoAutorizado, type Notificacion, type Perfil } from "@/lib/api"
+import { api, esNoAutorizado, type Notificacion, type Perfil, type SinLeer } from "@/lib/api"
 import { describir, detalleDe, haceCuanto } from "@/lib/actividad"
 import { useCambios } from "@/lib/cambios"
 import { activarSonido, esParaSonar, prepararSonido, sonarAviso, sonidoActivado } from "@/lib/sonido"
@@ -22,35 +22,42 @@ const permisoActual = (): Permiso => ("Notification" in window ? Notification.pe
 // La campana de quien entró con su perfil. Avisa por tres cosas: te asignan algo, te mencionan con @ (en un mensaje o en
 // una descripción; responder a tu mensaje cuenta como mencionarte) o alguien más cambia un pendiente que creaste.
 // Con la pestaña en segundo plano y permiso del navegador, también avisa con una notificación del sistema.
+// Además dice qué pendientes tienen avisos sin leer (para la campana de su tarjeta) y, al abrir uno, los lee.
 export function Notificaciones({
   credenciales,
   yo,
   perfilesPorId,
   abribles,
+  pendienteAbierto,
   onAbrir,
   onNovedades,
+  onSinLeer,
   onSalir,
 }: {
   credenciales: string
   yo: string
   perfilesPorId: Map<string, Perfil>
   abribles: Set<string>
+  pendienteAbierto: string | null
   onAbrir: (pendienteId: string) => void
   onNovedades: () => void
+  onSinLeer: (sinLeer: SinLeer[]) => void
   onSalir: () => void
 }) {
   const [abierto, setAbierto] = useState(false)
   const [lista, setLista] = useState<Notificacion[]>([])
   const [noLeidas, setNoLeidas] = useState(0)
+  const [sinLeer, setSinLeer] = useState<SinLeer[]>([])
   const [permiso, setPermiso] = useState(permisoActual)
   const [conSonido, setConSonido] = useState(sonidoActivado)
   // Ids ya vistos, para saber cuáles son nuevos. Null hasta la primera carga.
   const vistas = useRef<Set<string> | null>(null)
   // Lo que cambia en cada render se lee por ref para no reiniciar el intervalo.
-  const actuales = useRef({ abribles, onAbrir, onNovedades })
+  const actuales = useRef({ abribles, onAbrir, onNovedades, onSinLeer })
   useEffect(() => {
-    actuales.current = { abribles, onAbrir, onNovedades }
+    actuales.current = { abribles, onAbrir, onNovedades, onSinLeer }
   })
+  useEffect(() => actuales.current.onSinLeer(sinLeer), [sinLeer])
 
   const abrir = useCallback(
     (notificacion: Notificacion) => {
@@ -71,6 +78,7 @@ export function Notificaciones({
       const datos = await api.notificaciones.listar(credenciales)
       setLista(datos.notificaciones)
       setNoLeidas(datos.no_leidas)
+      setSinLeer(datos.sin_leer)
       const nuevas = vistas.current ? datos.notificaciones.filter((n) => !n.leida && !vistas.current!.has(n.id)) : []
       vistas.current = new Set(datos.notificaciones.map((n) => n.id))
       if (nuevas.length === 0) return
@@ -117,6 +125,27 @@ export function Notificaciones({
     }
   }, [cargar])
 
+  // Abrir un pendiente lee sus avisos, también los que lleguen mientras está abierto.
+  const leyendo = useRef<string | null>(null)
+  useEffect(() => {
+    const id = pendienteAbierto
+    if (!id || leyendo.current === id || !sinLeer.some((pendiente) => pendiente.pendiente_id === id)) return
+    leyendo.current = id
+    api.notificaciones
+      .leerPendiente(credenciales, id)
+      .then((quedan) => {
+        setNoLeidas(quedan)
+        setLista((actual) => actual.map((n) => (n.actividad.pendiente_id === id ? { ...n, leida: true } : n)))
+        setSinLeer((actual) => actual.filter((pendiente) => pendiente.pendiente_id !== id))
+      })
+      .catch((err) => {
+        if (esNoAutorizado(err)) onSalir()
+      })
+      .finally(() => {
+        leyendo.current = null
+      })
+  }, [credenciales, pendienteAbierto, sinLeer, onSalir])
+
   useEffect(() => {
     document.title = noLeidas ? `(${noLeidas}) ${TITULO}` : TITULO
     return () => {
@@ -127,6 +156,7 @@ export function Notificaciones({
   async function marcarTodas() {
     setLista((actual) => actual.map((n) => ({ ...n, leida: true })))
     setNoLeidas(0)
+    setSinLeer([])
     try {
       setNoLeidas(await api.notificaciones.marcarLeidas(credenciales))
     } catch (err) {

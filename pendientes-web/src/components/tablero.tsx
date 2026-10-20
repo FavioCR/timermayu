@@ -12,7 +12,10 @@ import {
   type MouseEvent,
   type SyntheticEvent,
 } from "react"
+import type { DragStartEvent } from "@dnd-kit/core"
 import {
+  Bell,
+  BellRing,
   Building2,
   Check,
   ChevronDown,
@@ -40,6 +43,7 @@ import {
   Plus,
   RotateCw,
   Search,
+  SearchX,
   Sparkles,
   Tag,
   Timer,
@@ -98,7 +102,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "@/components/ui/input-group"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -116,9 +120,11 @@ import {
   type Organizacion,
   type Pendiente,
   type Perfil,
+  type SinLeer,
   type Usuario,
 } from "@/lib/api"
 import { enlaceWhatsApp } from "@/lib/actividad"
+import { coincide } from "@/lib/buscar"
 import { agrupar, conOrganizacion, conProyecto, involucrados, organizacionDe, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
 import { conectarCambios, revisarConexion, useCambios } from "@/lib/cambios"
 import { COLUMNAS, NADIE } from "@/lib/estados"
@@ -220,6 +226,12 @@ const noArrastrar = { onMouseDown: detener, onTouchStart: detener, onKeyDown: de
 // Un clic en la tarjeta abre su detalle, salvo que caiga en uno de sus botones o en un menú abierto desde ella.
 const esClicEnLaTarjeta = (event: MouseEvent<HTMLElement>) =>
   event.currentTarget.contains(event.target as Node) && !(event.target as HTMLElement).closest("button, a, input")
+
+// Lo que dice la campana de una tarjeta.
+function descripcionAviso({ avisos, menciones }: SinLeer) {
+  const total = avisos === 1 ? "1 aviso sin leer" : `${avisos} avisos sin leer`
+  return menciones > 0 ? `Te mencionaron · ${total}` : total
+}
 
 function Contador({ valor }: { valor: number }) {
   return <span className="rounded-md bg-muted px-1.5 py-0.5 text-xs leading-none tabular-nums text-muted-foreground">{valor}</span>
@@ -391,6 +403,13 @@ export function Tablero({
   // Al configurar la IA desde "Crear con IA", al guardar se vuelve ahí.
   const volverACrear = useRef(false)
   const [hechosAbiertos, setHechosAbiertos] = useState(false)
+  const [busquedaHechos, setBusquedaHechos] = useState("")
+  // Lo escrito en el buscador de cada columna.
+  const [busquedas, setBusquedas] = useState<Partial<Record<string, string>>>({})
+  // La tarjeta que se arrastra: el buscador no la esconde aunque pase a una columna donde no coincide.
+  const [arrastrada, setArrastrada] = useState<string | null>(null)
+  // Los pendientes con avisos sin leer de quien entró, para la campana de su tarjeta.
+  const [sinLeer, setSinLeer] = useState<Map<string, SinLeer>>(() => new Map())
   // El pendiente hecho que se está pasando a otra persona.
   const [pasando, setPasando] = useState<Pendiente | null>(null)
   const [confirmarLimpieza, setConfirmarLimpieza] = useState(false)
@@ -576,6 +595,28 @@ export function Tablero({
   )
 
   const visibles = useMemo(() => enAlcance.filter(conPersona), [enAlcance, conPersona])
+
+  // El buscador de cada columna mira el título, la descripción, el proyecto, la persona, el tipo y las etiquetas.
+  const textoDe = useCallback(
+    (tarjeta: Tarjeta) => {
+      const proyecto = tarjeta.proyecto_id ? proyectosPorId.get(tarjeta.proyecto_id) : undefined
+      const organizacion = proyecto?.organizacion_id ? organizacionesPorId.get(proyecto.organizacion_id) : undefined
+      const perfil = tarjeta.perfil_id ? perfilesPorId.get(tarjeta.perfil_id) : undefined
+      const etiquetasDe = tarjeta.etiquetas.map((id) => etiquetasPorId.get(id)?.nombre)
+      return [tarjeta.texto, tarjeta.resumen, organizacion?.nombre, proyecto?.nombre, perfil?.nombre ?? "Sin asignar", tarjeta.tipo, ...etiquetasDe]
+        .filter(Boolean)
+        .join(" ")
+    },
+    [proyectosPorId, organizacionesPorId, perfilesPorId, etiquetasPorId]
+  )
+  const enColumnas = useMemo(
+    () => visibles.filter((tarjeta) => tarjeta.id === arrastrada || coincide(textoDe(tarjeta), busquedas[tarjeta.column] ?? "")),
+    [visibles, arrastrada, busquedas, textoDe]
+  )
+  const antiguosEnBusqueda = useMemo(
+    () => antiguosVisibles.filter((tarjeta) => coincide(textoDe(tarjeta), busquedas.hecho ?? "")),
+    [antiguosVisibles, busquedas, textoDe]
+  )
 
   const porOrganizacion = useMemo(() => contar(recientes, claveOrganizacion), [recientes, claveOrganizacion])
   const porProyecto = useMemo(() => contar(recientes, (tarjeta) => tarjeta.proyecto_id), [recientes])
@@ -946,7 +987,14 @@ export function Tablero({
     setTarjetas(todas)
   }
 
-  function alEmpezarArrastre() {
+  // Empieza con lo que tenga el buscador de Hecho.
+  function abrirHechosAnteriores() {
+    setBusquedaHechos(busquedas.hecho ?? "")
+    setHechosAbiertos(true)
+  }
+
+  function alEmpezarArrastre(event: DragStartEvent) {
+    setArrastrada(String(event.active.id))
     arrastrando.current = true
     ordenAlEmpezar.current = firmaDelOrden(ultimas.current)
   }
@@ -955,6 +1003,7 @@ export function Tablero({
     // Kibo avisa onDragEnd antes de su último onDataChange: se espera un tick para leer el orden final.
     setTimeout(async () => {
       arrastrando.current = false
+      setArrastrada(null)
       const finales = ultimas.current
       const pendienteDeRecarga = recargarAlSoltar.current
       recargarAlSoltar.current = false
@@ -1016,8 +1065,10 @@ export function Tablero({
                 yo={usuario.perfil_id}
                 perfilesPorId={perfilesPorId}
                 abribles={abribles}
+                pendienteAbierto={abierto}
                 onAbrir={abrirPendiente}
                 onNovedades={recargarPronto}
+                onSinLeer={(lista) => setSinLeer(new Map(lista.map((pendiente) => [pendiente.pendiente_id, pendiente])))}
                 onSalir={onSalir}
               />
             )}
@@ -1300,13 +1351,17 @@ export function Tablero({
             <KanbanProvider
               className="min-w-[56rem] gap-5 md:min-w-0"
               columns={COLUMNAS}
-              data={visibles}
+              data={enColumnas}
               onDataChange={cambiarTablero}
               onDragStart={alEmpezarArrastre}
               onDragEnd={alSoltar}
             >
               {(columna) => {
                 const cantidad = visibles.filter((tarjeta) => tarjeta.column === columna.id).length
+                const busqueda = busquedas[columna.id] ?? ""
+                const buscando = busqueda.trim() !== ""
+                const enPantalla = buscando ? enColumnas.filter((tarjeta) => tarjeta.column === columna.id).length : cantidad
+                const buscar = (texto: string) => setBusquedas((actuales) => ({ ...actuales, [columna.id]: texto }))
                 const Icono = ICONOS[columna.id]
                 return (
                   <KanbanBoard
@@ -1321,7 +1376,7 @@ export function Tablero({
                       <Icono className="size-4.5 shrink-0 text-foreground/80" />
                       <h2 className="text-sm font-semibold">{columna.name}</h2>
                       <span className="ml-auto rounded-md bg-background/60 px-2 py-0.5 text-xs tabular-nums text-muted-foreground">
-                        {cantidad}
+                        {buscando ? `${enPantalla} de ${cantidad}` : cantidad}
                       </span>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
@@ -1352,7 +1407,7 @@ export function Tablero({
                             <>
                               <DropdownMenuItem
                                 onSelect={() => {
-                                  alCerrarMenu.current = () => setHechosAbiertos(true)
+                                  alCerrarMenu.current = abrirHechosAnteriores
                                 }}
                               >
                                 <Search /> Buscar hechos anteriores
@@ -1372,7 +1427,28 @@ export function Tablero({
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </KanbanHeader>
-                    <KanbanCards id={columna.id} className={cantidad === 0 ? "p-0" : "gap-2.5 p-3"}>
+                    <div className="px-3 pt-3">
+                      <InputGroup className="h-8 bg-background/50">
+                        <InputGroupAddon className="pl-2.5">
+                          <Search />
+                        </InputGroupAddon>
+                        <InputGroupInput
+                          aria-label={`Buscar en ${columna.name}`}
+                          placeholder={`Buscar en ${columna.name}`}
+                          value={busqueda}
+                          onChange={(event) => buscar(event.target.value)}
+                          onKeyDown={(event) => event.key === "Escape" && buscar("")}
+                        />
+                        {busqueda && (
+                          <InputGroupAddon align="inline-end">
+                            <InputGroupButton size="icon-xs" aria-label={`Limpiar la búsqueda de ${columna.name}`} onClick={() => buscar("")}>
+                              <X />
+                            </InputGroupButton>
+                          </InputGroupAddon>
+                        )}
+                      </InputGroup>
+                    </div>
+                    <KanbanCards id={columna.id} className={enPantalla === 0 ? "p-0" : "gap-2.5 p-3"}>
                       {(tarjeta: Tarjeta) => {
                         const perfil = tarjeta.perfil_id ? perfilesPorId.get(tarjeta.perfil_id) : null
                         const proyecto = tarjeta.proyecto_id ? proyectosPorId.get(tarjeta.proyecto_id) : null
@@ -1380,6 +1456,7 @@ export function Tablero({
                         const susEtiquetas = tarjeta.etiquetas.flatMap((id) => etiquetasPorId.get(id) ?? []).sort(porNombre)
                         // El borde toma el color de su tipo; sin tipo, el de su primera etiqueta.
                         const colorBorde = tipoDe(tarjeta.tipo)?.color ?? susEtiquetas[0]?.color
+                        const aviso = sinLeer.get(tarjeta.id)
                         return (
                           <KanbanCard
                             column={columna.id}
@@ -1412,6 +1489,21 @@ export function Tablero({
                                   )}
                                   {tarjeta.texto}
                                 </button>
+                                {/* Avisos sin leer de quien entró; una mención resalta. Se leen al abrir la tarjeta. */}
+                                {aviso && (
+                                  <span
+                                    role="img"
+                                    aria-label={descripcionAviso(aviso)}
+                                    title={descripcionAviso(aviso)}
+                                    className={cn(
+                                      "mt-px flex h-5 shrink-0 items-center gap-0.5 rounded-full px-1.5 text-[11px] leading-none font-semibold tabular-nums",
+                                      aviso.menciones > 0 ? "bg-primary text-primary-foreground shadow-sm shadow-primary/40" : "bg-primary/15 text-primary"
+                                    )}
+                                  >
+                                    {aviso.menciones > 0 ? <BellRing className="size-3" /> : <Bell className="size-3" />}
+                                    {aviso.menciones > 0 ? "@" : aviso.avisos > 1 && aviso.avisos}
+                                  </span>
+                                )}
                                 {tarjeta.column === "hecho" && (
                                   <Button
                                     variant="ghost"
@@ -1533,6 +1625,22 @@ export function Tablero({
                         )
                       }}
                     </KanbanCards>
+                    {cantidad > 0 && enPantalla === 0 && (
+                      <Empty className="m-3 mt-3 w-auto gap-3 rounded-none border border-dashed border-[color-mix(in_oklab,var(--tono)_22%,var(--color-border))] p-6">
+                        <EmptyHeader>
+                          <EmptyMedia variant="icon">
+                            <SearchX />
+                          </EmptyMedia>
+                          <EmptyTitle className="text-base font-semibold break-all">Nada con «{busqueda.trim()}»</EmptyTitle>
+                          <EmptyDescription className="max-w-64 text-sm">Busca por título, descripción, proyecto, persona, tipo o etiqueta.</EmptyDescription>
+                        </EmptyHeader>
+                        <EmptyContent>
+                          <Button variant="outline" size="sm" onClick={() => buscar("")}>
+                            <X /> Limpiar búsqueda
+                          </Button>
+                        </EmptyContent>
+                      </Empty>
+                    )}
                     {cantidad === 0 && (
                       <Empty className="m-3 w-auto gap-3 rounded-none border border-[color-mix(in_oklab,var(--tono)_22%,var(--color-border))] p-6">
                         <EmptyHeader>
@@ -1544,14 +1652,15 @@ export function Tablero({
                         </EmptyHeader>
                       </Empty>
                     )}
-                    {columna.id === "hecho" && antiguosVisibles.length > 0 && (
+                    {columna.id === "hecho" && antiguosEnBusqueda.length > 0 && (
                       <button
                         type="button"
-                        onClick={() => setHechosAbiertos(true)}
+                        onClick={abrirHechosAnteriores}
                         className="m-3 mt-auto flex items-center justify-center gap-2 border border-dashed border-[color-mix(in_oklab,var(--tono)_30%,var(--color-border))] px-3 py-2.5 text-sm text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
                       >
                         <Search className="size-4" />
-                        {antiguosVisibles.length === 1 ? "1 hecho anterior" : `${antiguosVisibles.length} hechos anteriores`} · Buscar
+                        {antiguosEnBusqueda.length === 1 ? "1 hecho anterior" : `${antiguosEnBusqueda.length} hechos anteriores`}
+                        {buscando && ` con «${busqueda.trim()}»`} · Buscar
                       </button>
                     )}
                   </KanbanBoard>
@@ -1647,6 +1756,8 @@ export function Tablero({
       <HechosAnteriores
         abierto={hechosAbiertos}
         onAbiertoChange={setHechosAbiertos}
+        busqueda={busquedaHechos}
+        onBusquedaChange={setBusquedaHechos}
         pendientes={antiguosVisibles}
         filtrando={filtrando}
         perfilesPorId={perfilesPorId}

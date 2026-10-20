@@ -160,9 +160,11 @@ test('valida pendientes, perfiles, organizaciones, proyectos y orden', () => {
   assert.throws(() => nombreDeArchivo('%E0%A4%A'), /nombre_archivo_invalido/);
   assert.equal(tipoDeArchivo(Buffer.from('%PDF-1.7')), 'application/pdf');
   assert.equal(tipoDeArchivo(Buffer.from('<html>')), 'application/octet-stream');
-  assert.equal(parseLeidas({}), null);
-  assert.deepEqual(parseLeidas({ ids: ['a'] }), ['a']);
+  assert.deepEqual(parseLeidas({}), { ids: null });
+  assert.deepEqual(parseLeidas({ ids: ['a'] }), { ids: ['a'] });
   assert.throws(() => parseLeidas({ ids: 'a' }), /ids_invalidos/);
+  assert.deepEqual(parseLeidas({ pendiente_id: 'p' }), { pendienteId: 'p' });
+  assert.throws(() => parseLeidas({ pendiente_id: 3 }), /pendiente_invalido/);
 });
 
 test('sin credenciales correctas responde 401 sin pedir la ventana del navegador', async (t) => {
@@ -591,7 +593,7 @@ test('el historial anota quién cambió qué; avisa a quien recibe el pendiente 
   assert.equal((await favio.data('POST', '/notificaciones/leidas', { ids: [ids[0]] })).no_leidas, (await avisos(favio)).no_leidas);
   assert.equal((await avisos(favio)).notificaciones.find((n) => n.id === ids[0]).leida, true);
   assert.equal((await favio.data('POST', '/notificaciones/leidas', {})).no_leidas, 0);
-  assert.deepEqual(await data('GET', '/notificaciones'), { notificaciones: [], no_leidas: 0 });
+  assert.deepEqual(await data('GET', '/notificaciones'), { notificaciones: [], no_leidas: 0, sin_leer: [] });
 
   // Al borrarlo queda en el historial con su título. Lo borró quien lo creó: nadie recibe aviso.
   await diego.data('DELETE', `/${pendiente.id}`);
@@ -602,6 +604,36 @@ test('el historial anota quién cambió qué; avisa a quien recibe el pendiente 
   const { pendiente: otro } = await diego.data('POST', '', { texto: 'Otro de Diego' });
   await junior.data('DELETE', `/${otro.id}`);
   assert.equal((await avisos(diego)).notificaciones[0].actividad.tipo, 'borrado');
+});
+
+test('cada tarjeta sabe sus avisos sin leer (las menciones aparte) y al abrirla se leen', async (t) => {
+  const { entrarComo, data } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const junior = await entrarComo('Junior');
+  const { pendiente: asignado } = await diego.data('POST', '', { texto: 'Solo asignado', perfil_id: favio.perfil.id });
+  const { pendiente: charlado } = await diego.data('POST', '', { texto: 'Con mención' });
+  const sinLeer = async (quien) => (await quien.data('GET', '/notificaciones')).sin_leer;
+
+  // Asignarle algo es un aviso; mencionarlo en el chat o responderle un mensaje, una mención.
+  await junior.data('POST', `/${charlado.id}/comentarios`, { texto: '@Favio mira esto' });
+  const { comentario } = await favio.data('POST', `/${charlado.id}/comentarios`, { texto: 'Ya lo veo' });
+  await diego.data('POST', `/${charlado.id}/comentarios`, { texto: 'Gracias', respuesta_a: comentario.id });
+  assert.deepEqual(await sinLeer(favio), [
+    { pendiente_id: charlado.id, avisos: 2, menciones: 2 },
+    { pendiente_id: asignado.id, avisos: 1, menciones: 0 },
+  ]);
+  // A Diego, que lo creó, los mensajes que no lo mencionan no le avisan.
+  assert.deepEqual(await sinLeer(diego), []);
+
+  // Abrir la tarjeta lee sus avisos; los de las demás siguen.
+  assert.equal((await favio.data('POST', '/notificaciones/leidas', { pendiente_id: charlado.id })).no_leidas, 1);
+  assert.deepEqual(await sinLeer(favio), [{ pendiente_id: asignado.id, avisos: 1, menciones: 0 }]);
+  // Solo los propios: que Junior "abra" la de Favio no le lee nada a Favio.
+  await junior.data('POST', '/notificaciones/leidas', { pendiente_id: asignado.id });
+  assert.equal((await sinLeer(favio)).length, 1);
+  assert.equal((await favio.data('POST', '/notificaciones/leidas', { pendiente_id: 42 })).error, 'pendiente_invalido');
+  assert.deepEqual(await data('GET', '/notificaciones'), { notificaciones: [], no_leidas: 0, sin_leer: [] });
 });
 
 test('chat por pendiente: avisa solo a los @mencionados; cada quien borra solo lo suyo', async (t) => {

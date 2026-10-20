@@ -533,10 +533,15 @@ export function parseTraspaso(input) {
 }
 
 // Sin ids marca todos los avisos como leídos.
+// Unos avisos por id, todos, o los de un pendiente (al abrirlo).
 export function parseLeidas(input) {
-  if (input.ids === undefined) return null;
+  if (input.pendiente_id !== undefined) {
+    if (typeof input.pendiente_id !== 'string' || input.pendiente_id === '') throw httpError(422, 'pendiente_invalido');
+    return { pendienteId: input.pendiente_id };
+  }
+  if (input.ids === undefined) return { ids: null };
   if (!Array.isArray(input.ids) || input.ids.length > 500 || input.ids.some((id) => typeof id !== 'string')) throw httpError(422, 'ids_invalidos');
-  return input.ids;
+  return { ids: input.ids };
 }
 
 export function parseContrasena(input) {
@@ -1293,22 +1298,34 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
     // La cuenta del equipo no es un perfil: no recibe avisos.
     listarNotificaciones(yo) {
-      if (!yo) return { notificaciones: [], no_leidas: 0 };
+      if (!yo) return { notificaciones: [], no_leidas: 0, sin_leer: [] };
       const notificaciones = db.prepare(`SELECT n.id AS notificacion_id, n.leida_en, a.id, a.pendiente_id, a.texto_pendiente, a.perfil_id, a.autor,
           a.tipo, a.datos, a.creado_en
         FROM notificaciones n JOIN actividad a ON a.id = n.actividad_id
         WHERE n.perfil_id = ? AND ${ACTIVIDAD_VISIBLE} ORDER BY n.creado_en DESC, n.rowid DESC LIMIT 50`).all(yo, yo, yo)
         .map(({ notificacion_id: id, leida_en: leidaEn, ...actividad }) => ({ id, leida: leidaEn !== null, actividad: actividadFila(actividad) }));
-      return { notificaciones, no_leidas: this.noLeidas(yo) };
+      return { notificaciones, no_leidas: this.noLeidas(yo), sin_leer: this.sinLeer(yo) };
     },
+
+    // Los pendientes con avisos sin leer (todos, no solo los 50 de la lista), para marcar sus tarjetas. Las menciones
+    // (en un mensaje o en la descripción) y las respuestas a un mensaje tuyo se cuentan aparte.
+    sinLeer: (yo) => db.prepare(`SELECT a.pendiente_id, COUNT(*) AS avisos,
+        SUM(CASE WHEN json_extract(a.datos, '$.respondido_id') = ?
+          OR EXISTS (SELECT 1 FROM json_each(a.datos, '$.menciones') WHERE value = ?) THEN 1 ELSE 0 END) AS menciones
+      FROM notificaciones n JOIN actividad a ON a.id = n.actividad_id
+      WHERE n.perfil_id = ? AND n.leida_en IS NULL AND a.pendiente_id IS NOT NULL AND ${ACTIVIDAD_VISIBLE}
+      GROUP BY a.pendiente_id ORDER BY MAX(n.creado_en) DESC`).all(yo, yo, yo, yo, yo).map((fila) => ({ ...fila })),
 
     noLeidas: (yo) => db.prepare(`SELECT COUNT(*) AS total FROM notificaciones n JOIN actividad a ON a.id = n.actividad_id
       WHERE n.perfil_id = ? AND n.leida_en IS NULL AND ${ACTIVIDAD_VISIBLE}`).get(yo, yo, yo).total,
 
-    marcarLeidas(yo, ids) {
+    marcarLeidas(yo, { ids, pendienteId }) {
       if (!yo) return 0;
       const ahora = new Date().toISOString();
-      if (ids === null) {
+      if (pendienteId) {
+        db.prepare(`UPDATE notificaciones SET leida_en = ? WHERE perfil_id = ? AND leida_en IS NULL
+          AND actividad_id IN (SELECT id FROM actividad WHERE pendiente_id = ?)`).run(ahora, yo, pendienteId);
+      } else if (ids === null) {
         db.prepare('UPDATE notificaciones SET leida_en = ? WHERE perfil_id = ? AND leida_en IS NULL').run(ahora, yo);
       } else {
         const marcar = db.prepare('UPDATE notificaciones SET leida_en = ? WHERE id = ? AND perfil_id = ? AND leida_en IS NULL');

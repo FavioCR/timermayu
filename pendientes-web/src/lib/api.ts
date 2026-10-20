@@ -165,6 +165,9 @@ export type Actividad = {
 
 export type Notificacion = { id: string; leida: boolean; actividad: Actividad }
 
+// Un pendiente con avisos sin leer: cuántos y cuántos son menciones (o respuestas a un mensaje tuyo).
+export type SinLeer = { pendiente_id: string; avisos: number; menciones: number }
+
 export type Comentario = {
   id: string
   pendiente_id: string
@@ -485,10 +488,14 @@ export const api = {
     borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/archivos/${id}`),
   },
   notificaciones: {
-    listar: (credenciales: string) => pedir<{ notificaciones: Notificacion[]; no_leidas: number }>(credenciales, "GET", "/notificaciones"),
+    listar: (credenciales: string) =>
+      pedir<{ notificaciones: Notificacion[]; no_leidas: number; sin_leer: SinLeer[] }>(credenciales, "GET", "/notificaciones"),
     // Sin ids marca todas.
     marcarLeidas: (credenciales: string, ids?: string[]) =>
       pedir<{ no_leidas: number }>(credenciales, "POST", "/notificaciones/leidas", ids ? { ids } : {}).then((data) => data.no_leidas),
+    // Los de un pendiente, al abrirlo.
+    leerPendiente: (credenciales: string, pendienteId: string) =>
+      pedir<{ no_leidas: number }>(credenciales, "POST", "/notificaciones/leidas", { pendiente_id: pendienteId }).then((data) => data.no_leidas),
   },
   organizaciones: {
     listar: (credenciales: string) =>

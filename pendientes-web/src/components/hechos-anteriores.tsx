@@ -5,6 +5,7 @@ import { PerfilAvatar } from "@/components/perfil-avatar"
 import { InsigniaTipo } from "@/components/tipo-select"
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import type { Etiqueta, Pendiente, Perfil } from "@/lib/api"
+import { coincide } from "@/lib/buscar"
 
 const mes = new Intl.DateTimeFormat("es", { month: "long", year: "numeric" })
 const dia = new Intl.DateTimeFormat("es", { day: "numeric", month: "short" })
@@ -14,6 +15,8 @@ const dia = new Intl.DateTimeFormat("es", { day: "numeric", month: "short" })
 export function HechosAnteriores({
   abierto,
   onAbiertoChange,
+  busqueda,
+  onBusquedaChange,
   pendientes,
   filtrando,
   perfilesPorId,
@@ -23,6 +26,9 @@ export function HechosAnteriores({
 }: {
   abierto: boolean
   onAbiertoChange: (abierto: boolean) => void
+  // Lo escrito; empieza con lo que tenga el buscador de Hecho.
+  busqueda: string
+  onBusquedaChange: (busqueda: string) => void
   pendientes: Pendiente[]
   filtrando: boolean
   perfilesPorId: Map<string, Perfil>
@@ -47,8 +53,9 @@ export function HechosAnteriores({
       description="Lo terminado hace más de una semana."
       className="sm:max-w-xl"
     >
-      <Command>
-        <CommandInput placeholder="Buscar en lo terminado hace más de una semana…" />
+      {/* Busca igual que el buscador de la columna: cada palabra, sin importar tildes. */}
+      <Command filter={(valor, texto, palabras) => (coincide([valor, ...(palabras ?? [])].join(" "), texto) ? 1 : 0)}>
+        <CommandInput placeholder="Buscar en lo terminado hace más de una semana…" value={busqueda} onValueChange={onBusquedaChange} />
         <CommandList className="max-h-[min(60svh,32rem)]">
           <CommandEmpty>{pendientes.length ? "Nada con ese texto." : "No hay hechos de hace más de una semana."}</CommandEmpty>
           {porMes.map(([nombre, lista]) => (
