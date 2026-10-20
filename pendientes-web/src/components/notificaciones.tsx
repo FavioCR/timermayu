@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Bell, BellRing, CheckCheck, UsersRound } from "lucide-react"
+import { Bell, BellRing, CheckCheck, UsersRound, Volume2, VolumeX } from "lucide-react"
 import { cn } from "cn"
 
 import { PerfilAvatar } from "@/components/perfil-avatar"
@@ -8,6 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { api, esNoAutorizado, type Notificacion, type Perfil } from "@/lib/api"
 import { describir, detalleDe, haceCuanto } from "@/lib/actividad"
 import { useCambios } from "@/lib/cambios"
+import { activarSonido, esParaSonar, prepararSonido, sonarAviso, sonidoActivado } from "@/lib/sonido"
 
 // Cada cuánto se buscan avisos nuevos (también al volver a la pestaña).
 // Los avisos llegan al instante por los cambios en tiempo real; esto es por si esa conexión se cae.
@@ -18,7 +19,8 @@ type Permiso = NotificationPermission | "sin_soporte"
 
 const permisoActual = (): Permiso => ("Notification" in window ? Notification.permission : "sin_soporte")
 
-// La campana de quien entró con su perfil: lo que le asignaron y los cambios o mensajes en sus pendientes.
+// La campana de quien entró con su perfil. Avisa por tres cosas: te asignan algo, te mencionan con @ (en un mensaje o en
+// una descripción; responder a tu mensaje cuenta como mencionarte) o alguien más cambia un pendiente que creaste.
 // Con la pestaña en segundo plano y permiso del navegador, también avisa con una notificación del sistema.
 export function Notificaciones({
   credenciales,
@@ -41,6 +43,7 @@ export function Notificaciones({
   const [lista, setLista] = useState<Notificacion[]>([])
   const [noLeidas, setNoLeidas] = useState(0)
   const [permiso, setPermiso] = useState(permisoActual)
+  const [conSonido, setConSonido] = useState(sonidoActivado)
   // Ids ya vistos, para saber cuáles son nuevos. Null hasta la primera carga.
   const vistas = useRef<Set<string> | null>(null)
   // Lo que cambia en cada render se lee por ref para no reiniciar el intervalo.
@@ -73,6 +76,7 @@ export function Notificaciones({
       if (nuevas.length === 0) return
       // Si alguien cambió algo de uno, el tablero se pone al día.
       actuales.current.onNovedades()
+      if (nuevas.some((notificacion) => esParaSonar(notificacion, yo))) sonarAviso()
       if (document.hidden && permisoActual() === "granted") {
         for (const notificacion of nuevas.slice(0, 3)) {
           const aviso = new Notification(`${notificacion.actividad.autor} ${describir(notificacion.actividad, { yo })}`, {
@@ -90,6 +94,14 @@ export function Notificaciones({
       if (esNoAutorizado(err)) onSalir()
     }
   }, [credenciales, yo, abrir, onSalir])
+
+  useEffect(() => {
+    const desbloquear = prepararSonido()
+    return () => {
+      window.removeEventListener("pointerdown", desbloquear)
+      window.removeEventListener("keydown", desbloquear)
+    }
+  }, [])
 
   // Cualquier cambio de otra persona puede traer un aviso nuevo.
   useCambios((cambio) => cambio.tipo !== "ia" && cargar())
@@ -122,6 +134,13 @@ export function Notificaciones({
     }
   }
 
+  function cambiarSonido() {
+    activarSonido(!conSonido)
+    setConSonido(!conSonido)
+    // Al activarlo suena una vez, para que se sepa cómo es.
+    if (!conSonido) sonarAviso()
+  }
+
   async function pedirPermiso() {
     setPermiso(await Notification.requestPermission())
   }
@@ -141,16 +160,29 @@ export function Notificaciones({
       <PopoverContent align="end" className="w-[min(24rem,calc(100vw-2rem))] gap-0 p-0">
         <div className="flex min-h-12 items-center justify-between gap-2 border-b px-4 py-2">
           <p className="m-0 font-medium">Avisos</p>
-          {noLeidas > 0 && (
-            <Button variant="ghost" size="xs" onClick={marcarTodas}>
-              <CheckCheck /> Marcar todo como leído
+          <div className="flex items-center gap-1">
+            {noLeidas > 0 && (
+              <Button variant="ghost" size="xs" onClick={marcarTodas}>
+                <CheckCheck /> Marcar todo como leído
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="text-muted-foreground"
+              aria-pressed={conSonido}
+              aria-label={conSonido ? "Silenciar el sonido de los avisos" : "Activar el sonido de los avisos"}
+              title={conSonido ? "Suena cuando te asignan o te mencionan. Clic para silenciar." : "Sin sonido. Clic para activarlo."}
+              onClick={cambiarSonido}
+            >
+              {conSonido ? <Volume2 /> : <VolumeX />}
             </Button>
-          )}
+          </div>
         </div>
         <ul className="m-0 max-h-[min(28rem,60svh)] list-none overflow-y-auto p-0">
           {lista.length === 0 && (
             <li className="px-6 py-8 text-center text-sm text-muted-foreground">
-              Sin avisos por ahora. Aquí verás lo que te asignen y los cambios o mensajes en tus pendientes.
+              Sin avisos por ahora. Aquí verás lo que te asignen, cuando te mencionen con @ y lo que otros cambien en lo que creaste.
             </li>
           )}
           {lista.map((notificacion) => {

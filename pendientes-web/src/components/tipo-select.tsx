@@ -1,3 +1,4 @@
+import { Sparkles } from "lucide-react"
 import { cn } from "cn"
 
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -17,6 +18,20 @@ export function InsigniaTipo({ tipo, className }: { tipo: TipoTrabajo; className
       style={{ color: datos.color, backgroundColor: `color-mix(in oklab, ${datos.color} 16%, transparent)` }}
     >
       {datos.id}
+    </span>
+  )
+}
+
+// En lugar del tipo, mientras la IA lo elige para un pendiente recién creado.
+export function InsigniaEligiendo({ className }: { className?: string }) {
+  return (
+    <span
+      role="status"
+      title="La IA está eligiendo el tipo"
+      className={cn("inline-flex shrink-0 items-center gap-1 bg-primary/12 px-1.5 py-0.5 font-mono text-[11px] leading-none text-primary", className)}
+    >
+      <Sparkles className="size-3 animate-pulse" aria-hidden />
+      tipo…
     </span>
   )
 }

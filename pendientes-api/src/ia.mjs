@@ -47,6 +47,16 @@ export const ESQUEMA_PENDIENTES = {
   additionalProperties: false,
 };
 
+// Para elegir solo el tipo de un pendiente que se creó sin tipo.
+export const ESQUEMA_TIPO = {
+  type: 'object',
+  properties: {
+    tipo: { anyOf: [{ type: 'string', enum: TIPOS }, { type: 'null' }], description: 'Tipo de trabajo como en los commits convencionales, o null.' },
+  },
+  required: ['tipo'],
+  additionalProperties: false,
+};
+
 function iaError(status, codigo, detalle) {
   return Object.assign(new Error(codigo), { statusCode: status, ...(detalle && { detalle }) });
 }
@@ -77,15 +87,24 @@ export function instruccionesIA({ personas, proyectos, etiquetas, proyectoPorDef
   ].join('\n');
 }
 
+export function instruccionesTipo({ extra }) {
+  return [
+    'Eres el asistente del tablero de pendientes de un equipo. Te pasan un pendiente que se creó sin tipo: elige su tipo de trabajo como en los commits convencionales.',
+    '- feat: algo nuevo. fix: corregir un error. refactor: reordenar código sin cambiar lo que hace. perf: rendimiento. docs: documentación. test: pruebas. style: formato. chore: mantenimiento. ci: despliegue y automatización.',
+    '- null si no es trabajo de software o no está claro.',
+    ...(extra ? ['Indicaciones del equipo (síguelas si no contradicen lo anterior):', extra] : []),
+  ].join('\n');
+}
+
 const PEDIDOS = {
-  gemini: ({ modelo, clave, sistema, texto }) => ({
+  gemini: ({ modelo, clave, sistema, texto, esquema }) => ({
     ruta: '/v1beta/interactions',
     headers: { 'x-goog-api-key': clave },
     body: {
       model: modelo,
       system_instruction: sistema,
       input: texto,
-      response_format: { type: 'text', mime_type: 'application/json', schema: ESQUEMA_PENDIENTES },
+      response_format: { type: 'text', mime_type: 'application/json', schema: esquema },
       store: false,
     },
     // La respuesta trae pasos; el texto del modelo está en los de tipo model_output.
@@ -99,14 +118,14 @@ const PEDIDOS = {
         .join('');
     },
   }),
-  openai: ({ modelo, clave, sistema, texto }) => ({
+  openai: ({ modelo, clave, sistema, texto, esquema, nombre }) => ({
     ruta: '/v1/responses',
     headers: { Authorization: `Bearer ${clave}` },
     body: {
       model: modelo,
       instructions: sistema,
       input: texto,
-      text: { format: { type: 'json_schema', name: 'pendientes', schema: ESQUEMA_PENDIENTES, strict: true } },
+      text: { format: { type: 'json_schema', name: nombre, schema: esquema, strict: true } },
       store: false,
     },
     // El JSON llega en output[] → message → content[] de tipo output_text; si el modelo se niega, viene un refusal.
@@ -118,7 +137,7 @@ const PEDIDOS = {
       return partes.filter((parte) => parte.type === 'output_text').map((parte) => parte.text).join('');
     },
   }),
-  openrouter: ({ modelo, clave, sistema, texto }) => ({
+  openrouter: ({ modelo, clave, sistema, texto, esquema, nombre }) => ({
     ruta: '/api/v1/chat/completions',
     // Opcionales: identifican la app en OpenRouter.
     headers: { Authorization: `Bearer ${clave}`, 'HTTP-Referer': 'https://timer.practi.dev/pendientes/', 'X-OpenRouter-Title': 'Pendientes' },
@@ -128,7 +147,7 @@ const PEDIDOS = {
         { role: 'system', content: sistema },
         { role: 'user', content: texto },
       ],
-      response_format: { type: 'json_schema', json_schema: { name: 'pendientes', strict: true, schema: ESQUEMA_PENDIENTES } },
+      response_format: { type: 'json_schema', json_schema: { name: nombre, strict: true, schema: esquema } },
     },
     leer: (data) => {
       // OpenRouter puede responder 200 con el error del proveedor de fondo.
@@ -167,20 +186,23 @@ async function pedir(url, opciones, clave) {
   return data;
 }
 
-// Lo que devolvió la IA, ya revisado: títulos no vacíos, textos recortados y estados válidos.
-export function leerPendientes(texto) {
+function leerJson(texto) {
   if (typeof texto !== 'string' || !texto.trim()) throw iaError(502, 'ia_respuesta_invalida');
-  let datos;
   try {
-    datos = JSON.parse(texto);
+    return JSON.parse(texto);
   } catch {
     // Algún modelo de OpenRouter ignora el esquema y lo envuelve en ```json … ```.
     try {
-      datos = JSON.parse(texto.slice(texto.indexOf('{'), texto.lastIndexOf('}') + 1));
+      return JSON.parse(texto.slice(texto.indexOf('{'), texto.lastIndexOf('}') + 1));
     } catch {
       throw iaError(502, 'ia_respuesta_invalida');
     }
   }
+}
+
+// Lo que devolvió la IA, ya revisado: títulos no vacíos, textos recortados y estados válidos.
+export function leerPendientes(texto) {
+  const datos = leerJson(texto);
   const lista = Array.isArray(datos) ? datos : datos?.pendientes;
   if (!Array.isArray(lista)) throw iaError(502, 'ia_respuesta_invalida');
   const textoO = (valor, maximo) => (typeof valor === 'string' && valor.trim() ? valor.trim().slice(0, maximo) : null);
@@ -199,14 +221,28 @@ export function leerPendientes(texto) {
   });
 }
 
-export async function pedirPendientes({ proveedor, modelo, clave, base, sistema, texto }) {
-  const pedido = PEDIDOS[proveedor]({ modelo, clave, sistema, texto });
+export function leerTipo(texto) {
+  const { tipo } = leerJson(texto) ?? {};
+  return TIPOS.includes(tipo) ? tipo : null;
+}
+
+async function consultar({ proveedor, modelo, clave, base, sistema, texto, esquema, nombre }) {
+  const pedido = PEDIDOS[proveedor]({ modelo, clave, sistema, texto, esquema, nombre });
   const data = await pedir(`${base}${pedido.ruta}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...pedido.headers },
     body: JSON.stringify(pedido.body),
   }, clave);
-  return leerPendientes(pedido.leer(data));
+  return pedido.leer(data);
+}
+
+export async function pedirPendientes(opciones) {
+  return leerPendientes(await consultar({ ...opciones, esquema: ESQUEMA_PENDIENTES, nombre: 'pendientes' }));
+}
+
+// El tipo de un pendiente (feat, fix…) a partir de su título y su proyecto, o null.
+export async function pedirTipo(opciones) {
+  return leerTipo(await consultar({ ...opciones, esquema: ESQUEMA_TIPO, nombre: 'tipo' }));
 }
 
 // Los modelos de texto de cada proveedor, para elegir en la configuración. OpenRouter no pide clave para listarlos

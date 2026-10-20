@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { listarModelos, MAX_SUGERENCIAS, pedirPendientes, PROVEEDORES_IA, instruccionesIA } from './ia.mjs';
+import { instruccionesIA, instruccionesTipo, listarModelos, MAX_SUGERENCIAS, pedirPendientes, pedirTipo, PROVEEDORES_IA } from './ia.mjs';
 
 // Alcanza para el orden completo del tablero (hasta 5000 pendientes de ~60 bytes cada uno).
 const MAX_BODY_BYTES = 512 * 1024;
@@ -402,11 +402,25 @@ export function resumirDescripcion(bloques) {
     if (!nodo || typeof nodo !== 'object') return;
     if (nodo.type === 'image' && nodo.props?.url) imagenes++;
     if (typeof nodo.text === 'string') textos.push(nodo.text);
+    if (nodo.type === 'mencion' && nodo.props?.nombre) textos.push(`@${nodo.props.nombre}`);
     for (const hijo of [nodo.content, nodo.children, nodo.rows, nodo.cells]) visitar(hijo);
   };
   visitar(bloques);
   const resumen = textos.join(' ').replace(/\s+/g, ' ').trim().slice(0, MAX_RESUMEN);
   return { resumen: resumen || null, num_imagenes: imagenes };
+}
+
+// Los perfiles mencionados con @ en la descripción (el contenido "mencion" del editor guarda su id).
+export function mencionesDeDescripcion(descripcion) {
+  const ids = new Set();
+  const visitar = (nodo) => {
+    if (Array.isArray(nodo)) return nodo.forEach(visitar);
+    if (!nodo || typeof nodo !== 'object') return;
+    if (nodo.type === 'mencion' && typeof nodo.props?.id === 'string' && nodo.props.id) ids.add(nodo.props.id);
+    for (const hijo of [nodo.content, nodo.children, nodo.rows, nodo.cells]) visitar(hijo);
+  };
+  if (descripcion) visitar(JSON.parse(descripcion));
+  return ids;
 }
 
 function idOpcional(input, campo, error) {
@@ -571,6 +585,10 @@ export function parseAjustesIA(input) {
     }
     changes.instrucciones = instrucciones?.trim() || null;
   }
+  if ('tipo_automatico' in input) {
+    if (typeof input.tipo_automatico !== 'boolean') throw httpError(422, 'tipo_automatico_invalido');
+    changes.tipo_automatico = input.tipo_automatico;
+  }
   for (const [campo, maximo, error] of [['modelos', MAX_MODELO_IA, 'modelo_invalido'], ['claves', MAX_CLAVE_IA, 'clave_invalida']]) {
     if (!(campo in input)) continue;
     const valores = input[campo];
@@ -592,11 +610,22 @@ export function parseSugerencia(input) {
   return { texto, proyecto_id: 'proyecto_id' in input ? idOpcional(input, 'proyecto_id', 'proyecto_invalido') : null };
 }
 
+// La clave con la que se listan los modelos: la que se está escribiendo (va en el cuerpo, no en la URL) o la guardada.
+export function parsePedidoModelos(input) {
+  if (!Object.hasOwn(PROVEEDORES_IA, input.proveedor)) throw httpError(422, 'proveedor_invalido');
+  const { clave } = input;
+  if (clave != null && (typeof clave !== 'string' || !/^\S+$/.test(clave.trim()) || clave.trim().length > MAX_CLAVE_IA)) {
+    throw httpError(422, 'clave_invalida');
+  }
+  return { proveedor: input.proveedor, clave: clave?.trim() || null };
+}
+
 // Lo que se muestra de la IA: de cada clave, solo si hay una y sus últimos 4 caracteres.
-export function iaPublica({ proveedor, instrucciones, modelos, claves }) {
+export function iaPublica({ proveedor, instrucciones, tipo_automatico: tipoAutomatico, modelos, claves }) {
   return {
     proveedor,
     instrucciones,
+    tipo_automatico: tipoAutomatico,
     lista: Boolean(proveedor && claves[proveedor]),
     proveedores: Object.entries(PROVEEDORES_IA).map(([id, { nombre, modelo }]) => ({
       id,
@@ -697,6 +726,8 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
   // Anota un cambio en el historial y avisa a los perfiles de `avisar`, salvo a quien lo hizo.
   // De un pendiente privado solo se avisa a su dueño, que es el único que lo ve.
+  // La campana avisa por tres cosas: te asignan algo, te mencionan con @ (una vez por mención; responder a tu mensaje
+  // cuenta como mencionarte) o alguien más cambia un pendiente que creaste.
   function registrar(quien, item, tipo, datos = null, avisar = []) {
     const id = randomUUID();
     const privado = privadoDe(item.id);
@@ -709,36 +740,46 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     }
   }
 
-  function anotarDescripcion(quien, item) {
-    const ultima = db.prepare('SELECT id, perfil_id, autor, tipo, creado_en FROM actividad WHERE pendiente_id = ? ORDER BY creado_en DESC, rowid DESC LIMIT 1')
+  // Si la descripción nueva menciona a alguien que antes no estaba, se le avisa (una entrada propia en el historial);
+  // si no, se anota como una edición más.
+  function anotarDescripcion(quien, item, antes = null, despues = null) {
+    const nuevas = [...mencionesDeDescripcion(despues)]
+      .filter((id) => !mencionesDeDescripcion(antes).has(id) && id !== quien.perfil_id && perfil(id));
+    if (nuevas.length > 0) return registrar(quien, item, 'descripcion', { menciones: nuevas }, [...nuevas, item.creado_por]);
+    anotarEdicion(quien, item);
+  }
+
+  // Varias ediciones seguidas de la misma persona quedan en una sola entrada (no en la de una mención, que es un aviso).
+  function anotarEdicion(quien, item) {
+    const ultima = db.prepare('SELECT id, perfil_id, autor, tipo, datos, creado_en FROM actividad WHERE pendiente_id = ? ORDER BY creado_en DESC, rowid DESC LIMIT 1')
       .get(item.id);
-    if (ultima?.tipo === 'descripcion' && ultima.perfil_id === quien.perfil_id && ultima.autor === quien.nombre
+    if (ultima?.tipo === 'descripcion' && !ultima.datos && ultima.perfil_id === quien.perfil_id && ultima.autor === quien.nombre
       && Date.now() - Date.parse(ultima.creado_en) < UNIR_DESCRIPCION_MS) {
       db.prepare('UPDATE actividad SET creado_en = ?, texto_pendiente = ? WHERE id = ?').run(new Date().toISOString(), item.texto, ultima.id);
     } else {
-      registrar(quien, item, 'descripcion');
+      registrar(quien, item, 'descripcion', null, [item.creado_por]);
     }
   }
 
-  // Avisa al responsable y a quien lo creó; al reasignar, a quien lo tenía y a quien lo recibe.
+  // Cada cambio le avisa a quien lo creó; al reasignar, también a quien lo recibe.
   function anotarCambios(quien, antes, despues, changes) {
-    const interesados = [despues.perfil_id, despues.creado_por];
+    const interesados = [despues.creado_por];
     if (despues.texto !== antes.texto) registrar(quien, despues, 'texto', { de: antes.texto, a: despues.texto }, interesados);
     if (despues.estado !== antes.estado) registrar(quien, despues, 'estado', { de: antes.estado, a: despues.estado }, interesados);
     if (despues.perfil_id !== antes.perfil_id) {
       registrar(quien, despues, 'asignado', { de: nombreDePerfil(antes.perfil_id), a: nombreDePerfil(despues.perfil_id), a_id: despues.perfil_id },
-        [antes.perfil_id, despues.perfil_id]);
+        [despues.perfil_id, despues.creado_por]);
     }
     if (despues.proyecto_id !== antes.proyecto_id) {
       registrar(quien, despues, 'proyecto', { de: etiquetaDeProyecto(antes.proyecto_id), a: etiquetaDeProyecto(despues.proyecto_id) }, interesados);
     }
-    if ('descripcion' in changes && changes.descripcion !== antes.descripcion) anotarDescripcion(quien, despues);
-    if (despues.tipo !== antes.tipo) registrar(quien, despues, 'tipo', { de: antes.tipo, a: despues.tipo });
+    if ('descripcion' in changes && changes.descripcion !== antes.descripcion) anotarDescripcion(quien, despues, antes.descripcion, changes.descripcion);
+    if (despues.tipo !== antes.tipo) registrar(quien, despues, 'tipo', { de: antes.tipo, a: despues.tipo }, interesados);
     const agregadas = despues.etiquetas.filter((id) => !antes.etiquetas.includes(id));
     const quitadas = antes.etiquetas.filter((id) => !despues.etiquetas.includes(id));
     if (agregadas.length || quitadas.length) {
       const nombres = (ids) => ids.map((id) => etiqueta(id)?.nombre).filter(Boolean);
-      registrar(quien, despues, 'etiquetas', { agregadas: nombres(agregadas), quitadas: nombres(quitadas) });
+      registrar(quien, despues, 'etiquetas', { agregadas: nombres(agregadas), quitadas: nombres(quitadas) }, interesados);
     }
   }
 
@@ -857,7 +898,19 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     ajustesIA() {
       const guardado = db.prepare("SELECT valor FROM ajustes WHERE clave = 'ia'").get();
       const ajustes = guardado ? JSON.parse(guardado.valor) : {};
-      return { proveedor: ajustes.proveedor ?? null, instrucciones: ajustes.instrucciones ?? null, modelos: ajustes.modelos ?? {}, claves: ajustes.claves ?? {} };
+      return {
+        proveedor: ajustes.proveedor ?? null,
+        instrucciones: ajustes.instrucciones ?? null,
+        // Si un pendiente se crea sin tipo, la IA se lo pone (salvo que el equipo lo apague).
+        tipo_automatico: ajustes.tipo_automatico ?? true,
+        modelos: ajustes.modelos ?? {},
+        claves: ajustes.claves ?? {},
+      };
+    },
+
+    tipoAutomatico() {
+      const { proveedor, claves, tipo_automatico: tipoAutomatico } = this.ajustesIA();
+      return Boolean(proveedor && claves[proveedor] && tipoAutomatico);
     },
 
     guardarAjustesIA(changes) {
@@ -866,6 +919,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       const nuevo = {
         proveedor: 'proveedor' in changes ? changes.proveedor : actual.proveedor,
         instrucciones: 'instrucciones' in changes ? changes.instrucciones : actual.instrucciones,
+        tipo_automatico: 'tipo_automatico' in changes ? changes.tipo_automatico : actual.tipo_automatico,
         modelos: juntar(actual.modelos, changes.modelos),
         claves: juntar(actual.claves, changes.claves),
       };
@@ -922,6 +976,32 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       }));
     },
 
+    // Le pide a la IA el tipo de un pendiente que se creó sin tipo. Solo viajan su título y su proyecto. Si mientras
+    // tanto alguien le puso (o le quitó) el tipo a mano, la respuesta no lo pisa. Devuelve el tipo puesto, o null.
+    async elegirTipo(id, bases) {
+      const { proveedor, modelos, claves, instrucciones } = this.ajustesIA();
+      const item = db.prepare('SELECT id, texto, proyecto_id, tipo FROM pendientes WHERE id = ?').get(id);
+      if (!proveedor || !claves[proveedor] || !item || item.tipo) return null;
+      const proyecto = etiquetaDeProyecto(item.proyecto_id);
+      const tipo = await pedirTipo({
+        proveedor,
+        modelo: modelos[proveedor] ?? PROVEEDORES_IA[proveedor].modelo,
+        clave: claves[proveedor],
+        base: bases[proveedor],
+        sistema: instruccionesTipo({ extra: instrucciones }),
+        texto: [`Pendiente: ${item.texto}`, ...(proyecto ? [`Proyecto: ${proyecto}`] : [])].join('\n'),
+      });
+      if (!tipo) return null;
+      return transaction(db, () => {
+        const puesto = db.prepare(`UPDATE pendientes SET tipo = ? WHERE id = ? AND tipo IS NULL
+          AND NOT EXISTS (SELECT 1 FROM actividad WHERE pendiente_id = ? AND tipo = 'tipo')`).run(tipo, id, id).changes > 0;
+        if (!puesto) return null;
+        const despues = db.prepare('SELECT id, texto FROM pendientes WHERE id = ?').get(id);
+        registrar({ perfil_id: null, nombre: 'IA' }, despues, 'tipo', { de: null, a: tipo, ia: true });
+        return tipo;
+      });
+    },
+
     listarPendientes: (yo) => db.prepare(`SELECT ${COLUMNAS_PENDIENTE} FROM pendientes WHERE ${PENDIENTE_VISIBLE} ORDER BY posicion, creado_en DESC`)
       .all(yo).map(pendienteFila),
 
@@ -953,6 +1033,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
           asignado_id: creado.perfil_id,
           proyecto: etiquetaDeProyecto(creado.proyecto_id),
         }, [creado.perfil_id]);
+        if (descripcion && mencionesDeDescripcion(descripcion).size > 0) anotarDescripcion(quien, creado, null, descripcion);
         return creado;
       });
     },
@@ -995,7 +1076,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       transaction(db, () => {
         // Su historial queda con la privacidad que tenía al borrarse (ON DELETE SET NULL suelta el pendiente_id).
         db.prepare('UPDATE actividad SET privado_de = ? WHERE pendiente_id = ?').run(privadoDe(id), id);
-        registrar(quien, actual, 'borrado', null, [actual.perfil_id, actual.creado_por]);
+        registrar(quien, actual, 'borrado', null, [actual.creado_por]);
         // ON DELETE CASCADE quita sus filas de imagenes, archivos y comentarios; lo guardado en disco se borra aparte.
         db.prepare('DELETE FROM pendientes WHERE id = ?').run(id);
       });
@@ -1023,7 +1104,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
           a_id: perfilId,
           estado: antes.estado,
           ...(nota && { nota }),
-        }, [perfilId, antes.perfil_id, antes.creado_por]);
+        }, [perfilId, antes.creado_por]);
         return despues;
       });
     },
@@ -1048,7 +1129,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         for (const [id, estado] of new Map(orden.map((item) => [item.id, item.estado]))) {
           const previo = antes.get(id);
           if (previo && previo.estado !== estado) {
-            registrar(quien, previo, 'estado', { de: previo.estado, a: estado }, [previo.perfil_id, previo.creado_por]);
+            registrar(quien, previo, 'estado', { de: previo.estado, a: estado }, [previo.creado_por]);
           }
         }
       });
@@ -1079,8 +1160,6 @@ function createRepo(db, dataDir, graciaImagenesMs) {
           .run(id, pendienteId, quien.perfil_id, quien.nombre, texto, respuestaA, new Date().toISOString());
         const adjuntar = db.prepare('UPDATE archivos SET comentario_id = ?, borrador = 0 WHERE id = ?');
         for (const archivo of adjuntos) adjuntar.run(id, archivo.id);
-        const participantes = db.prepare('SELECT DISTINCT perfil_id FROM comentarios WHERE pendiente_id = ? AND perfil_id IS NOT NULL').all(pendienteId)
-          .map((row) => row.perfil_id);
         // Los mencionados quedan en el historial para que su aviso diga "te mencionó".
         const menciones = mencionadosEn(texto);
         const datos = {
@@ -1091,7 +1170,8 @@ function createRepo(db, dataDir, graciaImagenesMs) {
           // Para que el aviso de quien escribió el original diga "te respondió".
           ...(respondido?.perfil_id && { respondido_id: respondido.perfil_id }),
         };
-        registrar(quien, item, 'comentario', datos, [item.perfil_id, item.creado_por, ...participantes, ...menciones, respondido?.perfil_id]);
+        // Un mensaje no cambia el pendiente: solo avisa a los mencionados y a quien escribió el mensaje que se responde.
+        registrar(quien, item, 'comentario', datos, [...menciones, respondido?.perfil_id]);
         return { ...fila(db.prepare(`${SELECT_COMENTARIO} WHERE id = ?`).get(id)), archivos: adjuntos.map((archivo) => ({ ...archivo, comentario_id: id })) };
       });
     },
@@ -1126,7 +1206,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         db.prepare(`INSERT INTO archivos (id, pendiente_id, comentario_id, borrador, nombre, tipo, tamano, perfil_id, autor, creado_en)
           VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`)
           .run(id, pendienteId, paraChat ? 1 : 0, nombre, tipoDeArchivo(contenido), contenido.length, quien.perfil_id, quien.nombre, new Date().toISOString());
-        if (!paraChat) registrar(quien, item, 'archivo', { archivo_id: id, nombre }, [item.perfil_id, item.creado_por]);
+        if (!paraChat) registrar(quien, item, 'archivo', { archivo_id: id, nombre }, [item.creado_por]);
         return fila(db.prepare(`${SELECT_ARCHIVO} WHERE id = ?`).get(id));
       });
     },
@@ -1387,6 +1467,14 @@ export function createApp(options = {}) {
     }
   }
 
+  // El tipo que elige la IA llega después de crear el pendiente: se avisa a todos, también a la pestaña que lo creó
+  // (que espera la respuesta para dejar de mostrar que la IA está eligiendo), haya salido bien o no.
+  function elegirTipo(id) {
+    repo.elegirTipo(id, basesIA)
+      .catch((error) => console.warn(`La IA no pudo elegir el tipo de ${id}: ${error.message}${error.detalle ? ` (${error.detalle})` : ''}`))
+      .finally(() => avisarCambio({ tipo: 'pendientes', pendiente_id: id }));
+  }
+
   // Qué avisar si la petición sale bien. Lo de un mensaje o archivo que se borra se busca antes de borrarlo.
   function cambioDe(pathname, method) {
     if (method === 'GET') return null;
@@ -1477,7 +1565,12 @@ export function createApp(options = {}) {
 
       if (url.pathname === API_PATH && req.method === 'GET') return json(res, 200, { pendientes: repo.listarPendientes(yo) });
       if (url.pathname === API_PATH && req.method === 'POST') {
-        return json(res, 201, { pendiente: repo.crearPendiente(usuario, parsePendiente(await readJson(req))) });
+        const changes = parsePendiente(await readJson(req));
+        const creado = repo.crearPendiente(usuario, changes);
+        // Sin "tipo" en el pedido (null es "sin tipo" a propósito), la IA lo elige si está configurada.
+        const eligiendoTipo = !('tipo' in changes) && repo.tipoAutomatico();
+        if (eligiendoTipo) elegirTipo(creado.id);
+        return json(res, 201, { pendiente: creado, eligiendo_tipo: eligiendoTipo });
       }
       if (url.pathname === ORDER_PATH && req.method === 'PUT') {
         return json(res, 200, { pendientes: repo.ordenar(usuario, parseOrden(await readJson(req))) });
@@ -1487,11 +1580,11 @@ export function createApp(options = {}) {
       if (url.pathname === IA_PATH && req.method === 'PUT') {
         return json(res, 200, { ia: iaPublica(repo.guardarAjustesIA(parseAjustesIA(await readJson(req)))) });
       }
-      if (url.pathname === IA_MODELOS_PATH && req.method === 'GET') {
-        const proveedor = url.searchParams.get('proveedor') ?? '';
-        if (!Object.hasOwn(PROVEEDORES_IA, proveedor)) throw httpError(422, 'proveedor_invalido');
+      if (url.pathname === IA_MODELOS_PATH && req.method === 'POST') {
+        const pedido = parsePedidoModelos(await readJson(req));
+        const { proveedor } = pedido;
         // OpenRouter lista sus modelos sin clave.
-        const clave = repo.ajustesIA().claves[proveedor];
+        const clave = pedido.clave ?? repo.ajustesIA().claves[proveedor];
         if (!clave && proveedor !== 'openrouter') throw httpError(422, 'ia_sin_clave');
         return json(res, 200, { modelos: await listarModelos({ proveedor, clave, base: basesIA[proveedor] }) });
       }

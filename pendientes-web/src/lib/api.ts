@@ -41,6 +41,8 @@ export type ProveedorIA = "gemini" | "openai" | "openrouter"
 export type AjustesIA = {
   proveedor: ProveedorIA | null
   instrucciones: string | null
+  // A lo que se crea sin tipo, la IA le pone uno.
+  tipo_automatico: boolean
   // Hay proveedor elegido y tiene clave.
   lista: boolean
   proveedores: {
@@ -57,6 +59,7 @@ export type AjustesIA = {
 export type CambiosIA = {
   proveedor?: ProveedorIA | null
   instrucciones?: string | null
+  tipo_automatico?: boolean
   modelos?: Partial<Record<ProveedorIA, string | null>>
   claves?: Partial<Record<ProveedorIA, string | null>>
 }
@@ -141,6 +144,8 @@ export type DatosActividad = {
   nombre?: string
   agregadas?: string[]
   quitadas?: string[]
+  // El tipo lo puso la IA.
+  ia?: boolean
 }
 
 // Una entrada del historial. Guarda nombres (no solo ids) para leerse aunque el perfil o el proyecto ya no existan.
@@ -279,6 +284,11 @@ export function mensajeDeError(error: unknown) {
   return error instanceof ApiError && error.detalle ? `${mensaje} (${error.detalle})` : mensaje
 }
 
+// No hubo respuesta del servidor, o el proxy no lo alcanzó (502/503/504).
+export function esSinConexion(error: unknown) {
+  return error instanceof ApiError && (error.status === 0 || [502, 503, 504].includes(error.status))
+}
+
 export function esNoAutorizado(error: unknown) {
   return error instanceof ApiError && error.status === 401
 }
@@ -412,13 +422,16 @@ export const api = {
       texto: string
       proyecto_id: string | null
       estado?: Estado
+      // Sin tipo (undefined), la IA lo elige si está configurada; null es "sin tipo" a propósito.
       tipo?: TipoTrabajo | null
       perfil_id: string | null
       etiquetas?: string[]
       descripcion?: string
     }
   ) =>
-    pedir<{ pendiente: Pendiente }>(credenciales, "POST", "", datos).then((data) => data.pendiente),
+    pedir<{ pendiente: Pendiente; eligiendo_tipo: boolean }>(credenciales, "POST", "", datos).then((data) =>
+      Object.assign(data.pendiente, { eligiendoTipo: data.eligiendo_tipo })
+    ),
   detalle: (credenciales: string, id: string) =>
     pedir<{ pendiente: PendienteDetalle }>(credenciales, "GET", `/${id}`).then((data) => data.pendiente),
   actualizar: (credenciales: string, id: string, cambios: CambiosPendiente) =>
@@ -494,8 +507,9 @@ export const api = {
     leer: (credenciales: string) => pedir<{ ia: AjustesIA }>(credenciales, "GET", "/ia").then((data) => data.ia),
     guardar: (credenciales: string, cambios: CambiosIA) =>
       pedir<{ ia: AjustesIA }>(credenciales, "PUT", "/ia", cambios).then((data) => data.ia),
-    modelos: (credenciales: string, proveedor: ProveedorIA) =>
-      pedir<{ modelos: ModeloIA[] }>(credenciales, "GET", `/ia/modelos?proveedor=${proveedor}`).then((data) => data.modelos),
+    // Con la clave guardada, o con una que se está escribiendo (va en el cuerpo y no se guarda).
+    modelos: (credenciales: string, proveedor: ProveedorIA, clave?: string) =>
+      pedir<{ modelos: ModeloIA[] }>(credenciales, "POST", "/ia/modelos", { proveedor, clave }).then((data) => data.modelos),
     // Propone pendientes a partir de un texto; no crea nada.
     sugerir: (credenciales: string, texto: string, proyectoId: string | null) =>
       pedir<{ sugerencias: Sugerencia[] }>(credenciales, "POST", "/ia/sugerir", { texto, proyecto_id: proyectoId }).then((data) => data.sugerencias),

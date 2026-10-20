@@ -17,6 +17,7 @@ import {
   parseLeidas,
   parseOrden,
   parseOrganizacion,
+  parsePedidoModelos,
   parsePendiente,
   parsePerfil,
   parseProyecto,
@@ -40,7 +41,7 @@ async function startProveedor(t, responder) {
     for await (const chunk of req) chunks.push(chunk);
     const cuerpo = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null;
     pedidos.push({ ruta: req.url, metodo: req.method, headers: req.headers, cuerpo });
-    const { status = 200, json } = responder(req.url, cuerpo, req.headers);
+    const { status = 200, json } = await responder(req.url, cuerpo, req.headers);
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(json));
   });
@@ -531,7 +532,7 @@ test('borra las imágenes que salen de la descripción, salvo si otra tarjeta la
   assert.equal(existsSync(archivo(queda)), false);
 });
 
-test('el historial anota quién cambió qué y avisa al responsable y a quien lo creó, nunca a quien lo hizo', async (t) => {
+test('el historial anota quién cambió qué; avisa a quien recibe el pendiente y a quien lo creó si otro lo cambia', async (t) => {
   const { data, entrarComo } = await startServer(t);
   const diego = await entrarComo('Diego');
   const favio = await entrarComo('Favio');
@@ -553,12 +554,19 @@ test('el historial anota quién cambió qué y avisa al responsable y a quien lo
   await favio.data('PATCH', `/${pendiente.id}`, { estado: 'haciendo' });
   assert.equal((await avisos(diego)).notificaciones[0].actividad.tipo, 'estado');
   assert.equal((await avisos(favio)).no_leidas, 1);
-  // Diego se lo pasa a Junior: avisa a Favio (lo tenía) y a Junior (lo recibe).
+  // Diego se lo pasa a Junior y lo renombra: solo Junior (lo recibe) tiene aviso; a Favio ya no le toca, y el
+  // cambio de título lo hizo quien lo creó.
   await diego.data('PATCH', `/${pendiente.id}`, { perfil_id: junior.perfil.id, texto: 'Facturación electrónica' });
   deFavio = await avisos(favio);
-  assert.deepEqual(deFavio.notificaciones.map((n) => n.actividad.tipo), ['asignado', 'creado']);
-  assert.deepEqual(deFavio.notificaciones[0].actividad.datos, { de: 'Favio', a: 'Junior', a_id: junior.perfil.id });
-  assert.deepEqual((await avisos(junior)).notificaciones.map((n) => n.actividad.tipo).sort(), ['asignado', 'texto']);
+  assert.deepEqual(deFavio.notificaciones.map((n) => n.actividad.tipo), ['creado']);
+  const deJunior = await avisos(junior);
+  assert.deepEqual(deJunior.notificaciones.map((n) => n.actividad.tipo), ['asignado']);
+  assert.deepEqual(deJunior.notificaciones[0].actividad.datos, { de: 'Favio', a: 'Junior', a_id: junior.perfil.id });
+  // Lo que cambia otro en lo que Diego creó (tipo, etiquetas) le avisa a Diego; a Junior, que lo tiene, no.
+  const { etiqueta } = await junior.data('POST', '/etiquetas', { nombre: 'Sprint 3' });
+  await junior.data('PATCH', `/${pendiente.id}`, { tipo: 'feat', etiquetas: [etiqueta.id] });
+  assert.deepEqual((await avisos(diego)).notificaciones.slice(0, 2).map((n) => n.actividad.tipo).sort(), ['etiquetas', 'tipo']);
+  await junior.data('PATCH', `/${pendiente.id}`, { tipo: null, etiquetas: [] });
 
   // La descripción que se guarda sola cuenta una vez por racha; guardar lo mismo no anota nada.
   const descripcion = JSON.stringify([{ type: 'paragraph', content: [{ type: 'text', text: 'a' }], children: [] }]);
@@ -566,8 +574,9 @@ test('el historial anota quién cambió qué y avisa al responsable y a quien lo
   await junior.data('PATCH', `/${pendiente.id}`, { descripcion: descripcion.replace('"a"', '"ab"') });
   await diego.data('PATCH', `/${pendiente.id}`, { descripcion: descripcion.replace('"a"', '"ab"') });
   const { actividad } = await diego.data('GET', `/${pendiente.id}/actividad`);
-  assert.deepEqual(actividad.map((a) => `${a.autor}:${a.tipo}`),
+  assert.deepEqual(actividad.map((a) => `${a.autor}:${a.tipo}`).filter((a) => !/:(tipo|etiquetas)$/.test(a)),
     ['Junior:descripcion', 'Diego:asignado', 'Diego:texto', 'Favio:estado', 'Diego:creado']);
+  assert.equal((await avisos(diego)).notificaciones[0].actividad.tipo, 'descripcion');
   assert.deepEqual(actividad.find((a) => a.tipo === 'texto').datos, { de: 'Facturación', a: 'Facturación electrónica' });
 
   // Arrastrar a Hecho también queda; el tablero general ve todo, el más nuevo primero.
@@ -584,31 +593,41 @@ test('el historial anota quién cambió qué y avisa al responsable y a quien lo
   assert.equal((await favio.data('POST', '/notificaciones/leidas', {})).no_leidas, 0);
   assert.deepEqual(await data('GET', '/notificaciones'), { notificaciones: [], no_leidas: 0 });
 
-  // Al borrarlo queda en el historial con su título, y se avisa.
+  // Al borrarlo queda en el historial con su título. Lo borró quien lo creó: nadie recibe aviso.
   await diego.data('DELETE', `/${pendiente.id}`);
   assert.deepEqual([(await data('GET', '/actividad')).actividad[0].tipo, (await data('GET', '/actividad')).actividad[0].texto_pendiente],
     ['borrado', 'Facturación electrónica']);
-  assert.equal((await avisos(junior)).notificaciones[0].actividad.tipo, 'borrado');
+  assert.ok(!(await avisos(junior)).notificaciones.some((n) => n.actividad.tipo === 'borrado'));
+  // Si lo borra otro, se le avisa a quien lo creó.
+  const { pendiente: otro } = await diego.data('POST', '', { texto: 'Otro de Diego' });
+  await junior.data('DELETE', `/${otro.id}`);
+  assert.equal((await avisos(diego)).notificaciones[0].actividad.tipo, 'borrado');
 });
 
-test('chat por pendiente: avisa a los que participan y a los @mencionados; cada quien borra solo lo suyo', async (t) => {
+test('chat por pendiente: avisa solo a los @mencionados; cada quien borra solo lo suyo', async (t) => {
   const { call, entrarComo, data } = await startServer(t);
   const diego = await entrarComo('Diego');
   const favio = await entrarComo('Favio');
   const junior = await entrarComo('Junior');
   const { pendiente } = await diego.data('POST', '', { texto: 'Revisar túnel', perfil_id: favio.perfil.id });
 
-  const primero = await favio.call('POST', `/${pendiente.id}/comentarios`, { texto: '  Ya lo vi, falta el certificado  ' });
+  // Un mensaje sin mención no avisa a nadie, ni a quien creó el pendiente ni a quien lo tiene.
+  await junior.call('POST', `/${pendiente.id}/comentarios`, { texto: 'Hola' });
+  assert.equal((await diego.data('GET', '/notificaciones')).no_leidas, 0);
+  assert.equal((await favio.data('GET', '/notificaciones')).notificaciones.length, 1);
+  await junior.data('DELETE', `/comentarios/${(await diego.data('GET', `/${pendiente.id}/comentarios`)).comentarios[0].id}`);
+
+  const primero = await favio.call('POST', `/${pendiente.id}/comentarios`, { texto: '  @Diego ya lo vi, falta el certificado  ' });
   assert.equal(primero.status, 201);
   const { comentario } = await primero.json();
-  assert.deepEqual([comentario.autor, comentario.texto, comentario.perfil_id], ['Favio', 'Ya lo vi, falta el certificado', favio.perfil.id]);
+  assert.deepEqual([comentario.autor, comentario.texto, comentario.perfil_id], ['Favio', '@Diego ya lo vi, falta el certificado', favio.perfil.id]);
   assert.equal((await diego.data('GET', '/notificaciones')).notificaciones[0].actividad.tipo, 'comentario');
   assert.equal((await junior.data('GET', '/notificaciones')).no_leidas, 0);
 
   // Una palabra que solo empieza con el nombre no es una mención.
   await diego.call('POST', `/${pendiente.id}/comentarios`, { texto: 'Esto es para los @juniors del equipo' });
   assert.equal((await junior.data('GET', '/notificaciones')).no_leidas, 0);
-  assert.equal((await favio.data('GET', '/notificaciones')).notificaciones[0].actividad.datos.menciones, undefined);
+  assert.equal((await favio.data('GET', '/notificaciones')).notificaciones.length, 1);
 
   await diego.call('POST', `/${pendiente.id}/comentarios`, { texto: '@junior ¿lo puedes revisar?, @Favio.' });
   const deJunior = await junior.data('GET', '/notificaciones');
@@ -691,7 +710,7 @@ test('archivos: se adjuntan al pendiente o a un mensaje, se sirven con contrase�
   const { dataDir, base, entrarComo } = await startServer(t);
   const diego = await entrarComo('Diego');
   const favio = await entrarComo('Favio');
-  const { pendiente } = await diego.data('POST', '', { texto: 'Contrato', perfil_id: favio.perfil.id });
+  const { pendiente } = await favio.data('POST', '', { texto: 'Contrato', perfil_id: favio.perfil.id });
   const subir = (quien, contenido, nombre, para = '') => fetch(`${base}/api/pendientes/${pendiente.id}/archivos${para}`, {
     method: 'POST',
     headers: { ...quien.headers, 'X-Nombre-Archivo': encodeURIComponent(nombre) },
@@ -701,7 +720,7 @@ test('archivos: se adjuntan al pendiente o a un mensaje, se sirven con contrase�
   const enDisco = (id) => existsSync(path.join(dataDir, 'archivos', id));
   const PDF = Buffer.from('%PDF-1.4\n%prueba\n');
 
-  // Adjunto al pendiente: queda en el historial y avisa al responsable.
+  // Adjunto al pendiente: queda en el historial y avisa a quien lo creó.
   const subido = await subir(diego, PDF, '../Contrato firmado.pdf');
   assert.equal(subido.status, 201);
   const { archivo: contrato } = await subido.json();
@@ -730,7 +749,7 @@ test('archivos: se adjuntan al pendiente o a un mensaje, se sirven con contrase�
   assert.deepEqual([comentario.texto, comentario.archivos.map((a) => a.nombre)], ['', ['plano.pdf']]);
   assert.equal((await favio.call('POST', `/${pendiente.id}/comentarios`, { archivos: [plano.id] })).status, 422);
   assert.deepEqual((await diego.data('GET', `/${pendiente.id}/comentarios`)).comentarios[0].archivos.map((a) => a.id), [plano.id]);
-  assert.deepEqual((await diego.data('GET', '/notificaciones')).notificaciones[0].actividad.datos.adjuntos, ['plano.pdf']);
+  assert.deepEqual((await diego.data('GET', `/${pendiente.id}/actividad`)).actividad[0].datos.adjuntos, ['plano.pdf']);
   assert.equal((await diego.data('GET')).pendientes[0].num_archivos, 3);
 
   // Cada quien quita lo suyo; lo de un mensaje se va con el mensaje, y todo se va con el pendiente.
@@ -798,6 +817,12 @@ test('valida etiquetas, ajustes de IA y textos para la IA', () => {
   assert.throws(() => parseAjustesIA({ claves: { openai: 'con espacio' } }), { message: 'clave_invalida' });
   assert.throws(() => parseAjustesIA({ modelos: { openai: '' } }), { message: 'modelo_invalido' });
   assert.throws(() => parseAjustesIA({ instrucciones: 'x'.repeat(2001) }), { message: 'instrucciones_invalidas' });
+  assert.deepEqual(parseAjustesIA({ tipo_automatico: false }), { tipo_automatico: false });
+  assert.throws(() => parseAjustesIA({ tipo_automatico: 'no' }), { message: 'tipo_automatico_invalido' });
+  assert.deepEqual(parsePedidoModelos({ proveedor: 'gemini', clave: ' AIza-1 ' }), { proveedor: 'gemini', clave: 'AIza-1' });
+  assert.deepEqual(parsePedidoModelos({ proveedor: 'openrouter' }), { proveedor: 'openrouter', clave: null });
+  assert.throws(() => parsePedidoModelos({ proveedor: 'otro' }), { message: 'proveedor_invalido' });
+  assert.throws(() => parsePedidoModelos({ proveedor: 'openai', clave: 'con espacio' }), { message: 'clave_invalida' });
 
   assert.deepEqual(parseSugerencia({ texto: ' hola ' }), { texto: 'hola', proyecto_id: null });
   assert.throws(() => parseSugerencia({ texto: ' ' }), { message: 'texto_ia_invalido' });
@@ -880,8 +905,8 @@ test('IA: las claves nunca salen del servidor y se configuran por proveedor', as
   assert.deepEqual([sinClave.lista, vacio.tiene_clave, vacio.modelo], [false, false, vacio.modelo_por_defecto]);
   assert.equal((await call('POST', '/ia/sugerir', { texto: 'algo' })).status, 422);
   assert.equal((await (await call('POST', '/ia/sugerir', { texto: 'algo' })).json()).error, 'ia_sin_clave');
-  assert.equal((await call('GET', '/ia/modelos?proveedor=openai')).status, 422);
-  assert.equal((await call('GET', '/ia/modelos?proveedor=otro')).status, 422);
+  assert.equal((await (await call('POST', '/ia/modelos', { proveedor: 'openai' })).json()).error, 'ia_sin_clave');
+  assert.equal((await call('POST', '/ia/modelos', { proveedor: 'otro' })).status, 422);
 });
 
 test('IA: arma el pedido de cada proveedor y pasa los nombres que contesta a ids', async (t) => {
@@ -942,8 +967,127 @@ test('IA: arma el pedido de cada proveedor y pasa los nombres que contesta a ids
     }
   }
 
+  // Los modelos se listan con la clave guardada o con la que se está escribiendo, que no se guarda.
   await data('PUT', '/ia', { proveedor: 'gemini' });
-  assert.deepEqual((await data('GET', '/ia/modelos?proveedor=gemini')).modelos, [{ id: 'gemini-3.5-flash-lite', nombre: 'Gemini 3.5 Flash-Lite' }]);
+  const geminiFlash = [{ id: 'gemini-3.5-flash-lite', nombre: 'Gemini 3.5 Flash-Lite' }];
+  assert.deepEqual((await data('POST', '/ia/modelos', { proveedor: 'gemini' })).modelos, geminiFlash);
+  assert.equal(proveedor.pedidos.at(-1).headers['x-goog-api-key'], 'AIza-falsa-1');
+  assert.deepEqual((await data('POST', '/ia/modelos', { proveedor: 'gemini', clave: 'AIza-recien-escrita' })).modelos, geminiFlash);
+  assert.equal(proveedor.pedidos.at(-1).headers['x-goog-api-key'], 'AIza-recien-escrita');
+  assert.ok(!JSON.stringify(await data('GET', '/ia')).includes('recien'));
+  assert.equal((await data('GET', '/ia')).ia.proveedores.find((p) => p.id === 'gemini').clave_final, 'sa-1');
+});
+
+test('mencionar con @ en la descripción avisa una vez a quien se menciona', async (t) => {
+  const { entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const junior = await entrarComo('Junior');
+  const favio = await entrarComo('Favio');
+  const mencion = (perfil) => ({ type: 'mencion', props: { id: perfil.id, nombre: perfil.nombre } });
+  const documento = (...contenido) => JSON.stringify([{ type: 'paragraph', content: contenido }]);
+  const { pendiente } = await diego.data('POST', '', { texto: 'Revisar planos' });
+
+  const { pendiente: conMencion } = await diego.data('PATCH', `/${pendiente.id}`, {
+    descripcion: documento({ type: 'text', text: 'Mira esto ', styles: {} }, mencion(junior.perfil)),
+  });
+  assert.equal(conMencion.resumen, 'Mira esto @Junior');
+  const avisos = async (quien) => (await quien.data('GET', '/notificaciones')).notificaciones.map((n) => n.actividad);
+  const [aviso] = await avisos(junior);
+  assert.deepEqual([aviso.tipo, aviso.autor, aviso.datos], ['descripcion', 'Diego', { menciones: [junior.perfil.id] }]);
+  assert.equal((await avisos(favio)).length, 0);
+
+  // Seguir editando no vuelve a avisar a Junior; mencionar a Favio le avisa solo a él. Mencionarse a uno mismo no avisa.
+  await diego.data('PATCH', `/${pendiente.id}`, { descripcion: documento({ type: 'text', text: 'Mira esto bien ', styles: {} }, mencion(junior.perfil)) });
+  await diego.data('PATCH', `/${pendiente.id}`, {
+    descripcion: documento(mencion(junior.perfil), { type: 'text', text: ' y ', styles: {} }, mencion(favio.perfil), mencion(diego.perfil)),
+  });
+  assert.equal((await avisos(junior)).length, 1);
+  assert.deepEqual((await avisos(favio)).map((a) => a.datos), [{ menciones: [favio.perfil.id] }]);
+  assert.equal((await avisos(diego)).length, 0);
+
+  // Al crear con la descripción ya escrita, también avisa.
+  await diego.data('POST', '', { texto: 'Otro', descripcion: documento(mencion(junior.perfil)) });
+  assert.equal((await avisos(junior)).length, 2);
+});
+
+test('IA: elige el tipo de lo que se crea sin tipo, sin pisar lo que se pone a mano', async (t) => {
+  const espera = (ms) => new Promise((listo) => setTimeout(listo, ms));
+  // Contesta según el título: "falla" es un fix, "manual" tarda, "reunión" no es software y "roto" da error.
+  const proveedor = await startProveedor(t, async (ruta, cuerpo) => {
+    const texto = cuerpo.input;
+    if (texto.includes('roto')) return { status: 500, json: { error: { message: 'caído' } } };
+    if (texto.includes('manual')) await espera(300);
+    const tipo = texto.includes('falla') ? 'fix' : texto.includes('manual') ? 'feat' : null;
+    return { json: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: JSON.stringify({ tipo }) }] }] } };
+  });
+  const { base, call, data, entrarComo } = await startServer(t, { basesIA: { gemini: proveedor.url } });
+  const diego = await entrarComo('Diego');
+  const crear = async (cuerpo, headers = {}) => {
+    const res = await fetch(`${base}/api/pendientes`, {
+      method: 'POST',
+      headers: { ...diego.headers, 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(cuerpo),
+    });
+    assert.equal(res.status, 201);
+    return res.json();
+  };
+  const tipoDe = async (id) => (await diego.data('GET', '')).pendientes.find((p) => p.id === id).tipo;
+
+  // Sin IA configurada, no se intenta.
+  assert.equal((await crear({ texto: 'Antes de configurar' })).eligiendo_tipo, false);
+  await data('PUT', '/ia', { proveedor: 'gemini', claves: { gemini: 'AIza-falsa-tipo' } });
+  const { organizacion } = await diego.data('POST', '/organizaciones', { nombre: 'Mayugo', compartida: true });
+  const { proyecto } = await diego.data('POST', '/proyectos', { nombre: 'Web', organizacion_id: organizacion.id });
+
+  // La pestaña que lo creó también se entera cuando la IA termina (el aviso de la creación no le llega a ella).
+  let creado;
+  const eventos = await leerEventos(base, diego.headers, {
+    cliente: 'pestana-1',
+    esperaMs: 3000,
+    alConectar: async () => {
+      creado = await crear({ texto: 'El login falla en Safari', proyecto_id: proyecto.id }, { 'X-Cliente': 'pestana-1' });
+    },
+  });
+  assert.equal(creado.eligiendo_tipo, true);
+  assert.equal(creado.pendiente.tipo, null);
+  assert.deepEqual(eventos, [{ tipo: 'pendientes', pendiente_id: creado.pendiente.id }]);
+  assert.equal(await tipoDe(creado.pendiente.id), 'fix');
+  const { actividad } = await diego.data('GET', `/${creado.pendiente.id}/actividad`);
+  const anotado = actividad.find((a) => a.tipo === 'tipo');
+  assert.deepEqual([anotado.autor, anotado.perfil_id, anotado.datos], ['IA', null, { de: null, a: 'fix', ia: true }]);
+
+  // Solo viajan el título y el proyecto, con un esquema que solo pide el tipo.
+  const pedido = proveedor.pedidos.at(-1);
+  assert.equal(pedido.cuerpo.input, 'Pendiente: El login falla en Safari\nProyecto: Mayugo › Web');
+  assert.match(pedido.cuerpo.system_instruction, /commits convencionales/);
+  assert.deepEqual(pedido.cuerpo.response_format.schema.required, ['tipo']);
+
+  // Con tipo, o con null a propósito ("sin tipo"), no se le pregunta a la IA.
+  const pedidos = proveedor.pedidos.length;
+  assert.equal((await crear({ texto: 'Ya trae tipo', tipo: 'docs' })).eligiendo_tipo, false);
+  assert.equal((await crear({ texto: 'Sin tipo a propósito', tipo: null })).eligiendo_tipo, false);
+  await espera(100);
+  assert.equal(proveedor.pedidos.length, pedidos);
+
+  // Si alguien le pone el tipo mientras la IA piensa, se queda el suyo.
+  const manual = await crear({ texto: 'Cambio manual' });
+  await diego.data('PATCH', `/${manual.pendiente.id}`, { tipo: 'chore' });
+  await espera(500);
+  assert.equal(await tipoDe(manual.pendiente.id), 'chore');
+
+  // Si la IA no sabe (null) o falla, queda sin tipo y sin nada en el historial.
+  const reunion = await crear({ texto: 'Reunión con el cliente' });
+  const roto = await crear({ texto: 'Esto está roto' });
+  await espera(200);
+  for (const { pendiente } of [reunion, roto]) {
+    assert.equal(await tipoDe(pendiente.id), null);
+    assert.ok(!(await diego.data('GET', `/${pendiente.id}/actividad`)).actividad.some((a) => a.tipo === 'tipo'));
+  }
+
+  // El equipo lo puede apagar.
+  assert.equal((await data('PUT', '/ia', { tipo_automatico: false })).ia.tipo_automatico, false);
+  assert.equal((await crear({ texto: 'El otro login falla' })).eligiendo_tipo, false);
+  assert.equal((await call('GET', '/ia')).status, 200);
 });
 
 test('IA: los errores del proveedor se traducen y no repiten la clave', async (t) => {

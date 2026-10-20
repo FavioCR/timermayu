@@ -14,6 +14,7 @@ import {
 } from "react"
 import {
   Building2,
+  Check,
   ChevronDown,
   ChevronRight,
   ChevronsDownUp,
@@ -52,6 +53,7 @@ import { toast } from "sonner"
 
 import { ActividadSheet } from "@/components/actividad-sheet"
 import { DetallePendiente } from "@/components/detalle-pendiente"
+import { EstadoConexion } from "@/components/estado-conexion"
 import { porNombre, PuntoEtiqueta } from "@/components/etiquetas-selector"
 import { HechosAnteriores } from "@/components/hechos-anteriores"
 import { IlustracionColumna } from "@/components/ilustraciones"
@@ -69,7 +71,7 @@ import { PerfilAvatar } from "@/components/perfil-avatar"
 import type { CambiosPerfil } from "@/components/perfiles-dialog"
 import { ProyectoCombobox } from "@/components/proyecto-combobox"
 import { ProyectosDialog } from "@/components/proyectos-dialog"
-import { InsigniaTipo } from "@/components/tipo-select"
+import { InsigniaEligiendo, InsigniaTipo } from "@/components/tipo-select"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -83,6 +85,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -95,12 +98,14 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "@/components/ui/input-group"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Toaster } from "@/components/ui/sonner"
 import {
   api,
   crearCredenciales,
   esNoAutorizado,
+  esSinConexion,
   mensajeDeError,
   partesDe,
   type CambiosPendiente,
@@ -113,7 +118,7 @@ import {
 } from "@/lib/api"
 import { enlaceWhatsApp } from "@/lib/actividad"
 import { agrupar, conOrganizacion, conProyecto, involucrados, organizacionDe, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
-import { conectarCambios, useCambios } from "@/lib/cambios"
+import { conectarCambios, revisarConexion, useCambios } from "@/lib/cambios"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 import { separarTipo, TIPOS, tipoDe } from "@/lib/tipos"
 
@@ -234,6 +239,111 @@ function Filtro({ activo, className, children, ...props }: { activo: boolean } &
   )
 }
 
+// Filtro por tipo de trabajo o etiqueta: un botón como el de las organizaciones que abre la lista encima del tablero.
+function FiltroMarca({
+  valor,
+  onCambiar,
+  tipos,
+  etiquetas,
+  porTipo,
+  porEtiqueta,
+  total,
+}: {
+  valor: string | null
+  onCambiar: (valor: string | null) => void
+  tipos: (typeof TIPOS)[number][]
+  etiquetas: Etiqueta[]
+  porTipo: Map<string | null, number>
+  porEtiqueta: Map<string, number>
+  total: number
+}) {
+  const [abierto, setAbierto] = useState(false)
+  const tipo = valor?.startsWith(PREFIJO_TIPO) ? tipos.find((t) => `${PREFIJO_TIPO}${t.id}` === valor) : undefined
+  const etiqueta = valor && !tipo ? etiquetas.find((e) => e.id === valor) : undefined
+
+  function elegir(nuevo: string | null) {
+    onCambiar(nuevo === valor ? null : nuevo)
+    setAbierto(false)
+  }
+
+  const marca = (activo: boolean) => <Check className={cn("size-4", activo ? "opacity-100" : "opacity-0")} />
+
+  return (
+    <Popover open={abierto} onOpenChange={setAbierto}>
+      <PopoverTrigger asChild>
+        <Filtro activo={valor !== null} aria-pressed={undefined} aria-label="Filtrar por tipo o etiqueta">
+          {tipo ? (
+            <>
+              <span className="size-2.5 rounded-full" style={{ backgroundColor: tipo.color }} />
+              <span className="font-mono">{tipo.id}</span>
+              <Contador valor={porTipo.get(tipo.id) ?? 0} />
+            </>
+          ) : etiqueta ? (
+            <>
+              <PuntoEtiqueta etiqueta={etiqueta} className="size-2.5" /> {etiqueta.nombre}
+              <Contador valor={porEtiqueta.get(etiqueta.id) ?? 0} />
+            </>
+          ) : (
+            <>
+              <Tag /> Todos los tipos y etiquetas
+            </>
+          )}
+          <ChevronDown className="text-muted-foreground" />
+        </Filtro>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 p-0">
+        <Command>
+          <CommandInput placeholder="Buscar tipo o etiqueta…" />
+          <CommandList className="max-h-80">
+            <CommandEmpty>Nada con ese nombre.</CommandEmpty>
+            <CommandGroup>
+              <CommandItem value="todos los tipos y etiquetas" onSelect={() => elegir(null)}>
+                {marca(valor === null)}
+                <Tag className="text-muted-foreground" /> Todos
+                <span className="ml-auto text-xs tabular-nums text-muted-foreground">{total}</span>
+              </CommandItem>
+            </CommandGroup>
+            {tipos.length > 0 && (
+              <>
+                <CommandSeparator />
+                <CommandGroup heading="Tipo">
+                  {tipos.map((t) => {
+                    const clave = `${PREFIJO_TIPO}${t.id}`
+                    return (
+                      <CommandItem key={clave} value={clave} keywords={[t.id, t.descripcion]} onSelect={() => elegir(clave)}>
+                        {marca(valor === clave)}
+                        <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: t.color }} />
+                        <span className="font-mono">{t.id}</span>
+                        <span className="truncate text-muted-foreground">{t.descripcion}</span>
+                        <span className="ml-auto text-xs tabular-nums text-muted-foreground">{porTipo.get(t.id) ?? 0}</span>
+                      </CommandItem>
+                    )
+                  })}
+                </CommandGroup>
+              </>
+            )}
+            {etiquetas.length > 0 && (
+              <>
+                <CommandSeparator />
+                <CommandGroup heading="Etiqueta">
+                  {etiquetas.map((e) => (
+                    <CommandItem key={e.id} value={e.id} keywords={[e.nombre]} onSelect={() => elegir(e.id)}>
+                      {marca(valor === e.id)}
+                      <PuntoEtiqueta etiqueta={e} />
+                      <span className="truncate">{e.nombre}</span>
+                      <span className="ml-auto text-xs tabular-nums text-muted-foreground">{porEtiqueta.get(e.id) ?? 0}</span>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              </>
+            )}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
 export function Tablero({
   credenciales,
   onCredenciales,
@@ -247,6 +357,8 @@ export function Tablero({
   const [perfiles, setPerfiles] = useState<Perfil[]>([])
   const [catalogo, setCatalogo] = useState<Catalogo>({ organizaciones: [], proyectos: [] })
   const [etiquetas, setEtiquetas] = useState<Etiqueta[]>([])
+  // Pendientes recién creados sin tipo a los que la IA les está eligiendo uno.
+  const [eligiendoTipo, setEligiendoTipo] = useState<ReadonlySet<string>>(() => new Set())
   // Desde cuándo un hecho es "de la última semana"; se pone al día con cada recarga.
   const [ahora, setAhora] = useState(() => Date.now())
   const [usuario, setUsuario] = useState<Usuario | null>(null)
@@ -346,7 +458,9 @@ export function Tablero({
       setAbierto((actual) => (actual && pendientes.some((p) => p.id === actual) ? actual : null))
       setError("")
     } catch (err) {
-      fallar(err)
+      // Sin conexión no se muestra el error: lo dicen el indicador y su aviso, y al reconectar se vuelve a cargar.
+      if (esSinConexion(err)) revisarConexion()
+      else fallar(err)
     } finally {
       setCargando(false)
     }
@@ -371,7 +485,24 @@ export function Tablero({
     }, 250)
   }, [recargar])
   useEffect(() => () => window.clearTimeout(recargaPendiente.current), [])
-  useCambios((cambio) => cambio.tipo !== "ia" && recargarPronto())
+  useCambios((cambio) => {
+    // El aviso de un pendiente que esperaba su tipo es la respuesta de la IA: el tipo llega con la recarga.
+    if (cambio.pendiente_id && eligiendoTipo.has(cambio.pendiente_id)) dejarDeElegir(cambio.pendiente_id, 1500)
+    if (cambio.tipo !== "ia") recargarPronto()
+  })
+
+  const dejarDeElegir = useCallback((id: string, enMs: number) => {
+    window.setTimeout(
+      () =>
+        setEligiendoTipo((actuales) => {
+          if (!actuales.has(id)) return actuales
+          const nuevos = new Set(actuales)
+          nuevos.delete(id)
+          return nuevos
+        }),
+      enMs
+    )
+  }, [])
 
   const perfilesPorId = useMemo(() => new Map(perfiles.map((perfil) => [perfil.id, perfil])), [perfiles])
   const proyectosPorId = useMemo(() => new Map(catalogo.proyectos.map((proyecto) => [proyecto.id, proyecto])), [catalogo])
@@ -544,11 +675,17 @@ export function Tablero({
         texto: separado.texto,
         proyecto_id: proyectoDelFormulario,
         estado: destino,
-        tipo: separado.tipo ?? tipoDelFiltro,
+        // Sin tipo, la IA lo elige si está configurada.
+        tipo: separado.tipo ?? tipoDelFiltro ?? undefined,
         perfil_id: responsableDelFormulario === NADIE ? null : responsableDelFormulario,
         etiquetas: marcaFiltrada && !marcaFiltrada.startsWith(PREFIJO_TIPO) ? [marcaFiltrada] : [],
       })
       setTarjetas((actuales) => [aTarjeta(nuevo), ...actuales])
+      if (nuevo.eligiendoTipo) {
+        setEligiendoTipo((actuales) => new Set(actuales).add(nuevo.id))
+        // Por si el aviso no llega (sin conexión en tiempo real): la IA tarda como mucho un minuto.
+        dejarDeElegir(nuevo.id, 65_000)
+      }
       setTexto("")
       setDestino("pendiente")
       setError("")
@@ -824,6 +961,7 @@ export function Tablero({
               {abiertos} {abiertos === 1 ? "abierto" : "abiertos"}
             </span>
           )}
+          <EstadoConexion />
           {/* En pantallas angostas solo quedan la campana y la cuenta; lo demás va en el menú de la cuenta. */}
           <div className="ml-auto flex items-center gap-1">
             <div className="hidden items-center gap-1 md:flex">
@@ -1099,28 +1237,16 @@ export function Tablero({
               </div>
             )}
             {(tiposEnUso.length > 0 || etiquetas.length > 0) && (
-              <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por tipo o etiqueta">
-                <Filtro activo={marcaFiltrada === null} onClick={() => setFiltroMarca(null)}>
-                  <Tag /> Todo
-                </Filtro>
-                {tiposEnUso.map((tipo) => {
-                  const clave = `${PREFIJO_TIPO}${tipo.id}`
-                  return (
-                    <Filtro key={clave} activo={marcaFiltrada === clave} title={tipo.descripcion} onClick={() => setFiltroMarca(marcaFiltrada === clave ? null : clave)}>
-                      <span className="size-2.5 rounded-full" style={{ backgroundColor: tipo.color }} />
-                      <span className="font-mono">{tipo.id}</span> <Contador valor={porTipo.get(tipo.id) ?? 0} />
-                    </Filtro>
-                  )
-                })}
-                {etiquetasOrdenadas.map((etiqueta) => (
-                  <Filtro
-                    key={etiqueta.id}
-                    activo={marcaFiltrada === etiqueta.id}
-                    onClick={() => setFiltroMarca(marcaFiltrada === etiqueta.id ? null : etiqueta.id)}
-                  >
-                    <PuntoEtiqueta etiqueta={etiqueta} className="size-2.5" /> {etiqueta.nombre} <Contador valor={porEtiqueta.get(etiqueta.id) ?? 0} />
-                  </Filtro>
-                ))}
+              <div className="flex">
+                <FiltroMarca
+                  valor={marcaFiltrada}
+                  onCambiar={setFiltroMarca}
+                  tipos={tiposEnUso}
+                  etiquetas={etiquetasOrdenadas}
+                  porTipo={porTipo}
+                  porEtiqueta={porEtiqueta}
+                  total={paraMarcas.length}
+                />
               </div>
             )}
           </div>
@@ -1244,7 +1370,11 @@ export function Tablero({
                                   onKeyDown={detener}
                                   onClick={() => !arrastrando.current && setAbierto(tarjeta.id)}
                                 >
-                                  {tarjeta.tipo && <InsigniaTipo tipo={tarjeta.tipo} className="mr-1.5 align-[1px]" />}
+                                  {tarjeta.tipo ? (
+                                    <InsigniaTipo tipo={tarjeta.tipo} className="mr-1.5 align-[1px]" />
+                                  ) : (
+                                    eligiendoTipo.has(tarjeta.id) && <InsigniaEligiendo className="mr-1.5 align-[1px]" />
+                                  )}
                                   {tarjeta.texto}
                                 </button>
                                 {tarjeta.column === "hecho" && (

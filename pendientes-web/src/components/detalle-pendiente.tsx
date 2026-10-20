@@ -404,6 +404,8 @@ function Contenido({
                 subirArchivo={subirArchivo}
                 resolverUrl={resolverUrl}
                 abrirArchivo={abrirDeDescripcion}
+                perfiles={perfiles}
+                yo={usuario?.perfil_id ?? null}
               />
             </Suspense>
           ) : (

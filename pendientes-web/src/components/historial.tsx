@@ -10,6 +10,7 @@ import {
   Paperclip,
   Pencil,
   Plus,
+  Sparkles,
   Tag,
   Trash2,
   UserRound,
@@ -67,7 +68,8 @@ export function ListaActividad({
           <h3 className="mb-3 text-xs font-medium text-muted-foreground">{nombre}</h3>
           <ol className="ml-3 flex flex-col gap-4 border-l pl-6">
             {lista.map((actividad) => {
-              const Icono = actividad.tipo === "estado" && actividad.datos?.a === "hecho" ? CircleCheck : ICONOS[actividad.tipo]
+              const Icono =
+                actividad.tipo === "estado" && actividad.datos?.a === "hecho" ? CircleCheck : actividad.datos?.ia ? Sparkles : ICONOS[actividad.tipo]
               const color = actividad.tipo === "estado" ? COLUMNAS.find((columna) => columna.id === actividad.datos?.a)?.color : undefined
               const abrible = onAbrir && actividad.pendiente_id && abribles?.has(actividad.pendiente_id)
               const detalle = detalleDe(actividad)
