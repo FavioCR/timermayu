@@ -219,6 +219,11 @@ const STORAGE_KEY = "pendientes.auth"
 const MENSAJES: Record<string, string> = {
   authentication_required: "Usuario o contraseña incorrectos.",
   sin_conexion: "No se pudo conectar con el servidor.",
+  // Respuestas del servidor web (nginx), no de la API.
+  http_502: "El servidor no está disponible en este momento. Vuelve a intentar en un momento.",
+  http_503: "El servidor no está disponible en este momento. Vuelve a intentar en un momento.",
+  http_504: "El servidor tardó demasiado en responder. Vuelve a intentar.",
+  ia_trabajo_perdido: "Se perdió la respuesta de la IA (el servidor se reinició). Vuelve a intentar.",
   texto_invalido: "Escribe el pendiente (máximo 500 caracteres).",
   proyecto_invalido: "Ese proyecto ya no existe o no lo puedes ver. Recarga la página.",
   not_found: "Eso ya no existe. Recarga la página.",
@@ -371,6 +376,29 @@ export async function pedir<T>(credenciales: string, method: string, ruta = "", 
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new ApiError(data.error ?? `http_${response.status}`, response.status, data.detalle)
   return data as T
+}
+
+const PREGUNTAR_CADA_MS = 1500
+// El servidor corta a la IA mucho antes; esto es por si el trabajo quedara colgado.
+const MAX_ESPERA_TRABAJO_MS = 3 * 60_000
+
+// Pregunta por un trabajo de la IA hasta que termina. Un corte de red suelto no lo hace fallar; si el servidor se
+// reinició, el trabajo ya no existe.
+async function esperarTrabajo<T>(credenciales: string, ruta: string): Promise<T> {
+  const hasta = Date.now() + MAX_ESPERA_TRABAJO_MS
+  let cortes = 0
+  while (Date.now() < hasta) {
+    await new Promise((listo) => setTimeout(listo, PREGUNTAR_CADA_MS))
+    try {
+      const data = await pedir<T | { estado: "pensando" }>(credenciales, "GET", ruta)
+      cortes = 0
+      if (!(data as { estado?: string }).estado) return data as T
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) throw new ApiError("ia_trabajo_perdido", 404)
+      if (!esSinConexion(err) || ++cortes > 3) throw err
+    }
+  }
+  throw new ApiError("ia_tardo", 504)
 }
 
 async function subirImagen(credenciales: string, pendienteId: string, archivo: File) {
@@ -547,12 +575,16 @@ export const api = {
       pedir<{ modelos: ModeloIA[] }>(credenciales, "POST", "/ia/modelos", { proveedor, clave }).then((data) => data.modelos),
     // Propone pendientes a partir de un texto; no crea nada.
     // Las imágenes van en base64 dentro del JSON (sin el prefijo "data:…;base64,").
-    sugerir: (credenciales: string, texto: string, proyectoId: string | null, imagenes: string[] = []) =>
-      pedir<{ sugerencias: Sugerencia[] }>(credenciales, "POST", "/ia/sugerir", {
+    // La IA puede tardar más de lo que el servidor web espera una respuesta (12 s): queda trabajando allá y se le
+    // pregunta cada poco hasta que termina.
+    sugerir: async (credenciales: string, texto: string, proyectoId: string | null, imagenes: string[] = []) => {
+      const { trabajo } = await pedir<{ trabajo: string }>(credenciales, "POST", "/ia/sugerir?trabajo", {
         texto,
         proyecto_id: proyectoId,
         imagenes: imagenes.map((datos) => ({ datos })),
-      }).then((data) => data.sugerencias),
+      })
+      return (await esperarTrabajo<{ sugerencias: Sugerencia[] }>(credenciales, `/ia/sugerir/${trabajo}`)).sugerencias
+    },
     // Un borrador (o lo que ya está escrito) bien redactado para el chat o la descripción de un pendiente.
     redactar: (credenciales: string, pendienteId: string, donde: "chat" | "descripcion", texto: string, opciones: OpcionesRedaccion = {}) =>
       pedir<{ redaccion: { texto: string } }>(credenciales, "POST", "/ia/redactar", {

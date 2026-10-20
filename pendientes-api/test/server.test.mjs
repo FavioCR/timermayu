@@ -1296,6 +1296,49 @@ test('cada persona elige su fuente y su tamaño de letra, y le llegan con /yo', 
   assert.equal((await diego.call('GET', '/yo/apariencia')).status, 405);
 });
 
+test('IA: «Crear con IA» queda trabajando en el servidor y se pregunta hasta que termina', async (t) => {
+  let soltar;
+  const proveedor = await startProveedor(t, async (ruta, cuerpo) => {
+    // Tarda lo que diga la prueba: más de lo que nginx espera una respuesta.
+    await new Promise((listo) => { soltar = listo; });
+    if (cuerpo.input.includes('falla')) return { status: 400, json: { error: { code: 400, message: 'API key not valid.', status: 'INVALID_ARGUMENT', details: [{ reason: 'API_KEY_INVALID' }] } } };
+    const propuesta = { pendientes: [{ titulo: 'Revisar el login', detalle: null, responsable: 'Diego', proyecto: null, etiquetas: [], tipo: 'fix', estado: 'pendiente', imagenes: [] }] };
+    return { json: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: JSON.stringify(propuesta) }] }] } };
+  });
+  const { data, entrarComo } = await startServer(t, { basesIA: { gemini: proveedor.url } });
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  await data('PUT', '/ia', { proveedor: 'gemini', claves: { gemini: 'AIza-falsa-trabajo' } });
+  const esperarPedido = async (cuantos) => { while (proveedor.pedidos.length < cuantos) await new Promise((listo) => setTimeout(listo, 10)); };
+
+  const empezado = await diego.call('POST', '/ia/sugerir?trabajo', { texto: 'el login no deja entrar' });
+  assert.equal(empezado.status, 202);
+  const { trabajo } = await empezado.json();
+  await esperarPedido(1);
+  assert.deepEqual(await diego.data('GET', `/ia/sugerir/${trabajo}`), { estado: 'pensando' });
+  // Es de quien lo pidió.
+  assert.equal((await favio.call('GET', `/ia/sugerir/${trabajo}`)).status, 404);
+  soltar();
+  let listo;
+  do listo = await diego.data('GET', `/ia/sugerir/${trabajo}`); while (listo.estado === 'pensando');
+  assert.deepEqual(listo.sugerencias.map((s) => [s.texto, s.perfil_id, s.tipo]), [['Revisar el login', diego.perfil.id, 'fix']]);
+  // El resultado se entrega una vez.
+  assert.equal((await diego.call('GET', `/ia/sugerir/${trabajo}`)).status, 404);
+
+  // Si la IA falla, la pregunta siguiente trae el error con lo que dijo el proveedor.
+  const { trabajo: otro } = await diego.data('POST', '/ia/sugerir?trabajo', { texto: 'esto falla' });
+  await esperarPedido(2);
+  soltar();
+  let fallo;
+  do fallo = await diego.call('GET', `/ia/sugerir/${otro}`); while ((await fallo.clone().json()).estado === 'pensando');
+  assert.equal(fallo.status, 422);
+  assert.equal((await fallo.json()).error, 'ia_clave_invalida');
+
+  // Lo que se valida antes (sin texto) responde al momento, como siempre.
+  assert.equal((await diego.call('POST', '/ia/sugerir?trabajo', { texto: '' })).status, 422);
+  assert.equal((await diego.call('GET', '/ia/sugerir/00000000-0000-0000-0000-000000000000')).status, 404);
+});
+
 test('IA: reescribe lo seleccionado, con una indicación si viene', async (t) => {
   const pedidos = [];
   const proveedor = await startProveedor(t, async (ruta, cuerpo) => {

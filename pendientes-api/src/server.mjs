@@ -138,11 +138,14 @@ const IMAGENES_DE_NOTA_PATH = new RegExp(`^/api/pendientes/notas/${UUID}/imagene
 const IMAGEN_DE_NOTA_PATH = new RegExp(`^/api/pendientes/notas/imagenes/${UUID}$`);
 const RECURSO_PATH = new RegExp(`^/api/pendientes/notas/recursos/${UUID}$`);
 const PARTES_DE_RECURSO_PATH = new RegExp(`^/api/pendientes/notas/recursos/${UUID}/partes$`);
+const IA_TRABAJO_PATH = new RegExp(`^/api/pendientes/ia/sugerir/${UUID}$`);
+// Lo que se guarda el resultado de un trabajo de la IA que nadie vino a buscar.
+const VIDA_TRABAJO_IA_MS = 10 * 60_000;
 const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
   ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, ETIQUETA_PATH,
-  CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH];
+  CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH];
 const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en, hecho_en,
   (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios,
   (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0) AS num_archivos,
@@ -421,6 +424,13 @@ function safeEqual(left, right) {
 
 function httpError(status, message) {
   return Object.assign(new Error(message), { statusCode: status });
+}
+
+// La respuesta para un error: su código (y lo que dijo el proveedor de IA, si viene); lo inesperado no se detalla.
+function comoError(error) {
+  const status = error.statusCode || (error instanceof SyntaxError ? 400 : 500);
+  if (status === 500) console.error(error);
+  return { status, cuerpo: { error: status === 500 ? 'internal_error' : error.message, ...(error.detalle && { detalle: error.detalle }) } };
 }
 
 async function readBody(req, limit) {
@@ -1981,6 +1991,21 @@ export function createApp(options = {}) {
   // para no correr scrypt en cada petición. Si la contraseña cambia, el hash ya no coincide.
   const verificadas = new Map();
   const fallos = new Map();
+  // "Crear con IA" puede tardar más de lo que nginx espera una respuesta (12 s): con ?trabajo, POST /ia/sugerir deja a
+  // la IA trabajando y devuelve el id; GET /ia/sugerir/<id> dice si terminó y entrega el resultado una sola vez.
+  const trabajosIA = new Map();
+
+  function empezarTrabajo(yo, tarea) {
+    for (const [id, trabajo] of trabajosIA) if (Date.now() - trabajo.desde > VIDA_TRABAJO_IA_MS) trabajosIA.delete(id);
+    const id = randomUUID();
+    const trabajo = { yo, desde: Date.now(), respuesta: null };
+    trabajosIA.set(id, trabajo);
+    tarea().then(
+      (cuerpo) => { trabajo.respuesta = { status: 200, cuerpo }; },
+      (error) => { trabajo.respuesta = comoError(error); }
+    );
+    return id;
+  }
   // Las notas son privadas: solo las tiene quien entra con su propio perfil y su correo está en NOTAS_CORREOS (separados
   // por comas). Para cualquier otro, incluida la cuenta del equipo, no existen.
   const correosNotas = new Set(String(options.notasCorreos ?? process.env.NOTAS_CORREOS ?? '').split(',')
@@ -2230,7 +2255,19 @@ export function createApp(options = {}) {
         return enviar(200, 'redaccion', puedeNotas(usuario) ? await repo.redactarEnNota(yo, pedido, basesIA) : null);
       }
       if (url.pathname === IA_SUGERIR_PATH && req.method === 'POST') {
-        return json(res, 200, { sugerencias: await repo.sugerirPendientes(yo, parseSugerencia(await readJson(req, MAX_BODY_IA_BYTES)), basesIA) });
+        const pedido = parseSugerencia(await readJson(req, MAX_BODY_IA_BYTES));
+        const sugerir = async () => ({ sugerencias: await repo.sugerirPendientes(yo, pedido, basesIA) });
+        // Sin ?trabajo, como antes (una pestaña abierta desde antes de este cambio).
+        if (!url.searchParams.has('trabajo')) return json(res, 200, await sugerir());
+        return json(res, 202, { trabajo: empezarTrabajo(yo, sugerir) });
+      }
+      const trabajoId = url.pathname.match(IA_TRABAJO_PATH)?.[1];
+      if (trabajoId && req.method === 'GET') {
+        const trabajo = trabajosIA.get(trabajoId);
+        if (!trabajo || trabajo.yo !== yo) return json(res, 404, { error: 'not_found' });
+        if (!trabajo.respuesta) return json(res, 200, { estado: 'pensando' });
+        trabajosIA.delete(trabajoId);
+        return json(res, trabajo.respuesta.status, trabajo.respuesta.cuerpo);
       }
 
       if (url.pathname === ETIQUETAS_PATH && req.method === 'GET') return json(res, 200, { etiquetas: repo.listarEtiquetas() });
@@ -2362,9 +2399,8 @@ export function createApp(options = {}) {
 
       return json(res, 405, { error: 'method_not_allowed' });
     } catch (error) {
-      const status = error.statusCode || (error instanceof SyntaxError ? 400 : 500);
-      if (status === 500) console.error(error);
-      return json(res, status, { error: status === 500 ? 'internal_error' : error.message, ...(error.detalle && { detalle: error.detalle }) });
+      const { status, cuerpo } = comoError(error);
+      return json(res, status, cuerpo);
     }
   });
   // Las conexiones de los cambios en tiempo real no terminan solas: se cierran para que close() no espere por ellas.
