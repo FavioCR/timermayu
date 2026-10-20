@@ -1,11 +1,15 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { ArrowLeft, Check, Loader2, RotateCw, Sparkles } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { mensajeDeError } from "@/lib/api"
+import { ApiError, mensajeDeError } from "@/lib/api"
 
 type Paso = { fase: "escribir" } | { fase: "pensando" } | { fase: "listo"; texto: string; reemplaza: boolean }
+
+// Pasado este tiempo sin respuesta, se avisa que el modelo tarda.
+const LENTO_MS = 5000
+const ELEGIR_OTRA = "Para /ia puedes elegir un modelo más rápido en «Inteligencia artificial»."
 
 // La vista previa muestra la **negrita** como quedará (las listas ya se leen bien como texto).
 function conNegritas(texto: string) {
@@ -27,18 +31,27 @@ export function RedactarIA({
   const [pedido, setPedido] = useState("")
   const [paso, setPaso] = useState<Paso>({ fase: "escribir" })
   const [error, setError] = useState("")
+  const [lento, setLento] = useState(false)
   const mejora = !pedido.trim() && previo.trim() !== ""
+
+  useEffect(() => {
+    if (paso.fase !== "pensando") return
+    const espera = window.setTimeout(() => setLento(true), LENTO_MS)
+    return () => window.clearTimeout(espera)
+  }, [paso.fase])
 
   async function pedir() {
     const reemplaza = !pedido.trim()
     const texto = reemplaza ? previo.trim() : pedido.trim()
     if (!texto || paso.fase === "pensando") return
     setError("")
+    setLento(false)
     setPaso({ fase: "pensando" })
     try {
       setPaso({ fase: "listo", texto: await redactar(texto), reemplaza })
     } catch (err) {
-      setError(mensajeDeError(err))
+      const tardo = err instanceof ApiError && err.code === "ia_tardo"
+      setError(tardo ? `La IA tardó demasiado en responder. Vuelve a intentar. ${ELEGIR_OTRA}` : mensajeDeError(err))
       setPaso({ fase: "escribir" })
     }
   }
@@ -94,7 +107,7 @@ export function RedactarIA({
           <p className="m-0 flex items-center gap-1.5 text-xs text-muted-foreground">
             {paso.fase === "pensando" ? (
               <>
-                <Loader2 className="size-3.5 animate-spin" /> Redactando…
+                <Loader2 className="size-3.5 shrink-0 animate-spin" /> {lento ? `Redactando… este modelo tarda. ${ELEGIR_OTRA}` : "Redactando…"}
               </>
             ) : mejora ? (
               "Enter mejora lo que ya escribiste · Esc cierra"

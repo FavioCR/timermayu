@@ -1225,7 +1225,11 @@ test('IA: redacta mejor un borrador del chat o de la descripción, con el pendie
 });
 
 test('IA: "Escribir con IA" puede usar otro proveedor y modelo que el resto', async (t) => {
-  const proveedor = await startProveedor(t, (ruta) => {
+  const proveedor = await startProveedor(t, (ruta, cuerpo) => {
+    // Como OpenAI: los modelos que no razonan no aceptan cuánto razonar.
+    if (ruta === '/v1/responses' && cuerpo.model === 'gpt-4.1-mini' && cuerpo.reasoning) {
+      return { status: 400, json: { error: { message: "Unsupported parameter: 'reasoning.effort' is not supported with this model.", type: 'invalid_request_error', param: 'reasoning.effort', code: 'unsupported_parameter' } } };
+    }
     if (ruta === '/v1/responses') return { json: { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ texto: 'Desde OpenAI' }) }] }] } };
     const texto = JSON.stringify({ texto: 'Desde Gemini', pendientes: [] });
     return { json: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: texto }] }] } };
@@ -1241,6 +1245,16 @@ test('IA: "Escribir con IA" puede usar otro proveedor y modelo que el resto', as
   assert.equal((await redactar()).redaccion.texto, 'Desde OpenAI');
   const alOpenAI = proveedor.pedidos.at(-1);
   assert.deepEqual([alOpenAI.ruta, alOpenAI.cuerpo.model, alOpenAI.headers.authorization], ['/v1/responses', 'gpt-6-chispa', 'Bearer sk-falsa-redactar']);
+  // Redactar no necesita razonar mucho: así contesta antes.
+  assert.deepEqual(alOpenAI.cuerpo.reasoning, { effort: 'low' });
+
+  // Un modelo que no razona: se vuelve a pedir sin eso, y la próxima vez ya no se intenta.
+  await data('PUT', '/ia', { redaccion: { proveedor: 'openai', modelo: 'gpt-4.1-mini' } });
+  const antes = proveedor.pedidos.length;
+  assert.equal((await redactar()).redaccion.texto, 'Desde OpenAI');
+  assert.equal((await redactar()).redaccion.texto, 'Desde OpenAI');
+  assert.deepEqual(proveedor.pedidos.slice(antes).map((p) => Boolean(p.cuerpo.reasoning)), [true, false, false]);
+  await data('PUT', '/ia', { redaccion: { proveedor: 'openai', modelo: 'gpt-6-chispa' } });
 
   // Lo demás sigue con la del equipo; cambiarla no toca la de redactar.
   await data('PUT', '/ia', { proveedor: 'gemini', claves: { gemini: 'AIza-falsa-equipo' }, modelos: { openai: 'gpt-6-astra' } });

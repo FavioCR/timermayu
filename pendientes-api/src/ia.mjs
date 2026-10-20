@@ -156,12 +156,14 @@ const PEDIDOS = {
         .join('');
     },
   }),
-  openai: ({ modelo, clave, sistema, texto, esquema, nombre, imagenes = [] }) => ({
+  openai: ({ modelo, clave, sistema, texto, esquema, nombre, imagenes = [], esfuerzo }) => ({
     ruta: '/v1/responses',
     headers: { Authorization: `Bearer ${clave}` },
     body: {
       model: modelo,
       instructions: sistema,
+      // Cuánto razona (solo los modelos que razonan lo aceptan).
+      ...(esfuerzo && { reasoning: { effort: esfuerzo } }),
       input: imagenes.length
         ? [{
           role: 'user',
@@ -218,6 +220,8 @@ const PEDIDOS = {
 function errorDelProveedor(status, data, clave) {
   const mensaje = limpiar(data?.error?.message ?? data?.error ?? '', clave);
   const crudo = JSON.stringify(data?.error ?? '');
+  // OpenAI: el modelo no razona (gpt-4.1, gpt-4o…) y no acepta que se le diga cuánto.
+  if (data?.error?.param === 'reasoning.effort') return iaError(400, 'ia_sin_esfuerzo', mensaje);
   if (status === 401 || status === 403 || /API_KEY_INVALID|invalid_api_key/.test(crudo)) return iaError(422, 'ia_clave_invalida');
   if (status === 402) return iaError(422, 'ia_sin_saldo', mensaje);
   if (/image|vision/i.test(mensaje) && /support|not allowed|no endpoints|unsupported|invalid/i.test(mensaje)) return iaError(422, 'ia_sin_imagenes', mensaje);
@@ -289,8 +293,8 @@ export function leerRedaccion(texto, maximo) {
   return redactado.trim().slice(0, maximo);
 }
 
-async function consultar({ proveedor, modelo, clave, base, sistema, texto, esquema, nombre, imagenes, espera }) {
-  const pedido = PEDIDOS[proveedor]({ modelo, clave, sistema, texto, esquema, nombre, imagenes });
+async function consultar({ proveedor, modelo, clave, base, sistema, texto, esquema, nombre, imagenes, espera, esfuerzo }) {
+  const pedido = PEDIDOS[proveedor]({ modelo, clave, sistema, texto, esquema, nombre, imagenes, esfuerzo });
   const data = await pedir(`${base}${pedido.ruta}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...pedido.headers },
@@ -308,9 +312,21 @@ export async function pedirTipo(opciones) {
   return leerTipo(await consultar({ ...opciones, esquema: ESQUEMA_TIPO, nombre: 'tipo' }));
 }
 
-// El borrador bien redactado, hasta `maximo` caracteres.
+// Los modelos de OpenAI que no aceptan cuánto razonar: se recuerdan para no volver a preguntar.
+const sinEsfuerzo = new Set();
+
+// El borrador bien redactado, hasta `maximo` caracteres. A OpenAI se le pide razonar poco: redactar no lo necesita y
+// gpt-6-luna contesta en la mitad del tiempo (si el modelo no razona, se vuelve a pedir sin eso).
 export async function pedirRedaccion({ maximo, ...opciones }) {
-  return leerRedaccion(await consultar({ ...opciones, esquema: ESQUEMA_REDACCION, nombre: 'redaccion', espera: ESPERA_REDACCION_MS }), maximo);
+  const pedido = { ...opciones, esquema: ESQUEMA_REDACCION, nombre: 'redaccion', espera: ESPERA_REDACCION_MS };
+  const conEsfuerzo = opciones.proveedor === 'openai' && !sinEsfuerzo.has(opciones.modelo);
+  try {
+    return leerRedaccion(await consultar(conEsfuerzo ? { ...pedido, esfuerzo: 'low' } : pedido), maximo);
+  } catch (error) {
+    if (!conEsfuerzo || error.message !== 'ia_sin_esfuerzo') throw error;
+    sinEsfuerzo.add(opciones.modelo);
+    return leerRedaccion(await consultar(pedido), maximo);
+  }
 }
 
 // Los modelos de texto de cada proveedor, para elegir en la configuración. OpenRouter no pide clave para listarlos
