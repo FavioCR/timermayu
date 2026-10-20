@@ -1,5 +1,7 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
+import {
+  closeSync, copyFileSync, createReadStream, existsSync, linkSync, mkdirSync, openSync, readFileSync, readSync, renameSync, unlinkSync,
+} from 'node:fs';
 import { appendFile, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
@@ -139,13 +141,17 @@ const IMAGEN_DE_NOTA_PATH = new RegExp(`^/api/pendientes/notas/imagenes/${UUID}$
 const RECURSO_PATH = new RegExp(`^/api/pendientes/notas/recursos/${UUID}$`);
 const PARTES_DE_RECURSO_PATH = new RegExp(`^/api/pendientes/notas/recursos/${UUID}/partes$`);
 const IA_TRABAJO_PATH = new RegExp(`^/api/pendientes/ia/sugerir/${UUID}$`);
+const RECURSO_REPETIDO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/recursos/repetido$`);
 // Lo que se guarda el resultado de un trabajo de la IA que nadie vino a buscar.
 const VIDA_TRABAJO_IA_MS = 10 * 60_000;
 const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
   ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, ETIQUETA_PATH,
-  CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH];
+  CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH, RECURSO_REPETIDO_PATH];
+// Las filas que apuntan a un archivo guardado por su contenido (DATA_DIR/blobs/<sha256>).
+const TABLAS_CON_BLOB = ['imagenes', 'archivos', 'nota_imagenes', 'recursos'];
+const SHA256 = /^[0-9a-f]{64}$/;
 const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en, hecho_en,
   (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios,
   (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0) AS num_archivos,
@@ -402,6 +408,11 @@ const MIGRACIONES = [
       );
       CREATE INDEX nota_imagenes_perfil ON nota_imagenes (perfil_id, nota_id);
     `);
+  },
+  // Cada archivo se guarda una sola vez por su contenido: cada fila dice cuál es el suyo (sha256 en hexadecimal). Lo
+  // ya guardado (un archivo por fila) lo pasa openDb, que conoce la carpeta de datos.
+  (db) => {
+    db.exec(TABLAS_CON_BLOB.map((tabla) => `ALTER TABLE ${tabla} ADD COLUMN sha256 TEXT; CREATE INDEX ${tabla}_sha256 ON ${tabla} (sha256);`).join('\n'));
   },
 ];
 
@@ -903,9 +914,8 @@ function importarJson(db, dataDir) {
 }
 
 export function openDb(dataDir) {
-  mkdirSync(path.join(dataDir, 'imagenes'), { recursive: true });
-  mkdirSync(path.join(dataDir, 'archivos'), { recursive: true });
-  mkdirSync(path.join(dataDir, 'notas', 'imagenes'), { recursive: true });
+  mkdirSync(path.join(dataDir, 'blobs'), { recursive: true });
+  // Ahí quedan los recursos mientras se suben por partes.
   mkdirSync(path.join(dataDir, 'notas', 'recursos'), { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'pendientes.db'));
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
@@ -917,13 +927,56 @@ export function openDb(dataDir) {
     });
   }
   importarJson(db, dataDir);
+  adoptarArchivosSueltos(db, dataDir);
   return db;
+}
+
+function hashDeArchivoSync(ruta) {
+  const hash = createHash('sha256');
+  const trozo = Buffer.alloc(1024 * 1024);
+  const fd = openSync(ruta, 'r');
+  try {
+    for (let leidos; (leidos = readSync(fd, trozo, 0, trozo.length, null)) > 0;) hash.update(trozo.subarray(0, leidos));
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
+async function hashDeArchivo(ruta) {
+  const hash = createHash('sha256');
+  for await (const trozo of createReadStream(ruta)) hash.update(trozo);
+  return hash.digest('hex');
+}
+
+// Lo guardado antes de v10, un archivo por fila (imagenes/<id>, archivos/<id>, notas/imagenes/<id> y
+// notas/recursos/<id>), pasa a guardarse por contenido. Primero el blob (un enlace, sin copiar), después la fila y al
+// final se borra el viejo: si se corta a la mitad, la próxima vez sigue donde quedó.
+function adoptarArchivosSueltos(db, dataDir) {
+  const carpetas = { imagenes: ['imagenes'], archivos: ['archivos'], nota_imagenes: ['notas', 'imagenes'], recursos: ['notas', 'recursos'] };
+  for (const [tabla, carpeta] of Object.entries(carpetas)) {
+    const filas = db.prepare(`SELECT id FROM ${tabla} WHERE sha256 IS NULL${tabla === 'recursos' ? ' AND subido = tamano' : ''}`).all();
+    for (const { id } of filas) {
+      const viejo = path.join(dataDir, ...carpeta, id);
+      if (!existsSync(viejo)) continue;
+      const hash = hashDeArchivoSync(viejo);
+      const blob = path.join(dataDir, 'blobs', hash);
+      if (!existsSync(blob)) {
+        try {
+          linkSync(viejo, blob);
+        } catch {
+          copyFileSync(viejo, blob);
+        }
+      }
+      db.prepare(`UPDATE ${tabla} SET sha256 = ? WHERE id = ?`).run(hash, id);
+      unlinkSync(viejo);
+    }
+  }
 }
 
 // Todos los métodos que tocan pendientes, proyectos u organizaciones reciben `yo`: el id del perfil
 // que pregunta, o null si entró con la cuenta del equipo. Lo que no puede ver se trata como inexistente.
 function createRepo(db, dataDir, graciaImagenesMs) {
-  const archivoDeImagen = (id) => path.join(dataDir, 'imagenes', id);
   const pendiente = (yo, id) => pendienteFila(db.prepare(`SELECT ${COLUMNAS_PENDIENTE} FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo));
   const etiqueta = (id) => fila(db.prepare('SELECT id, nombre, color, creado_en FROM etiquetas WHERE id = ?').get(id));
   const perfil = (id) => perfilFila(db.prepare(`${SELECT_PERFIL} WHERE id = ?`).get(id));
@@ -1054,23 +1107,85 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     }
   }
 
-  async function borrarArchivos(ids, ruta = archivoDeImagen) {
-    await Promise.all(ids.map((id) => unlink(ruta(id)).catch((error) => {
-      if (error.code !== 'ENOENT') throw error;
-    })));
+  const borrarSiEsta = (ruta) => unlink(ruta).catch((error) => {
+    if (error.code !== 'ENOENT') throw error;
+  });
+
+  // Cada archivo se guarda una sola vez por su contenido, en DATA_DIR/blobs/<sha256>, y las filas de imagenes,
+  // archivos, nota_imagenes y recursos apuntan al suyo: subir lo mismo otra vez no ocupa más lugar, y del disco se
+  // borra recién cuando ya ninguna fila lo usa. Quién puede leer qué lo siguen diciendo las filas, nunca el contenido.
+  const blob = (hash) => path.join(dataDir, 'blobs', hash);
+  const usaBlob = db.prepare(`${TABLAS_CON_BLOB.map((tabla) => `SELECT 1 FROM ${tabla} WHERE sha256 = :hash`).join(' UNION ALL ')} LIMIT 1`);
+  // Guardar y soltar el mismo contenido van en fila: si no, un blob se podría borrar justo cuando otra subida lo reusa.
+  const candados = new Map();
+  function conCandado(hash, trabajo) {
+    const turno = (candados.get(hash) ?? Promise.resolve()).then(trabajo);
+    const cola = turno.catch(() => {});
+    candados.set(hash, cola);
+    cola.then(() => candados.get(hash) === cola && candados.delete(hash));
+    return turno;
   }
 
-  const archivoSubido = (id) => path.join(dataDir, 'archivos', id);
-  const borrarSubidos = (ids) => borrarArchivos(ids, archivoSubido);
+  // Ya fuera de las filas que lo usaban: el contenido que nadie más usa se borra del disco.
+  async function soltar(hashes) {
+    for (const hash of new Set(hashes.filter(Boolean))) {
+      await conCandado(hash, async () => {
+        if (!usaBlob.get({ hash })) await borrarSiEsta(blob(hash));
+      });
+    }
+  }
+
+  // Guarda el contenido (si no estaba) y, sin soltar el candado, la fila que lo usa: `registrar(hash)`.
+  async function guardarContenido(contenido, registrar) {
+    const hash = createHash('sha256').update(contenido).digest('hex');
+    return conCandado(hash, async () => {
+      if (!existsSync(blob(hash))) {
+        const temporal = `${blob(hash)}.${randomUUID()}.tmp`;
+        await writeFile(temporal, contenido, { mode: 0o600 });
+        await rename(temporal, blob(hash));
+      }
+      return registrarSinPerder(hash, registrar);
+    });
+  }
+
+  // Lo mismo con un archivo ya escrito (un recurso que terminó de subirse): pasa a ser el blob, o se borra si ya estaba.
+  async function adoptarArchivo(ruta, registrar) {
+    const hash = await hashDeArchivo(ruta);
+    return conCandado(hash, async () => {
+      if (existsSync(blob(hash))) await unlink(ruta);
+      else await rename(ruta, blob(hash));
+      return registrarSinPerder(hash, registrar);
+    });
+  }
+
+  // Si la fila no se pudo guardar, el blob recién puesto no queda suelto.
+  async function registrarSinPerder(hash, registrar) {
+    try {
+      return registrar(hash);
+    } catch (error) {
+      if (!usaBlob.get({ hash })) await borrarSiEsta(blob(hash));
+      throw error;
+    }
+  }
+
+  async function leerContenido(hash) {
+    try {
+      return hash ? await readFile(blob(hash)) : null;
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
   const esAutor = (quien, row) => (row.perfil_id ? row.perfil_id === quien.perfil_id : quien.perfil_id === null && row.autor === quien.nombre);
 
   // Archivos de un mensaje que nunca se envió.
   async function limpiarBorradores() {
     const limite = new Date(Date.now() - VIDA_BORRADOR_MS).toISOString();
-    const viejos = db.prepare('SELECT id FROM archivos WHERE borrador = 1 AND creado_en < ?').all(limite).map((row) => row.id);
+    const viejos = db.prepare('SELECT id, sha256 FROM archivos WHERE borrador = 1 AND creado_en < ?').all(limite);
     const borrar = db.prepare('DELETE FROM archivos WHERE id = ?');
-    for (const id of viejos) borrar.run(id);
-    await borrarSubidos(viejos);
+    for (const { id } of viejos) borrar.run(id);
+    await soltar(viejos.map((row) => row.sha256));
   }
 
   // Lo nuevo va arriba de todo; lo que recibe un responsable, al final de la cola de su columna (el orden es uno
@@ -1083,36 +1198,36 @@ function createRepo(db, dataDir, graciaImagenesMs) {
   async function limpiarImagenes(pendienteId) {
     const limite = new Date(Date.now() - graciaImagenesMs).toISOString();
     const enUso = db.prepare('SELECT 1 FROM pendientes WHERE instr(descripcion, ?) > 0 LIMIT 1');
-    const sobrantes = db.prepare('SELECT id FROM imagenes WHERE pendiente_id = ? AND creado_en <= ?').all(pendienteId, limite)
-      .map((row) => row.id)
-      .filter((id) => !enUso.get(`${API_PATH}/imagenes/${id}`));
+    const sobrantes = db.prepare('SELECT id, sha256 FROM imagenes WHERE pendiente_id = ? AND creado_en <= ?').all(pendienteId, limite)
+      .filter(({ id }) => !enUso.get(`${API_PATH}/imagenes/${id}`));
     const borrar = db.prepare('DELETE FROM imagenes WHERE id = ?');
-    for (const id of sobrantes) borrar.run(id);
-    await borrarArchivos(sobrantes);
+    for (const { id } of sobrantes) borrar.run(id);
+    await soltar(sobrantes.map((row) => row.sha256));
   }
 
   // Notas: todo se busca con el dueño (`yo`); lo de otro perfil se trata como inexistente.
-  const imagenDeNota = (id) => path.join(dataDir, 'notas', 'imagenes', id);
-  const archivoDeRecurso = (id) => path.join(dataDir, 'notas', 'recursos', id);
+  // Mientras se sube por partes, un recurso vive en notas/recursos/<id>.parcial; completo, pasa a ser un blob.
+  const parcialDeRecurso = (id) => path.join(dataDir, 'notas', 'recursos', `${id}.parcial`);
   const curso = (yo, id) => fila(db.prepare(`${SELECT_CURSO} WHERE id = ? AND perfil_id = ?`).get(id, yo));
   const nota = (yo, id) => fila(db.prepare(`${SELECT_NOTA} WHERE n.id = ? AND c.perfil_id = ?`).get(id, yo));
   const recurso = (yo, id) => fila(db.prepare(`${SELECT_RECURSO} WHERE r.id = ? AND c.perfil_id = ?`).get(id, yo));
   // Los recursos que se están subiendo: dos partes del mismo a la vez se pisarían.
   const recibiendo = new Set();
 
-  async function borrarRecursos(ids) {
-    await borrarArchivos(ids, archivoDeRecurso);
-    await borrarArchivos(ids, (id) => `${archivoDeRecurso(id)}.parcial`);
+  // Ya borradas sus filas: lo que quedó a medias y el contenido que nadie más usa.
+  async function soltarRecursos(filas) {
+    await Promise.all(filas.map(({ id }) => borrarSiEsta(parcialDeRecurso(id))));
+    await soltar(filas.map((row) => row.sha256));
   }
 
   // Lo que quedó a medias (se cerró la página mientras subía) se borra pasado un día.
   async function limpiarRecursosAMedias() {
     const limite = new Date(Date.now() - VIDA_BORRADOR_MS).toISOString();
-    const viejos = db.prepare('SELECT id FROM recursos WHERE subido < tamano AND creado_en < ?').all(limite)
-      .map((row) => row.id).filter((id) => !recibiendo.has(id));
+    const viejos = db.prepare('SELECT id, sha256 FROM recursos WHERE subido < tamano AND creado_en < ?').all(limite)
+      .filter(({ id }) => !recibiendo.has(id));
     const borrar = db.prepare('DELETE FROM recursos WHERE id = ?');
-    for (const id of viejos) borrar.run(id);
-    await borrarRecursos(viejos);
+    for (const { id } of viejos) borrar.run(id);
+    await soltarRecursos(viejos);
   }
 
   // Imágenes de una nota (o de notas que ya no existen) que pasaron el tiempo de gracia y no aparecen en ninguna nota
@@ -1120,13 +1235,12 @@ function createRepo(db, dataDir, graciaImagenesMs) {
   async function limpiarImagenesDeNotas(yo, notaId = null) {
     const limite = new Date(Date.now() - graciaImagenesMs).toISOString();
     const enUso = db.prepare('SELECT 1 FROM notas n JOIN cursos c ON c.id = n.curso_id WHERE c.perfil_id = ? AND instr(n.contenido, ?) > 0 LIMIT 1');
-    const sobrantes = db.prepare(`SELECT id FROM nota_imagenes WHERE perfil_id = ? AND creado_en <= ?
+    const sobrantes = db.prepare(`SELECT id, sha256 FROM nota_imagenes WHERE perfil_id = ? AND creado_en <= ?
         AND (nota_id = ? OR nota_id IS NULL OR nota_id NOT IN (SELECT id FROM notas))`).all(yo, limite, notaId)
-      .map((row) => row.id)
-      .filter((id) => !enUso.get(yo, `${NOTAS_PATH}/imagenes/${id}`));
+      .filter(({ id }) => !enUso.get(yo, `${NOTAS_PATH}/imagenes/${id}`));
     const borrar = db.prepare('DELETE FROM nota_imagenes WHERE id = ?');
-    for (const id of sobrantes) borrar.run(id);
-    await borrarArchivos(sobrantes, imagenDeNota);
+    for (const { id } of sobrantes) borrar.run(id);
+    await soltar(sobrantes.map((row) => row.sha256));
   }
 
   // La IA que redacta: la de "Escribir con IA" si el equipo eligió otra, o la del equipo.
@@ -1423,8 +1537,8 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     async borrarPendiente(quien, id) {
       const actual = pendiente(quien.perfil_id, id);
       if (!actual) return false;
-      const imagenes = db.prepare('SELECT id FROM imagenes WHERE pendiente_id = ?').all(id).map((row) => row.id);
-      const subidos = db.prepare('SELECT id FROM archivos WHERE pendiente_id = ?').all(id).map((row) => row.id);
+      const contenidos = db.prepare('SELECT sha256 FROM imagenes WHERE pendiente_id = ? UNION ALL SELECT sha256 FROM archivos WHERE pendiente_id = ?')
+        .all(id, id).map((row) => row.sha256);
       transaction(db, () => {
         // Su historial queda con la privacidad que tenía al borrarse (ON DELETE SET NULL suelta el pendiente_id).
         db.prepare('UPDATE actividad SET privado_de = ? WHERE pendiente_id = ?').run(privadoDe(id), id);
@@ -1432,8 +1546,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         // ON DELETE CASCADE quita sus filas de imagenes, archivos y comentarios; lo guardado en disco se borra aparte.
         db.prepare('DELETE FROM pendientes WHERE id = ?').run(id);
       });
-      await borrarArchivos(imagenes);
-      await borrarSubidos(subidos);
+      await soltar(contenidos);
       return true;
     },
 
@@ -1534,12 +1647,12 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (!comentario) return false;
       const esSuyo = comentario.perfil_id ? comentario.perfil_id === quien.perfil_id : quien.perfil_id === null && comentario.autor === quien.nombre;
       if (!esSuyo) throw httpError(403, 'solo_el_autor');
-      const subidos = db.prepare('SELECT id FROM archivos WHERE comentario_id = ?').all(id).map((row) => row.id);
+      const contenidos = db.prepare('SELECT sha256 FROM archivos WHERE comentario_id = ?').all(id).map((row) => row.sha256);
       transaction(db, () => {
         db.prepare("DELETE FROM actividad WHERE tipo = 'comentario' AND json_extract(datos, '$.comentario_id') = ?").run(id);
         db.prepare('DELETE FROM comentarios WHERE id = ?').run(id);
       });
-      await borrarSubidos(subidos);
+      await soltar(contenidos);
       return true;
     },
 
@@ -1550,16 +1663,13 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (contenido.length === 0) throw httpError(422, 'archivo_vacio');
       await limpiarBorradores();
       const id = randomUUID();
-      const destino = archivoSubido(id);
-      await writeFile(`${destino}.tmp`, contenido, { mode: 0o600 });
-      await rename(`${destino}.tmp`, destino);
-      return transaction(db, () => {
-        db.prepare(`INSERT INTO archivos (id, pendiente_id, comentario_id, borrador, nombre, tipo, tamano, perfil_id, autor, creado_en)
-          VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`)
-          .run(id, pendienteId, paraChat ? 1 : 0, nombre, tipoDeArchivo(contenido), contenido.length, quien.perfil_id, quien.nombre, new Date().toISOString());
+      return guardarContenido(contenido, (hash) => transaction(db, () => {
+        db.prepare(`INSERT INTO archivos (id, pendiente_id, comentario_id, borrador, nombre, tipo, tamano, perfil_id, autor, creado_en, sha256)
+          VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(id, pendienteId, paraChat ? 1 : 0, nombre, tipoDeArchivo(contenido), contenido.length, quien.perfil_id, quien.nombre, new Date().toISOString(), hash);
         if (!paraChat) registrar(quien, item, 'archivo', { archivo_id: id, nombre }, [item.creado_por]);
         return fila(db.prepare(`${SELECT_ARCHIVO} WHERE id = ?`).get(id));
-      });
+      }));
     },
 
     // Los del pendiente y los de su chat (no los borradores).
@@ -1569,20 +1679,15 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     },
 
     async leerArchivo(yo, id) {
-      const archivo = fila(db.prepare(`SELECT a.nombre, a.tipo FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
-        WHERE a.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo));
-      if (!archivo) return null;
-      try {
-        return { ...archivo, contenido: await readFile(archivoSubido(id)) };
-      } catch (error) {
-        if (error.code === 'ENOENT') return null;
-        throw error;
-      }
+      const archivo = db.prepare(`SELECT a.nombre, a.tipo, a.sha256 FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
+        WHERE a.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo);
+      const contenido = archivo && await leerContenido(archivo.sha256);
+      return contenido && { nombre: archivo.nombre, tipo: archivo.tipo, contenido };
     },
 
     // Cada quien quita lo que subió. Lo de un mensaje se va al borrar el mensaje.
     async borrarArchivo(quien, id) {
-      const archivo = fila(db.prepare(`SELECT a.perfil_id, a.autor, a.comentario_id FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
+      const archivo = fila(db.prepare(`SELECT a.perfil_id, a.autor, a.comentario_id, a.sha256 FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
         WHERE a.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, quien.perfil_id));
       if (!archivo) return false;
       if (archivo.comentario_id) throw httpError(409, 'archivo_de_mensaje');
@@ -1591,7 +1696,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         db.prepare("DELETE FROM actividad WHERE tipo = 'archivo' AND json_extract(datos, '$.archivo_id') = ?").run(id);
         db.prepare('DELETE FROM archivos WHERE id = ?').run(id);
       });
-      await borrarSubidos([id]);
+      await soltar([archivo.sha256]);
       return true;
     },
 
@@ -1647,24 +1752,16 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       const tipo = tipoDeImagen(contenido);
       if (!tipo) throw httpError(415, 'imagen_invalida');
       const id = randomUUID();
-      const destino = archivoDeImagen(id);
-      await writeFile(`${destino}.tmp`, contenido, { mode: 0o600 });
-      await rename(`${destino}.tmp`, destino);
-      db.prepare('INSERT INTO imagenes (id, pendiente_id, tipo, tamano, creado_en) VALUES (?, ?, ?, ?, ?)')
-        .run(id, pendienteId, tipo, contenido.length, new Date().toISOString());
+      await guardarContenido(contenido, (hash) => db.prepare('INSERT INTO imagenes (id, pendiente_id, tipo, tamano, creado_en, sha256) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, pendienteId, tipo, contenido.length, new Date().toISOString(), hash));
       return { id, url: `${API_PATH}/imagenes/${id}` };
     },
 
     async leerImagen(yo, id) {
-      const imagen = fila(db.prepare(`SELECT i.tipo FROM imagenes i JOIN pendientes ON pendientes.id = i.pendiente_id
-        WHERE i.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo));
-      if (!imagen) return null;
-      try {
-        return { tipo: imagen.tipo, contenido: await readFile(archivoDeImagen(id)) };
-      } catch (error) {
-        if (error.code === 'ENOENT') return null;
-        throw error;
-      }
+      const imagen = db.prepare(`SELECT i.tipo, i.sha256 FROM imagenes i JOIN pendientes ON pendientes.id = i.pendiente_id
+        WHERE i.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo);
+      const contenido = imagen && await leerContenido(imagen.sha256);
+      return contenido && { tipo: imagen.tipo, contenido };
     },
 
     // Notas. El correo decide quién las tiene (ver NOTAS_CORREOS en createApp).
@@ -1696,9 +1793,9 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     // Se lleva sus notas y sus recursos.
     async borrarCurso(yo, id) {
       if (!curso(yo, id)) return false;
-      const recursos = db.prepare('SELECT id FROM recursos WHERE curso_id = ?').all(id).map((row) => row.id);
+      const recursos = db.prepare('SELECT id, sha256 FROM recursos WHERE curso_id = ?').all(id);
       db.prepare('DELETE FROM cursos WHERE id = ?').run(id);
-      await borrarRecursos(recursos);
+      await soltarRecursos(recursos);
       await limpiarImagenesDeNotas(yo);
       return true;
     },
@@ -1761,23 +1858,15 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       const tipo = tipoDeImagen(contenido);
       if (!tipo) throw httpError(415, 'imagen_invalida');
       const id = randomUUID();
-      const destino = imagenDeNota(id);
-      await writeFile(`${destino}.tmp`, contenido, { mode: 0o600 });
-      await rename(`${destino}.tmp`, destino);
-      db.prepare('INSERT INTO nota_imagenes (id, perfil_id, nota_id, tipo, tamano, creado_en) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(id, yo, notaId, tipo, contenido.length, new Date().toISOString());
+      await guardarContenido(contenido, (hash) => db.prepare('INSERT INTO nota_imagenes (id, perfil_id, nota_id, tipo, tamano, creado_en, sha256) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, yo, notaId, tipo, contenido.length, new Date().toISOString(), hash));
       return { id, url: `${NOTAS_PATH}/imagenes/${id}` };
     },
 
     async leerImagenDeNota(yo, id) {
-      const imagen = db.prepare('SELECT tipo FROM nota_imagenes WHERE id = ? AND perfil_id = ?').get(id, yo);
-      if (!imagen) return null;
-      try {
-        return { tipo: imagen.tipo, contenido: await readFile(imagenDeNota(id)) };
-      } catch (error) {
-        if (error.code === 'ENOENT') return null;
-        throw error;
-      }
+      const imagen = db.prepare('SELECT tipo, sha256 FROM nota_imagenes WHERE id = ? AND perfil_id = ?').get(id, yo);
+      const contenido = imagen && await leerContenido(imagen.sha256);
+      return contenido && { tipo: imagen.tipo, contenido };
     },
 
     // Un recurso se sube por partes y en orden: la primera lo crea con su tamaño total y cada una sigue donde quedó la
@@ -1788,12 +1877,28 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (parte.length > tamano) throw httpError(422, 'parte_invalida');
       await limpiarRecursosAMedias();
       const id = randomUUID();
-      const destino = archivoDeRecurso(id);
-      await writeFile(`${destino}.parcial`, parte, { mode: 0o600 });
-      if (parte.length === tamano) await rename(`${destino}.parcial`, destino);
-      db.prepare('INSERT INTO recursos (id, curso_id, nombre, tipo, tamano, subido, creado_en) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(id, cursoId, nombre, tipoDeArchivo(parte), tamano, parte.length, new Date().toISOString());
+      await writeFile(parcialDeRecurso(id), parte, { mode: 0o600 });
+      const insertar = (hash) => db.prepare('INSERT INTO recursos (id, curso_id, nombre, tipo, tamano, subido, creado_en, sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, cursoId, nombre, tipoDeArchivo(parte), tamano, parte.length, new Date().toISOString(), hash);
+      if (parte.length === tamano) await adoptarArchivo(parcialDeRecurso(id), insertar);
+      else insertar(null);
       return recurso(yo, id);
+    },
+
+    // Antes de subir un recurso grande, el tablero pregunta si su dueño ya tiene ese contenido (en cualquiera de sus
+    // cursos): entonces lo agrega sin mandar nada. Solo mira lo propio, para que nadie pueda averiguar qué archivos
+    // tienen otros con solo mandar un hash. null: no lo tiene (y se sube como siempre).
+    crearRecursoRepetido(yo, cursoId, { nombre, tamano, sha256 }) {
+      if (!curso(yo, cursoId)) return null;
+      return conCandado(sha256, () => {
+        const propio = db.prepare(`SELECT r.tipo FROM recursos r JOIN cursos c ON c.id = r.curso_id
+          WHERE c.perfil_id = ? AND r.sha256 = ? AND r.tamano = ? AND r.subido = r.tamano LIMIT 1`).get(yo, sha256, tamano);
+        if (!propio || !existsSync(blob(sha256))) return null;
+        const id = randomUUID();
+        db.prepare('INSERT INTO recursos (id, curso_id, nombre, tipo, tamano, subido, creado_en, sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(id, cursoId, nombre, propio.tipo, tamano, tamano, new Date().toISOString(), sha256);
+        return recurso(yo, id);
+      });
     },
 
     async seguirRecurso(yo, id, { desde, parte }) {
@@ -1802,17 +1907,18 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (recibiendo.has(id) || desde !== actual.subido || actual.subido === actual.tamano) throw httpError(409, 'parte_fuera_de_orden');
       if (parte.length === 0 || actual.subido + parte.length > actual.tamano) throw httpError(422, 'parte_invalida');
       recibiendo.add(id);
-      const destino = archivoDeRecurso(id);
       try {
-        await appendFile(`${destino}.parcial`, parte);
+        await appendFile(parcialDeRecurso(id), parte);
         // Lo que manda es lo que quedó en el disco.
-        const { size: subido } = await stat(`${destino}.parcial`);
+        const { size: subido } = await stat(parcialDeRecurso(id));
         if (subido !== actual.subido + parte.length) throw new Error(`El recurso ${id} quedó con ${subido} bytes`);
-        if (subido === actual.tamano) await rename(`${destino}.parcial`, destino);
-        db.prepare('UPDATE recursos SET subido = ? WHERE id = ?').run(subido, id);
+        const actualizar = (hash) => db.prepare('UPDATE recursos SET subido = ?, sha256 = ? WHERE id = ?').run(subido, hash, id);
+        if (subido === actual.tamano) await adoptarArchivo(parcialDeRecurso(id), actualizar);
+        else actualizar(null);
       } catch (error) {
+        const fallido = db.prepare('SELECT id, sha256 FROM recursos WHERE id = ?').get(id);
         db.prepare('DELETE FROM recursos WHERE id = ?').run(id);
-        await borrarRecursos([id]);
+        await soltarRecursos([fallido ?? { id, sha256: null }]);
         throw error;
       } finally {
         recibiendo.delete(id);
@@ -1830,9 +1936,11 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     async leerRecurso(yo, id) {
       const actual = recurso(yo, id);
       if (!actual || actual.subido < actual.tamano) return null;
+      const { sha256 } = db.prepare('SELECT sha256 FROM recursos WHERE id = ?').get(id);
+      if (!sha256) return null;
       try {
-        const { size } = await stat(archivoDeRecurso(id));
-        return { ...actual, tamano: size, ruta: archivoDeRecurso(id) };
+        const { size } = await stat(blob(sha256));
+        return { ...actual, tamano: size, ruta: blob(sha256) };
       } catch (error) {
         if (error.code === 'ENOENT') return null;
         throw error;
@@ -1841,8 +1949,9 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
     async borrarRecurso(yo, id) {
       if (!recurso(yo, id) || recibiendo.has(id)) return false;
+      const borrado = db.prepare('SELECT id, sha256 FROM recursos WHERE id = ?').get(id);
       db.prepare('DELETE FROM recursos WHERE id = ?').run(id);
-      await borrarRecursos([id]);
+      await soltarRecursos([borrado]);
       return true;
     },
 
@@ -1887,16 +1996,19 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
     // Sus pendientes quedan sin asignar (ON DELETE SET NULL) y sus organizaciones compartidas pasan al equipo.
     // Un perfil con contraseña solo se quita a sí mismo, y no mientras tenga organizaciones privadas.
-    borrarPerfil(yo, id) {
+    async borrarPerfil(yo, id) {
       const actual = perfil(id);
       if (!actual) return false;
       if (actual.tiene_contrasena && id !== yo) throw httpError(403, 'solo_el_mismo');
       if (db.prepare('SELECT 1 FROM organizaciones WHERE duenio_id = ? AND compartida = 0').get(id)) throw httpError(409, 'perfil_con_privadas');
       if (db.prepare('SELECT 1 FROM cursos WHERE perfil_id = ?').get(id)) throw httpError(409, 'perfil_con_notas');
+      // Las imágenes que le quedaron sueltas de notas ya borradas se van con él (ON DELETE CASCADE).
+      const contenidos = db.prepare('SELECT sha256 FROM nota_imagenes WHERE perfil_id = ?').all(id).map((row) => row.sha256);
       transaction(db, () => {
         db.prepare('UPDATE organizaciones SET duenio_id = NULL WHERE duenio_id = ?').run(id);
         db.prepare('DELETE FROM perfiles WHERE id = ?').run(id);
       });
+      await soltar(contenidos);
       return true;
     },
 
@@ -2139,6 +2251,14 @@ export function createApp(options = {}) {
       if (tamano > MAX_RECURSO_BYTES) throw httpError(413, 'recurso_muy_grande');
       return enviar(201, 'recurso', await repo.crearRecurso(yo, cursoDeRecurso, { nombre, tamano, parte: await readBody(req, MAX_PARTE_BYTES) }));
     }
+    const cursoDeRepetido = pathname.match(RECURSO_REPETIDO_PATH)?.[1];
+    if (cursoDeRepetido && method === 'POST') {
+      const sha256 = String(req.headers['x-sha256'] ?? '').toLowerCase();
+      const tamano = Number(req.headers['x-tamano']);
+      if (!SHA256.test(sha256) || !Number.isInteger(tamano) || tamano < 1) throw httpError(422, 'parte_invalida');
+      const nombre = nombreDeArchivo(req.headers['x-nombre-archivo']);
+      return enviar(201, 'recurso', await repo.crearRecursoRepetido(yo, cursoDeRepetido, { nombre, tamano, sha256 }));
+    }
     const recursoDeParte = pathname.match(PARTES_DE_RECURSO_PATH)?.[1];
     if (recursoDeParte && method === 'POST') {
       const desde = Number(url.searchParams.get('desde'));
@@ -2344,7 +2464,7 @@ export function createApp(options = {}) {
       if (perfilId && req.method === 'PATCH') {
         return enviar(200, 'perfil', repo.actualizarPerfil(yo, perfilId, nombreLibre(parsePerfil(await readJson(req), { partial: true }))));
       }
-      if (perfilId && req.method === 'DELETE') return listo(repo.borrarPerfil(yo, perfilId));
+      if (perfilId && req.method === 'DELETE') return listo(await repo.borrarPerfil(yo, perfilId));
       const perfilDeContrasena = url.pathname.match(CONTRASENA_PATH)?.[1];
       if (perfilDeContrasena && req.method === 'PUT') {
         return enviar(200, 'perfil', await repo.ponerContrasena(yo, perfilDeContrasena, parseContrasena(await readJson(req))));

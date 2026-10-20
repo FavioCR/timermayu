@@ -1,3 +1,5 @@
+import { createSHA256 } from "hash-wasm"
+
 import { ApiError, CLIENTE, pedir, type OpcionesRedaccion } from "@/lib/api"
 
 // Notas privadas: cursos con sus notas (como en Notion) y sus recursos (PDF y otros archivos).
@@ -50,10 +52,52 @@ function enviarParte(url: string, headers: Record<string, string>, parte: Blob, 
   })
 }
 
+// El SHA-256 del archivo, leído por partes para no tener cientos de MB en memoria. null si el navegador no puede.
+async function hashDeArchivo(archivo: File) {
+  try {
+    const hash = await createSHA256()
+    for (let desde = 0; desde < archivo.size; desde += PARTE_BYTES) {
+      hash.update(new Uint8Array(await archivo.slice(desde, desde + PARTE_BYTES).arrayBuffer()))
+    }
+    return hash.digest("hex")
+  } catch {
+    return null
+  }
+}
+
+// Si ya tienes ese mismo archivo en alguno de tus cursos, se agrega sin volver a subirlo. null: no lo tienes.
+async function recursoRepetido(credenciales: string, cursoId: string, archivo: File, sha256: string) {
+  let response: Response
+  try {
+    response = await fetch(`${BASE}/notas/cursos/${cursoId}/recursos/repetido`, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${credenciales}`,
+        "X-Cliente": CLIENTE,
+        "X-Nombre-Archivo": encodeURIComponent(archivo.name),
+        "X-Tamano": String(archivo.size),
+        "X-Sha256": sha256,
+      },
+    })
+  } catch {
+    throw new ApiError("sin_conexion", 0)
+  }
+  if (response.status === 404) return null
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new ApiError(data.error ?? `http_${response.status}`, response.status)
+  return data.recurso as Recurso
+}
+
 // Sube un archivo como recurso de un curso, por partes y en orden. onProgreso va de 0 a 1.
 async function subirRecurso(credenciales: string, cursoId: string, archivo: File, onProgreso: (avance: number) => void = () => {}) {
   if (archivo.size > MAX_RECURSO_BYTES) throw new ApiError("recurso_muy_grande", 413)
   if (archivo.size === 0) throw new ApiError("archivo_vacio", 422)
+  const sha256 = await hashDeArchivo(archivo)
+  const repetido = sha256 && (await recursoRepetido(credenciales, cursoId, archivo, sha256))
+  if (repetido) {
+    onProgreso(1)
+    return repetido
+  }
   const auth = { Authorization: `Basic ${credenciales}`, "X-Cliente": CLIENTE }
   const avance = (desde: number) => (bytes: number) => onProgreso(Math.min((desde + bytes) / archivo.size, 1))
   let recurso = await enviarParte(

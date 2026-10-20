@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync } from 'node:fs';
+import { mkdir, mkdtemp, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import {
@@ -91,6 +93,10 @@ async function leerEventos(base, headers, { cliente = '', cantidad = 1, esperaMs
   }
   return eventos;
 }
+
+// Los archivos se guardan por su contenido: DATA_DIR/blobs/<sha256>.
+const sha = (contenido) => createHash('sha256').update(contenido).digest('hex');
+const blobs = (dataDir) => readdirSync(path.join(dataDir, 'blobs'));
 
 async function startServer(t, options = {}) {
   const dataDir = options.dataDir ?? await mkdtemp(path.join(tmpdir(), 'timermayu-pendientes-test-'));
@@ -513,28 +519,30 @@ test('sube imágenes, las sirve con contraseña y rechaza lo que no es imagen', 
 
 test('borra las imágenes que salen de la descripción, salvo si otra tarjeta las usa', async (t) => {
   const { base, dataDir, data } = await startServer(t, { graciaImagenesMs: 0 });
-  const subir = async (id) => (await (await fetch(`${base}/api/pendientes/${id}/imagenes`, {
-    method: 'POST', headers: { Authorization: auth }, body: PNG,
+  const subir = async (id, contenido) => (await (await fetch(`${base}/api/pendientes/${id}/imagenes`, {
+    method: 'POST', headers: { Authorization: auth }, body: contenido,
   })).json()).imagen;
   const conImagenes = (...urls) => JSON.stringify(urls.map((url) => ({ type: 'image', props: { url }, children: [] })));
-  const archivo = (imagen) => path.join(dataDir, 'imagenes', imagen.url.split('/').pop());
+  // Cada una con su contenido, para seguir su archivo en el disco.
+  const png = (n) => Buffer.concat([PNG, Buffer.alloc(n)]);
+  const enDisco = (contenido) => existsSync(path.join(dataDir, 'blobs', sha(contenido)));
 
   const a = (await data('POST', '', { texto: 'A' })).pendiente;
   const b = (await data('POST', '', { texto: 'B' })).pendiente;
-  const queda = await subir(a.id);
-  const sale = await subir(a.id);
-  const copiada = await subir(a.id);
+  const queda = await subir(a.id, png(1));
+  const sale = await subir(a.id, png(2));
+  const copiada = await subir(a.id, png(3));
   await data('PATCH', `/${b.id}`, { descripcion: conImagenes(copiada.url) });
 
   const saved = await data('PATCH', `/${a.id}`, { descripcion: conImagenes(queda.url) });
   assert.equal(saved.pendiente.num_imagenes, 1);
-  assert.equal(existsSync(archivo(queda)), true);
-  assert.equal(existsSync(archivo(sale)), false);
-  assert.equal(existsSync(archivo(copiada)), true);
+  assert.equal(enDisco(png(1)), true);
+  assert.equal(enDisco(png(2)), false);
+  assert.equal(enDisco(png(3)), true);
   assert.equal((await fetch(`${base}${sale.url}`, { headers: { Authorization: auth } })).status, 404);
 
   await data('DELETE', `/${a.id}`);
-  assert.equal(existsSync(archivo(queda)), false);
+  assert.equal(enDisco(png(1)), false);
 });
 
 test('el historial anota quién cambió qué; avisa a quien recibe el pendiente y a quien lo creó si otro lo cambia', async (t) => {
@@ -752,8 +760,9 @@ test('archivos: se adjuntan al pendiente o a un mensaje, se sirven con contrase�
     body: contenido,
   });
   const bajar = (id, quien = diego) => fetch(`${base}/api/pendientes/archivos/${id}`, { headers: quien.headers });
-  const enDisco = (id) => existsSync(path.join(dataDir, 'archivos', id));
+  const enDisco = (contenido) => existsSync(path.join(dataDir, 'blobs', sha(contenido)));
   const PDF = Buffer.from('%PDF-1.4\n%prueba\n');
+  const HTML = Buffer.from('<script>alert(1)</script>');
 
   // Adjunto al pendiente: queda en el historial y avisa a quien lo creó.
   const subido = await subir(diego, PDF, '../Contrato firmado.pdf');
@@ -761,7 +770,7 @@ test('archivos: se adjuntan al pendiente o a un mensaje, se sirven con contrase�
   const { archivo: contrato } = await subido.json();
   assert.deepEqual([contrato.nombre, contrato.tipo, contrato.tamano, contrato.autor, contrato.comentario_id],
     ['Contrato firmado.pdf', 'application/pdf', PDF.length, 'Diego', null]);
-  assert.equal(enDisco(contrato.id), true);
+  assert.equal(enDisco(PDF), true);
   assert.deepEqual((await favio.data('GET', '/notificaciones')).notificaciones[0].actividad.datos, { archivo_id: contrato.id, nombre: 'Contrato firmado.pdf' });
   const pdf = await bajar(contrato.id, favio);
   assert.equal(pdf.headers.get('content-type'), 'application/pdf');
@@ -770,7 +779,7 @@ test('archivos: se adjuntan al pendiente o a un mensaje, se sirven con contrase�
   assert.equal((await fetch(`${base}/api/pendientes/archivos/${contrato.id}`)).status, 401);
 
   // Lo que no es imagen ni PDF solo se descarga, aunque diga ser una página.
-  const { archivo: pagina } = await (await subir(diego, Buffer.from('<script>alert(1)</script>'), 'pagina.html')).json();
+  const { archivo: pagina } = await (await subir(diego, HTML, 'pagina.html')).json();
   const html = await bajar(pagina.id);
   assert.deepEqual([html.headers.get('content-type'), html.headers.get('content-disposition').split(';')[0]], ['application/octet-stream', 'attachment']);
   assert.equal((await subir(diego, Buffer.alloc(0), 'vacio.txt')).status, 422);
@@ -791,12 +800,13 @@ test('archivos: se adjuntan al pendiente o a un mensaje, se sirven con contrase�
   assert.equal((await favio.call('DELETE', `/archivos/${contrato.id}`)).status, 403);
   assert.equal((await favio.call('DELETE', `/archivos/${plano.id}`)).status, 409);
   assert.equal((await diego.call('DELETE', `/archivos/${contrato.id}`)).status, 200);
-  assert.equal(enDisco(contrato.id), false);
+  // plano.pdf tiene el mismo contenido: el archivo sigue en el disco hasta que se va el último que lo usa.
+  assert.equal(enDisco(PDF), true);
   assert.equal((await diego.data('GET', '/actividad')).actividad.some((a) => a.datos?.archivo_id === contrato.id), false);
   assert.equal((await favio.call('DELETE', `/comentarios/${comentario.id}`)).status, 200);
-  assert.deepEqual([(await bajar(plano.id)).status, enDisco(plano.id)], [404, false]);
+  assert.deepEqual([(await bajar(plano.id)).status, enDisco(PDF)], [404, false]);
   await diego.call('DELETE', `/${pendiente.id}`);
-  assert.deepEqual([(await bajar(pagina.id)).status, enDisco(pagina.id)], [404, false]);
+  assert.deepEqual([(await bajar(pagina.id)).status, enDisco(HTML)], [404, false]);
 });
 
 test('pasar un pendiente hecho a otra persona: vuelve a Por hacer y conserva su historial y su chat', async (t) => {
@@ -1666,7 +1676,8 @@ test('notas: los recursos se suben por partes, en orden, y se abren con su tipo'
   assert.deepEqual((await diego.data('GET', '/notas/buscar?q=guia')).recursos.map((r) => r.id), [recurso.id]);
 
   // Lo que no es imagen ni PDF se descarga.
-  const zip = await (await subir(diego, `/notas/cursos/${curso.id}/recursos`, Buffer.from('PK\x03\x04datos'), { 'X-Nombre-Archivo': 'a.zip', 'X-Tamano': '9' })).json();
+  const ZIP = Buffer.from('PK\x03\x04datos');
+  const zip = await (await subir(diego, `/notas/cursos/${curso.id}/recursos`, ZIP, { 'X-Nombre-Archivo': 'a.zip', 'X-Tamano': '9' })).json();
   assert.equal(zip.recurso.subido, 9);
   assert.match((await diego.call('GET', `/notas/recursos/${zip.recurso.id}`)).headers.get('content-disposition'), /^attachment/);
 
@@ -1683,17 +1694,104 @@ test('notas: los recursos se suben por partes, en orden, y se abren con su tipo'
   assert.equal((await diego.data('PATCH', `/notas/recursos/${recurso.id}`, { nombre: 'Guía 1.pdf' })).recurso.nombre, 'Guía 1.pdf');
   assert.equal((await favio.call('PATCH', `/notas/recursos/${recurso.id}`, { nombre: 'Mía.pdf' })).status, 404);
   assert.equal((await favio.call('DELETE', `/notas/recursos/${recurso.id}`)).status, 404);
-  const enDisco = (id) => existsSync(path.join(dataDir, 'notas', 'recursos', id));
-  assert.ok(enDisco(recurso.id));
+  const enDisco = (contenido) => existsSync(path.join(dataDir, 'blobs', sha(contenido)));
+  assert.ok(enDisco(pdf));
+  assert.ok(!existsSync(path.join(dataDir, 'notas', 'recursos', `${recurso.id}.parcial`)));
   assert.equal((await diego.call('DELETE', `/notas/recursos/${recurso.id}`)).status, 200);
-  assert.ok(!enDisco(recurso.id));
-  assert.ok(enDisco(zip.recurso.id));
+  assert.ok(!enDisco(pdf));
+  assert.ok(enDisco(ZIP));
   const { nota } = await diego.data('POST', `/notas/cursos/${curso.id}/notas`, { titulo: 'Clase 1' });
   assert.equal((await diego.call('DELETE', `/notas/cursos/${curso.id}`)).status, 200);
-  assert.ok(!enDisco(zip.recurso.id));
+  assert.ok(!enDisco(ZIP));
   assert.equal((await diego.call('GET', `/notas/${nota.id}`)).status, 404);
   assert.deepEqual(await diego.data('GET', '/notas'), { cursos: [], notas: [], recursos: [] });
   assert.ok(base);
+});
+
+test('cada contenido se guarda una vez: lo repetido apunta al mismo archivo y se borra con el último que lo usa', async (t) => {
+  const { base, dataDir, diego, favio, subir } = await conNotas(t);
+  const PDF = Buffer.from('%PDF-1.4\n%repetido\n');
+  const { pendiente: a } = await diego.data('POST', '', { texto: 'A' });
+  const { pendiente: b } = await favio.data('POST', '', { texto: 'B' });
+  const adjuntar = async (quien, pendienteId, nombre) => (await (await fetch(`${base}/api/pendientes/${pendienteId}/archivos`, {
+    method: 'POST', headers: { ...quien.headers, 'X-Nombre-Archivo': nombre }, body: PDF,
+  })).json()).archivo;
+
+  // Dos adjuntos (de dos personas, en dos pendientes) y un recurso de las notas con el mismo contenido: un solo archivo.
+  const uno = await adjuntar(diego, a.id, 'uno.pdf');
+  const otro = await adjuntar(favio, b.id, 'otro.pdf');
+  const { curso } = await diego.data('POST', '/notas/cursos', { nombre: 'Física' });
+  const { recurso } = await (await subir(diego, `/notas/cursos/${curso.id}/recursos`, PDF, { 'X-Nombre-Archivo': 'guia.pdf', 'X-Tamano': String(PDF.length) })).json();
+  assert.deepEqual(blobs(dataDir), [sha(PDF)]);
+  assert.deepEqual([uno.nombre, otro.nombre, recurso.nombre], ['uno.pdf', 'otro.pdf', 'guia.pdf']);
+
+  // Borrar uno no le quita el archivo a los demás.
+  assert.equal((await diego.call('DELETE', `/archivos/${uno.id}`)).status, 200);
+  assert.deepEqual(blobs(dataDir), [sha(PDF)]);
+  assert.deepEqual(Buffer.from(await (await favio.call('GET', `/archivos/${otro.id}`)).arrayBuffer()), PDF);
+  assert.equal((await favio.call('DELETE', `/${b.id}`)).status, 200);
+  assert.deepEqual(blobs(dataDir), [sha(PDF)]);
+  assert.deepEqual(Buffer.from(await (await diego.call('GET', `/notas/recursos/${recurso.id}`)).arrayBuffer()), PDF);
+  // Con el último se va del disco.
+  assert.equal((await diego.call('DELETE', `/notas/recursos/${recurso.id}`)).status, 200);
+  assert.deepEqual(blobs(dataDir), []);
+});
+
+test('notas: un recurso que su dueño ya tiene se agrega sin volver a subirlo; lo de otro perfil no cuenta', async (t) => {
+  const { dataDir, diego, favio, subir } = await conNotas(t);
+  const pdf = Buffer.from(`%PDF-1.4\n${'x'.repeat(5000)}`);
+  const { curso: fisica } = await diego.data('POST', '/notas/cursos', { nombre: 'Física' });
+  const { curso: quimica } = await diego.data('POST', '/notas/cursos', { nombre: 'Química' });
+  const { curso: deFavio } = await favio.data('POST', '/notas/cursos', { nombre: 'Lo de Favio' });
+  const repetido = (quien, cursoId, cabeceras = {}) => subir(quien, `/notas/cursos/${cursoId}/recursos/repetido`, undefined, {
+    'X-Nombre-Archivo': encodeURIComponent('Copia de la guía.pdf'), 'X-Tamano': String(pdf.length), 'X-Sha256': sha(pdf), ...cabeceras,
+  });
+
+  // Todavía no lo tiene: se sube como siempre.
+  assert.equal((await repetido(diego, quimica.id)).status, 404);
+  await subir(diego, `/notas/cursos/${fisica.id}/recursos`, pdf, { 'X-Nombre-Archivo': 'guia.pdf', 'X-Tamano': String(pdf.length) });
+  const agregado = await repetido(diego, quimica.id);
+  assert.equal(agregado.status, 201);
+  const { recurso } = await agregado.json();
+  assert.deepEqual([recurso.curso_id, recurso.nombre, recurso.tipo, recurso.subido, recurso.tamano],
+    [quimica.id, 'Copia de la guía.pdf', 'application/pdf', pdf.length, pdf.length]);
+  assert.deepEqual(Buffer.from(await (await diego.call('GET', `/notas/recursos/${recurso.id}`)).arrayBuffer()), pdf);
+  assert.deepEqual(blobs(dataDir), [sha(pdf)]);
+
+  // Para Favio es como si nadie lo tuviera: no puede averiguar qué archivos tiene Diego mandando un hash.
+  assert.equal((await repetido(favio, deFavio.id)).status, 404);
+  assert.equal((await repetido(favio, quimica.id)).status, 404);
+  // Otro tamaño no es el mismo archivo; un hash mal formado no se acepta.
+  assert.equal((await repetido(diego, quimica.id, { 'X-Tamano': '10' })).status, 404);
+  assert.equal((await repetido(diego, quimica.id, { 'X-Sha256': 'abc' })).status, 422);
+});
+
+test('lo guardado antes (un archivo por fila) pasa a guardarse por contenido al arrancar', async (t) => {
+  const primero = await startServer(t);
+  const { dataDir } = primero;
+  const diego = await primero.entrarComo('Diego');
+  const { pendiente } = await diego.data('POST', '', { texto: 'De antes' });
+  const PDF = Buffer.from('%PDF-1.4\n%de antes\n');
+  const adjuntar = async (nombre) => (await (await fetch(`${primero.base}/api/pendientes/${pendiente.id}/archivos`, {
+    method: 'POST', headers: { ...diego.headers, 'X-Nombre-Archivo': nombre }, body: PDF,
+  })).json()).archivo;
+  const archivos = [await adjuntar('a.pdf'), await adjuntar('b.pdf')];
+
+  // Como antes de v10: cada fila con su propio archivo (archivos/<id>) y sin sha256.
+  const db = new DatabaseSync(path.join(dataDir, 'pendientes.db'));
+  db.exec('UPDATE archivos SET sha256 = NULL');
+  db.close();
+  await mkdir(path.join(dataDir, 'archivos'), { recursive: true });
+  for (const { id } of archivos) await writeFile(path.join(dataDir, 'archivos', id), PDF);
+  await unlink(path.join(dataDir, 'blobs', sha(PDF)));
+
+  // Con la misma base, Diego entra con la contraseña que ya tiene.
+  const segundo = await startServer(t, { dataDir });
+  for (const { id } of archivos) {
+    assert.deepEqual(Buffer.from(await (await segundo.call('GET', `/archivos/${id}`, undefined, diego.headers)).arrayBuffer()), PDF);
+    assert.equal(existsSync(path.join(dataDir, 'archivos', id)), false);
+  }
+  assert.deepEqual(blobs(dataDir), [sha(PDF)]);
 });
 
 test('IA: en una nota redacta como apuntes del curso, y solo en las notas propias', async (t) => {
