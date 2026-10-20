@@ -6,7 +6,22 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { createApp, openDb, parseComentario, parseLeidas, parseOrden, parseOrganizacion, parsePendiente, parsePerfil, parseProyecto, resumirDescripcion, tipoDeImagen } from '../src/server.mjs';
+import {
+  createApp,
+  nombreDeArchivo,
+  openDb,
+  parseComentario,
+  parseLeidas,
+  parseOrden,
+  parseOrganizacion,
+  parsePendiente,
+  parsePerfil,
+  parseProyecto,
+  parseTraspaso,
+  resumirDescripcion,
+  tipoDeArchivo,
+  tipoDeImagen,
+} from '../src/server.mjs';
 
 const password = 'test-password';
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
@@ -65,9 +80,22 @@ test('valida pendientes, perfiles, organizaciones, proyectos y orden', () => {
   assert.deepEqual(parsePerfil({ nombre: 'Ana', telefono: '' }), { nombre: 'Ana', telefono: null });
   assert.throws(() => parsePerfil({ nombre: 'Ana', telefono: '8888 8888' }), /telefono_invalido/);
   assert.throws(() => parsePerfil({ nombre: 'Ana', telefono: '+506 8888 abcd' }), /telefono_invalido/);
-  assert.equal(parseComentario({ texto: '  hola  ' }), 'hola');
+  assert.deepEqual(parseComentario({ texto: '  hola  ' }), { texto: 'hola', archivos: [] });
+  assert.deepEqual(parseComentario({ archivos: ['a', 'a'] }), { texto: '', archivos: ['a'] });
   assert.throws(() => parseComentario({ texto: '   ' }), /comentario_invalido/);
   assert.throws(() => parseComentario({ texto: 'x'.repeat(2001) }), /comentario_invalido/);
+  assert.throws(() => parseComentario({ texto: 'hola', archivos: 'a' }), /archivos_invalidos/);
+  assert.deepEqual(parseTraspaso({ perfil_id: 'p', nota: '  el frontend ' }), { perfil_id: 'p', nota: 'el frontend' });
+  assert.deepEqual(parseTraspaso({ perfil_id: 'p', nota: '' }), { perfil_id: 'p', nota: null });
+  assert.throws(() => parseTraspaso({ perfil_id: null }), /perfil_invalido/);
+  assert.throws(() => parseTraspaso({ perfil_id: 'p', nota: 'x'.repeat(501) }), /nota_invalida/);
+  assert.equal(nombreDeArchivo(encodeURIComponent('../carpeta\\Plano final.pdf')), 'Plano final.pdf');
+  assert.equal(nombreDeArchivo(undefined), 'archivo');
+  assert.equal(nombreDeArchivo(`${'a'.repeat(200)}.pdf`).length, 120);
+  assert.match(nombreDeArchivo(`${'a'.repeat(200)}.pdf`), /\.pdf$/);
+  assert.throws(() => nombreDeArchivo('%E0%A4%A'), /nombre_archivo_invalido/);
+  assert.equal(tipoDeArchivo(Buffer.from('%PDF-1.7')), 'application/pdf');
+  assert.equal(tipoDeArchivo(Buffer.from('<html>')), 'application/octet-stream');
   assert.equal(parseLeidas({}), null);
   assert.deepEqual(parseLeidas({ ids: ['a'] }), ['a']);
   assert.throws(() => parseLeidas({ ids: 'a' }), /ids_invalidos/);
@@ -568,6 +596,88 @@ test('el historial, el chat y los avisos de lo privado solo los ve su dueño, ta
   assert.equal((await favio.data('GET', '/actividad')).actividad.length, 0);
   assert.equal((await data('GET', '/actividad')).actividad.length, 0);
   assert.deepEqual((await diego.data('GET', '/actividad')).actividad.map((a) => a.tipo), ['borrado', 'comentario', 'creado']);
+});
+
+test('archivos: se adjuntan al pendiente o a un mensaje, se sirven con contraseña y se van con lo suyo', async (t) => {
+  const { dataDir, base, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const { pendiente } = await diego.data('POST', '', { texto: 'Contrato', perfil_id: favio.perfil.id });
+  const subir = (quien, contenido, nombre, para = '') => fetch(`${base}/api/pendientes/${pendiente.id}/archivos${para}`, {
+    method: 'POST',
+    headers: { ...quien.headers, 'X-Nombre-Archivo': encodeURIComponent(nombre) },
+    body: contenido,
+  });
+  const bajar = (id, quien = diego) => fetch(`${base}/api/pendientes/archivos/${id}`, { headers: quien.headers });
+  const enDisco = (id) => existsSync(path.join(dataDir, 'archivos', id));
+  const PDF = Buffer.from('%PDF-1.4\n%prueba\n');
+
+  // Adjunto al pendiente: queda en el historial y avisa al responsable.
+  const subido = await subir(diego, PDF, '../Contrato firmado.pdf');
+  assert.equal(subido.status, 201);
+  const { archivo: contrato } = await subido.json();
+  assert.deepEqual([contrato.nombre, contrato.tipo, contrato.tamano, contrato.autor, contrato.comentario_id],
+    ['Contrato firmado.pdf', 'application/pdf', PDF.length, 'Diego', null]);
+  assert.equal(enDisco(contrato.id), true);
+  assert.deepEqual((await favio.data('GET', '/notificaciones')).notificaciones[0].actividad.datos, { archivo_id: contrato.id, nombre: 'Contrato firmado.pdf' });
+  const pdf = await bajar(contrato.id, favio);
+  assert.equal(pdf.headers.get('content-type'), 'application/pdf');
+  assert.equal(pdf.headers.get('content-disposition'), "inline; filename*=UTF-8''Contrato%20firmado.pdf");
+  assert.deepEqual(Buffer.from(await pdf.arrayBuffer()), PDF);
+  assert.equal((await fetch(`${base}/api/pendientes/archivos/${contrato.id}`)).status, 401);
+
+  // Lo que no es imagen ni PDF solo se descarga, aunque diga ser una página.
+  const { archivo: pagina } = await (await subir(diego, Buffer.from('<script>alert(1)</script>'), 'pagina.html')).json();
+  const html = await bajar(pagina.id);
+  assert.deepEqual([html.headers.get('content-type'), html.headers.get('content-disposition').split(';')[0]], ['application/octet-stream', 'attachment']);
+  assert.equal((await subir(diego, Buffer.alloc(0), 'vacio.txt')).status, 422);
+  assert.equal((await subir(diego, Buffer.alloc(10 * 1024 * 1024 + 1), 'enorme.bin')).status, 413);
+
+  // Para el chat queda como borrador hasta que se envía el mensaje, y solo lo usa quien lo subió.
+  const { archivo: plano } = await (await subir(favio, PDF, 'plano.pdf', '?para=chat')).json();
+  assert.deepEqual((await diego.data('GET', `/${pendiente.id}/archivos`)).archivos.map((a) => a.nombre), ['Contrato firmado.pdf', 'pagina.html']);
+  assert.equal((await diego.call('POST', `/${pendiente.id}/comentarios`, { archivos: [plano.id] })).status, 422);
+  const { comentario } = await favio.data('POST', `/${pendiente.id}/comentarios`, { archivos: [plano.id] });
+  assert.deepEqual([comentario.texto, comentario.archivos.map((a) => a.nombre)], ['', ['plano.pdf']]);
+  assert.equal((await favio.call('POST', `/${pendiente.id}/comentarios`, { archivos: [plano.id] })).status, 422);
+  assert.deepEqual((await diego.data('GET', `/${pendiente.id}/comentarios`)).comentarios[0].archivos.map((a) => a.id), [plano.id]);
+  assert.deepEqual((await diego.data('GET', '/notificaciones')).notificaciones[0].actividad.datos.adjuntos, ['plano.pdf']);
+  assert.equal((await diego.data('GET')).pendientes[0].num_archivos, 3);
+
+  // Cada quien quita lo suyo; lo de un mensaje se va con el mensaje, y todo se va con el pendiente.
+  assert.equal((await favio.call('DELETE', `/archivos/${contrato.id}`)).status, 403);
+  assert.equal((await favio.call('DELETE', `/archivos/${plano.id}`)).status, 409);
+  assert.equal((await diego.call('DELETE', `/archivos/${contrato.id}`)).status, 200);
+  assert.equal(enDisco(contrato.id), false);
+  assert.equal((await diego.data('GET', '/actividad')).actividad.some((a) => a.datos?.archivo_id === contrato.id), false);
+  assert.equal((await favio.call('DELETE', `/comentarios/${comentario.id}`)).status, 200);
+  assert.deepEqual([(await bajar(plano.id)).status, enDisco(plano.id)], [404, false]);
+  await diego.call('DELETE', `/${pendiente.id}`);
+  assert.deepEqual([(await bajar(pagina.id)).status, enDisco(pagina.id)], [404, false]);
+});
+
+test('pasar un pendiente hecho a otra persona: vuelve a Por hacer y conserva su historial y su chat', async (t) => {
+  const { call, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const junior = await entrarComo('Junior');
+  const { pendiente } = await favio.data('POST', '', { texto: 'Login con Google', perfil_id: diego.perfil.id });
+  await favio.data('POST', '', { texto: 'Otro' });
+  await diego.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: 'Backend listo' });
+
+  const { pendiente: pasado } = await diego.data('POST', `/${pendiente.id}/traspaso`, { perfil_id: junior.perfil.id, nota: ' El frontend ' });
+  assert.deepEqual([pasado.id, pasado.estado, pasado.perfil_id, pasado.num_comentarios], [pendiente.id, 'pendiente', junior.perfil.id, 1]);
+  assert.equal((await diego.data('GET')).pendientes[0].id, pendiente.id);
+  const historial = (await diego.data('GET', `/${pendiente.id}/actividad`)).actividad;
+  assert.deepEqual(historial.map((a) => a.tipo), ['traspaso', 'comentario', 'estado', 'creado']);
+  assert.deepEqual(historial[0].datos, { de: 'Diego', de_id: diego.perfil.id, a: 'Junior', a_id: junior.perfil.id, estado: 'hecho', nota: 'El frontend' });
+  assert.deepEqual((await junior.data('GET', '/notificaciones')).notificaciones.map((n) => n.actividad.tipo), ['traspaso']);
+  assert.equal((await favio.data('GET', '/notificaciones')).notificaciones[0].actividad.tipo, 'traspaso');
+
+  assert.equal((await call('POST', `/${pendiente.id}/traspaso`, { perfil_id: crypto.randomUUID() })).status, 422);
+  assert.equal((await call('POST', `/${pendiente.id}/traspaso`, {})).status, 422);
+  assert.equal((await call('POST', `/${crypto.randomUUID()}/traspaso`, { perfil_id: junior.perfil.id })).status, 404);
 });
 
 test('rechaza JSON roto y rutas desconocidas', async (t) => {

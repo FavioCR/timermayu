@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
-import { History, Lock, MessageCircle, MessageSquare, Trash2, Users } from "lucide-react"
+import { Forward, History, Lock, MessageCircle, MessageSquare, Trash2, Users } from "lucide-react"
 
+import { ArchivosPendiente } from "@/components/archivos"
 import { ChatPendiente } from "@/components/chat-pendiente"
 import type { DocumentoDescripcion } from "@/components/editor-descripcion"
 import { HistorialPendiente } from "@/components/historial"
@@ -42,6 +43,8 @@ type Props = {
   onCrearProyecto: (datos: { nombre: string; organizacion_id: string | null }) => Promise<Proyecto | null>
   onCambiar: (id: string, cambios: CambiosPendiente) => Promise<Pendiente | null>
   onCantidadComentarios: (id: string, cantidad: number) => void
+  onCantidadArchivos: (id: string, cantidad: number) => void
+  onPasar: (pendiente: Pendiente) => void
   onBorrar: (pendiente: Pendiente) => void
   onCerrar: () => void
   onSalir: () => void
@@ -79,6 +82,8 @@ function Contenido({
   onCrearProyecto,
   onCambiar,
   onCantidadComentarios,
+  onCantidadArchivos,
+  onPasar,
   onBorrar,
   onSalir,
 }: Omit<Props, "pendiente" | "onCerrar"> & { pendiente: Pendiente }) {
@@ -209,7 +214,7 @@ function Contenido({
       <div className="flex flex-col gap-6 px-4 pb-6">
         <dl className="grid grid-cols-[6.5rem_1fr] items-center gap-x-3 gap-y-2 text-sm">
           <dt className="text-muted-foreground">Estado</dt>
-          <dd>
+          <dd className="flex flex-wrap items-center gap-2">
             <Select value={pendiente.estado} onValueChange={(valor) => onCambiar(id, { estado: valor as Estado })}>
               <SelectTrigger aria-label="Estado" size="sm" className="w-full sm:w-64">
                 <SelectValue />
@@ -222,6 +227,12 @@ function Contenido({
                 ))}
               </SelectContent>
             </Select>
+            {/* Terminada una parte (el backend, por ejemplo), el mismo pendiente pasa a quien sigue. */}
+            {pendiente.estado === "hecho" && (
+              <Button variant="outline" size="sm" onClick={() => onPasar(pendiente)}>
+                <Forward /> Pasar a otra persona
+              </Button>
+            )}
           </dd>
 
           <dt className="text-muted-foreground">Responsable</dt>
@@ -285,6 +296,18 @@ function Contenido({
                 <Users /> Todo el equipo
               </>
             )}
+          </dd>
+
+          <dt className="self-start pt-1.5 text-muted-foreground">Archivos</dt>
+          <dd className="min-w-0">
+            <ArchivosPendiente
+              credenciales={credenciales}
+              pendienteId={id}
+              usuario={usuario}
+              version={`${pendiente.actualizado_en}:${pendiente.num_comentarios}`}
+              onCantidad={(cantidad) => onCantidadArchivos(id, cantidad)}
+              onSalir={onSalir}
+            />
           </dd>
         </dl>
 

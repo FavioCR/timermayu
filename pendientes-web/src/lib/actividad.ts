@@ -29,12 +29,33 @@ export function describir(actividad: Actividad, { conTitulo = true, yo = null }:
       return conTitulo ? `movió ${titulo} a ${datos.a}` : `lo movió a ${datos.a}`
     case "descripcion":
       return conTitulo ? `editó la descripción de ${titulo}` : "editó la descripción"
-    case "comentario":
+    case "comentario": {
       if (yo && datos.menciones?.includes(yo)) return conTitulo ? `te mencionó en ${titulo}` : "te mencionó"
+      const archivos = datos.adjuntos?.length ?? 0
+      if (!datos.extracto && archivos > 0) {
+        const cuantos = archivos === 1 ? "un archivo" : `${archivos} archivos`
+        return conTitulo ? `envió ${cuantos} en ${titulo}` : `envió ${cuantos}`
+      }
       return conTitulo ? `comentó en ${titulo}` : "comentó"
+    }
+    case "traspaso": {
+      // Si quien lo pasa es quien lo tenía y ya estaba hecho, terminó su parte.
+      const termino = datos.estado === "hecho" && actividad.perfil_id !== null && actividad.perfil_id === datos.de_id ? "terminó su parte y " : ""
+      if (aMi(datos.a_id)) return conTitulo ? `${termino}te pasó ${titulo}` : `${termino}te lo pasó`
+      return conTitulo ? `${termino}le pasó ${titulo} a ${datos.a}` : `${termino}se lo pasó a ${datos.a}`
+    }
+    case "archivo":
+      return conTitulo ? `adjuntó «${datos.nombre}» en ${titulo}` : `adjuntó «${datos.nombre}»`
     case "borrado":
       return `borró ${titulo}`
   }
+}
+
+// Lo que se muestra debajo de la frase: el texto del mensaje (y sus archivos) o la nota de un traspaso.
+export function detalleDe(actividad: Actividad) {
+  const datos = actividad.datos ?? {}
+  const archivos = datos.adjuntos?.length ? `📎 ${datos.adjuntos.join(", ")}` : null
+  return [datos.extracto || datos.nota, archivos].filter(Boolean).join("\n") || null
 }
 
 const relativo = new Intl.RelativeTimeFormat("es", { numeric: "auto" })

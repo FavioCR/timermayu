@@ -10,6 +10,8 @@ export type Pendiente = {
   creado_por: string | null
   resumen: string | null
   num_imagenes: number
+  // Archivos adjuntos al pendiente y a los mensajes de su chat.
+  num_archivos: number
   num_comentarios: number
   creado_en: string
   actualizado_en: string
@@ -53,7 +55,17 @@ export type Proyecto = {
   creado_en: string
 }
 
-export type TipoActividad = "creado" | "texto" | "estado" | "asignado" | "proyecto" | "descripcion" | "comentario" | "borrado"
+export type TipoActividad =
+  | "creado"
+  | "texto"
+  | "estado"
+  | "asignado"
+  | "proyecto"
+  | "descripcion"
+  | "comentario"
+  | "borrado"
+  | "traspaso"
+  | "archivo"
 
 // Lo que se anota según el tipo: de/a en los cambios, extracto y menciones (ids de perfil) en los mensajes, etc.
 export type DatosActividad = {
@@ -67,6 +79,11 @@ export type DatosActividad = {
   comentario_id?: string
   extracto?: string
   menciones?: string[]
+  adjuntos?: string[]
+  de_id?: string | null
+  nota?: string
+  archivo_id?: string
+  nombre?: string
 }
 
 // Una entrada del historial. Guarda nombres (no solo ids) para leerse aunque el perfil o el proyecto ya no existan.
@@ -90,6 +107,21 @@ export type Comentario = {
   perfil_id: string | null
   autor: string
   texto: string
+  creado_en: string
+  archivos: Archivo[]
+}
+
+// Un archivo adjunto. Si es de un mensaje, comentario_id dice de cuál. `tipo` es image/*, application/pdf
+// (se pueden ver en el navegador) o application/octet-stream (solo se descarga).
+export type Archivo = {
+  id: string
+  pendiente_id: string
+  comentario_id: string | null
+  nombre: string
+  tipo: string
+  tamano: number
+  perfil_id: string | null
+  autor: string
   creado_en: string
 }
 
@@ -135,7 +167,12 @@ const MENSAJES: Record<string, string> = {
   proyecto_con_pendientes: "Todavía tiene pendientes: muévelos a otro proyecto o bórralos antes.",
   descripcion_invalida: "La descripción es demasiado larga.",
   imagen_invalida: "Solo se pueden subir imágenes PNG, JPG, GIF o WebP.",
-  body_too_large: "La imagen pesa más de 10 MB.",
+  body_too_large: "El archivo pesa más de 10 MB.",
+  archivo_vacio: "Ese archivo está vacío.",
+  archivos_invalidos: "Esos archivos ya no están listos para enviar. Vuelve a adjuntarlos.",
+  archivo_de_mensaje: "Ese archivo es de un mensaje del chat: se quita borrando el mensaje.",
+  nombre_archivo_invalido: "El nombre del archivo no se pudo leer. Cámbialo y vuelve a intentar.",
+  nota_invalida: "La nota puede tener hasta 500 caracteres.",
 }
 
 export const MAX_IMAGEN_BYTES = 10 * 1024 * 1024
@@ -227,6 +264,39 @@ async function subirImagen(credenciales: string, pendienteId: string, archivo: F
   return (data as { imagen: { id: string; url: string } }).imagen
 }
 
+// Cualquier archivo, para un pendiente o (con paraChat) para el próximo mensaje del chat.
+async function subirArchivo(credenciales: string, pendienteId: string, archivo: File, paraChat = false) {
+  if (archivo.size > MAX_IMAGEN_BYTES) throw new ApiError("body_too_large", 413)
+  let response: Response
+  try {
+    response = await fetch(`${BASE}/${pendienteId}/archivos${paraChat ? "?para=chat" : ""}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${credenciales}`,
+        "Content-Type": archivo.type || "application/octet-stream",
+        "X-Nombre-Archivo": encodeURIComponent(archivo.name),
+      },
+      body: archivo,
+    })
+  } catch {
+    throw new ApiError("sin_conexion", 0)
+  }
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new ApiError(data.error ?? `http_${response.status}`, response.status)
+  return (data as { archivo: Archivo }).archivo
+}
+
+async function descargarArchivo(credenciales: string, id: string) {
+  let response: Response
+  try {
+    response = await fetch(`${BASE}/archivos/${id}`, { headers: { Authorization: `Basic ${credenciales}` } })
+  } catch {
+    throw new ApiError("sin_conexion", 0)
+  }
+  if (!response.ok) throw new ApiError(response.status === 404 ? "not_found" : `http_${response.status}`, response.status)
+  return response.blob()
+}
+
 // Las imágenes piden contraseña, así que un <img src> directo no sirve: se bajan con fetch y se
 // muestran desde un blob. Cada url es un archivo que nunca cambia, así que se guarda una vez.
 const imagenesEnMemoria = new Map<string, Promise<string>>()
@@ -255,6 +325,9 @@ export const api = {
   actualizar: (credenciales: string, id: string, cambios: CambiosPendiente) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "PATCH", `/${id}`, cambios).then((data) => data.pendiente),
   borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/${id}`),
+  // Vuelve a Por hacer con otra persona como responsable; conserva historial, chat y archivos.
+  traspasar: (credenciales: string, id: string, perfilId: string, nota: string) =>
+    pedir<{ pendiente: Pendiente }>(credenciales, "POST", `/${id}/traspaso`, { perfil_id: perfilId, nota }).then((data) => data.pendiente),
   ordenar: (credenciales: string, items: { id: string; estado: Estado }[]) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "PUT", "/orden", { items }).then((data) => data.pendientes),
   subirImagen,
@@ -281,9 +354,16 @@ export const api = {
   comentarios: {
     listar: (credenciales: string, pendienteId: string) =>
       pedir<{ comentarios: Comentario[] }>(credenciales, "GET", `/${pendienteId}/comentarios`).then((data) => data.comentarios),
-    crear: (credenciales: string, pendienteId: string, texto: string) =>
-      pedir<{ comentario: Comentario }>(credenciales, "POST", `/${pendienteId}/comentarios`, { texto }).then((data) => data.comentario),
+    crear: (credenciales: string, pendienteId: string, texto: string, archivos: string[] = []) =>
+      pedir<{ comentario: Comentario }>(credenciales, "POST", `/${pendienteId}/comentarios`, { texto, archivos }).then((data) => data.comentario),
     borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/comentarios/${id}`),
+  },
+  archivos: {
+    listar: (credenciales: string, pendienteId: string) =>
+      pedir<{ archivos: Archivo[] }>(credenciales, "GET", `/${pendienteId}/archivos`).then((data) => data.archivos),
+    subir: subirArchivo,
+    descargar: descargarArchivo,
+    borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/archivos/${id}`),
   },
   notificaciones: {
     listar: (credenciales: string) => pedir<{ notificaciones: Notificacion[]; no_leidas: number }>(credenciales, "GET", "/notificaciones"),

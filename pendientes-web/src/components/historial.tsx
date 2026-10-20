@@ -4,7 +4,9 @@ import {
   CircleCheck,
   FileText,
   Folder,
+  Forward,
   MessageSquare,
+  Paperclip,
   Pencil,
   Plus,
   Trash2,
@@ -12,7 +14,7 @@ import {
 } from "lucide-react"
 
 import { api, esNoAutorizado, mensajeDeError, type Actividad, type TipoActividad } from "@/lib/api"
-import { describir, dia, fechaCompleta, haceCuanto } from "@/lib/actividad"
+import { describir, detalleDe, dia, fechaCompleta, haceCuanto } from "@/lib/actividad"
 import { COLUMNAS } from "@/lib/estados"
 
 const ICONOS: Record<TipoActividad, typeof Plus> = {
@@ -24,6 +26,8 @@ const ICONOS: Record<TipoActividad, typeof Plus> = {
   descripcion: FileText,
   comentario: MessageSquare,
   borrado: Trash2,
+  traspaso: Forward,
+  archivo: Paperclip,
 }
 
 function agruparPorDia(items: Actividad[]) {
@@ -62,6 +66,7 @@ export function ListaActividad({
               const Icono = actividad.tipo === "estado" && actividad.datos?.a === "hecho" ? CircleCheck : ICONOS[actividad.tipo]
               const color = actividad.tipo === "estado" ? COLUMNAS.find((columna) => columna.id === actividad.datos?.a)?.color : undefined
               const abrible = onAbrir && actividad.pendiente_id && abribles?.has(actividad.pendiente_id)
+              const detalle = detalleDe(actividad)
               const frase = (
                 <>
                   <span className="font-medium text-foreground">{actividad.autor}</span> {describir(actividad, { conTitulo, yo })}
@@ -86,9 +91,9 @@ export function ListaActividad({
                   ) : (
                     <p className="m-0 text-sm text-muted-foreground">{frase}</p>
                   )}
-                  {actividad.tipo === "comentario" && actividad.datos?.extracto && (
-                    <p className="m-0 mt-1.5 line-clamp-3 rounded-md bg-muted px-2.5 py-1.5 text-xs whitespace-pre-line text-foreground/80">
-                      {actividad.datos.extracto}
+                  {detalle && (
+                    <p className="m-0 mt-1.5 line-clamp-3 rounded-md bg-muted px-2.5 py-1.5 text-xs break-words whitespace-pre-line text-foreground/80">
+                      {detalle}
                     </p>
                   )}
                   <time

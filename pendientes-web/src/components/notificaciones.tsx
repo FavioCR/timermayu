@@ -6,7 +6,7 @@ import { PerfilAvatar } from "@/components/perfil-avatar"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { api, esNoAutorizado, type Notificacion, type Perfil } from "@/lib/api"
-import { describir, haceCuanto } from "@/lib/actividad"
+import { describir, detalleDe, haceCuanto } from "@/lib/actividad"
 
 // Cada cuánto se buscan avisos nuevos (también al volver a la pestaña).
 const CADA_MS = 15_000
@@ -74,7 +74,7 @@ export function Notificaciones({
       if (document.hidden && permisoActual() === "granted") {
         for (const notificacion of nuevas.slice(0, 3)) {
           const aviso = new Notification(`${notificacion.actividad.autor} ${describir(notificacion.actividad, { yo })}`, {
-            body: notificacion.actividad.datos?.extracto ?? "",
+            body: detalleDe(notificacion.actividad) ?? "",
             tag: notificacion.id,
           })
           aviso.onclick = () => {
@@ -172,8 +172,8 @@ export function Notificaciones({
                     <span className="block text-sm">
                       <span className="font-medium">{actividad.autor}</span> {describir(actividad, { yo })}
                     </span>
-                    {actividad.datos?.extracto && (
-                      <span className="mt-1 line-clamp-2 block text-xs text-muted-foreground">{actividad.datos.extracto}</span>
+                    {detalleDe(actividad) && (
+                      <span className="mt-1 line-clamp-2 block text-xs break-words whitespace-pre-line text-muted-foreground">{detalleDe(actividad)}</span>
                     )}
                     <span className="mt-1 block text-xs text-muted-foreground/80">{haceCuanto(actividad.creado_en)}</span>
                   </span>

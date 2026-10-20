@@ -15,6 +15,12 @@ const MAX_PROYECTO = 60;
 const MAX_NOMBRE = 40;
 const MAX_CORREO = 120;
 const MAX_COMENTARIO = 2000;
+const MAX_ARCHIVO_BYTES = 10 * 1024 * 1024;
+const MAX_NOMBRE_ARCHIVO = 120;
+const MAX_ADJUNTOS = 10;
+const MAX_NOTA = 500;
+// Lo que se sube para un mensaje y no se llega a enviar se borra pasado un día.
+const VIDA_BORRADOR_MS = 24 * 60 * 60 * 1000;
 const MAX_MIEMBROS = 100;
 // Lo que se guarda de un mensaje en el historial y en los avisos.
 const MAX_EXTRACTO = 140;
@@ -54,11 +60,15 @@ const IMAGEN_PATH = new RegExp(`^/api/pendientes/imagenes/${UUID}$`);
 const ACTIVIDAD_ITEM_PATH = new RegExp(`^/api/pendientes/${UUID}/actividad$`);
 const COMENTARIOS_PATH = new RegExp(`^/api/pendientes/${UUID}/comentarios$`);
 const COMENTARIO_PATH = new RegExp(`^/api/pendientes/comentarios/${UUID}$`);
+const ARCHIVOS_PATH = new RegExp(`^/api/pendientes/${UUID}/archivos$`);
+const ARCHIVO_PATH = new RegExp(`^/api/pendientes/archivos/${UUID}$`);
+const TRASPASO_PATH = new RegExp(`^/api/pendientes/${UUID}/traspaso$`);
 const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
-  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH];
+  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH];
 const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en,
-  (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios`;
+  (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios,
+  (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0) AS num_archivos`;
 const SELECT_PERFIL = 'SELECT id, nombre, correo, telefono, color, password_hash IS NOT NULL AS tiene_contrasena, creado_en FROM perfiles';
 const SELECT_ORGANIZACION = `SELECT id, nombre, color, duenio_id, compartida, creado_en,
   (SELECT json_group_array(perfil_id) FROM organizacion_miembros m WHERE m.organizacion_id = organizaciones.id) AS miembros FROM organizaciones`;
@@ -76,6 +86,7 @@ const ACTIVIDAD_VISIBLE = `(a.pendiente_id IN (SELECT id FROM pendientes WHERE $
   OR (a.pendiente_id IS NULL AND (a.privado_de IS NULL OR a.privado_de = ?)))`;
 const SELECT_ACTIVIDAD = 'SELECT a.id, a.pendiente_id, a.texto_pendiente, a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en FROM actividad a';
 const SELECT_COMENTARIO = 'SELECT id, pendiente_id, perfil_id, autor, texto, creado_en FROM comentarios';
+const SELECT_ARCHIVO = 'SELECT id, pendiente_id, comentario_id, nombre, tipo, tamano, perfil_id, autor, creado_en FROM archivos';
 
 // Cada función lleva la base de una versión a la siguiente; la versión vive en PRAGMA user_version.
 const MIGRACIONES = [
@@ -207,6 +218,26 @@ const MIGRACIONES = [
         SELECT o.id, p.id FROM organizaciones o JOIN perfiles p ON o.compartida = 1 OR p.id = o.duenio_id;
     `);
   },
+  // Archivos adjuntos (PDF y cualquier otro) en cada pendiente o en un mensaje de su chat. Viven en DATA_DIR/archivos.
+  // `borrador` marca lo subido para un mensaje que todavía no se envía.
+  (db) => {
+    db.exec(`
+      CREATE TABLE archivos (
+        id TEXT PRIMARY KEY,
+        pendiente_id TEXT NOT NULL REFERENCES pendientes(id) ON DELETE CASCADE,
+        comentario_id TEXT REFERENCES comentarios(id) ON DELETE CASCADE,
+        borrador INTEGER NOT NULL DEFAULT 0,
+        nombre TEXT NOT NULL,
+        tipo TEXT NOT NULL,
+        tamano INTEGER NOT NULL,
+        perfil_id TEXT REFERENCES perfiles(id) ON DELETE SET NULL,
+        autor TEXT NOT NULL,
+        creado_en TEXT NOT NULL
+      );
+      CREATE INDEX archivos_pendiente ON archivos (pendiente_id, creado_en);
+      CREATE INDEX archivos_comentario ON archivos (comentario_id);
+    `);
+  },
 ];
 
 function json(res, status, body) {
@@ -279,6 +310,30 @@ export function tipoDeImagen(buffer) {
   if (['GIF87a', 'GIF89a'].includes(ascii(0, 6))) return 'image/gif';
   if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'image/webp';
   return null;
+}
+
+// Las imágenes y los PDF se pueden mostrar en el navegador; cualquier otra cosa se guarda tal cual y solo se descarga.
+export function tipoDeArchivo(buffer) {
+  if (tipoDeImagen(buffer)) return tipoDeImagen(buffer);
+  if (buffer.subarray(0, 5).toString('latin1') === '%PDF-') return 'application/pdf';
+  return 'application/octet-stream';
+}
+
+// El nombre viaja en una cabecera, codificado con encodeURIComponent. Se queda solo con el nombre, sin carpetas.
+export function nombreDeArchivo(cabecera) {
+  let nombre = '';
+  try {
+    nombre = decodeURIComponent(String(cabecera ?? ''));
+  } catch {
+    throw httpError(422, 'nombre_archivo_invalido');
+  }
+  nombre = nombre.split(/[\\/]/).pop().replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  if (nombre.length > MAX_NOMBRE_ARCHIVO) {
+    const punto = nombre.lastIndexOf('.');
+    const extension = punto > 0 && nombre.length - punto <= 10 ? nombre.slice(punto) : '';
+    nombre = nombre.slice(0, MAX_NOMBRE_ARCHIVO - extension.length) + extension;
+  }
+  return nombre || 'archivo';
 }
 
 // Texto plano para la vista previa de la tarjeta y cantidad de imágenes del documento del editor.
@@ -365,10 +420,24 @@ export function parsePerfil(input, { partial = false } = {}) {
   return changes;
 }
 
+// Un mensaje lleva texto, archivos ya subidos para él, o las dos cosas.
 export function parseComentario(input) {
   const texto = typeof input.texto === 'string' ? input.texto.trim() : '';
-  if (!texto || texto.length > MAX_COMENTARIO) throw httpError(422, 'comentario_invalido');
-  return texto;
+  const archivos = input.archivos ?? [];
+  if (!Array.isArray(archivos) || archivos.length > MAX_ADJUNTOS || archivos.some((id) => typeof id !== 'string')) {
+    throw httpError(422, 'archivos_invalidos');
+  }
+  if ((!texto && archivos.length === 0) || texto.length > MAX_COMENTARIO) throw httpError(422, 'comentario_invalido');
+  return { texto, archivos: [...new Set(archivos)] };
+}
+
+// Pasar un pendiente a otra persona: vuelve a Por hacer con su nuevo responsable y, si se quiere, una nota de lo que le toca.
+export function parseTraspaso(input) {
+  if (typeof input.perfil_id !== 'string' || !input.perfil_id) throw httpError(422, 'perfil_invalido');
+  const nota = typeof input.nota === 'string' ? input.nota.trim() : '';
+  if (input.nota !== undefined && input.nota !== null && typeof input.nota !== 'string') throw httpError(422, 'nota_invalida');
+  if (nota.length > MAX_NOTA) throw httpError(422, 'nota_invalida');
+  return { perfil_id: input.perfil_id, nota: nota || null };
 }
 
 // Sin ids marca todos los avisos como leídos.
@@ -454,6 +523,7 @@ function importarJson(db, dataDir) {
 
 export function openDb(dataDir) {
   mkdirSync(path.join(dataDir, 'imagenes'), { recursive: true });
+  mkdirSync(path.join(dataDir, 'archivos'), { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'pendientes.db'));
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   const { user_version: version } = db.prepare('PRAGMA user_version').get();
@@ -571,10 +641,23 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     }
   }
 
-  async function borrarArchivos(ids) {
-    await Promise.all(ids.map((id) => unlink(archivoDeImagen(id)).catch((error) => {
+  async function borrarArchivos(ids, ruta = archivoDeImagen) {
+    await Promise.all(ids.map((id) => unlink(ruta(id)).catch((error) => {
       if (error.code !== 'ENOENT') throw error;
     })));
+  }
+
+  const archivoSubido = (id) => path.join(dataDir, 'archivos', id);
+  const borrarSubidos = (ids) => borrarArchivos(ids, archivoSubido);
+  const esAutor = (quien, row) => (row.perfil_id ? row.perfil_id === quien.perfil_id : quien.perfil_id === null && row.autor === quien.nombre);
+
+  // Archivos de un mensaje que nunca se envió.
+  async function limpiarBorradores() {
+    const limite = new Date(Date.now() - VIDA_BORRADOR_MS).toISOString();
+    const viejos = db.prepare('SELECT id FROM archivos WHERE borrador = 1 AND creado_en < ?').all(limite).map((row) => row.id);
+    const borrar = db.prepare('DELETE FROM archivos WHERE id = ?');
+    for (const id of viejos) borrar.run(id);
+    await borrarSubidos(viejos);
   }
 
   // Imágenes del pendiente que pasaron el tiempo de gracia y ya no aparecen en ninguna descripción
@@ -650,15 +733,41 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       const actual = pendiente(quien.perfil_id, id);
       if (!actual) return false;
       const imagenes = db.prepare('SELECT id FROM imagenes WHERE pendiente_id = ?').all(id).map((row) => row.id);
+      const subidos = db.prepare('SELECT id FROM archivos WHERE pendiente_id = ?').all(id).map((row) => row.id);
       transaction(db, () => {
         // Su historial queda con la privacidad que tenía al borrarse (ON DELETE SET NULL suelta el pendiente_id).
         db.prepare('UPDATE actividad SET privado_de = ? WHERE pendiente_id = ?').run(privadoDe(id), id);
         registrar(quien, actual, 'borrado', null, [actual.perfil_id, actual.creado_por]);
-        // ON DELETE CASCADE quita sus filas de imagenes y comentarios; los archivos se borran aparte.
+        // ON DELETE CASCADE quita sus filas de imagenes, archivos y comentarios; lo guardado en disco se borra aparte.
         db.prepare('DELETE FROM pendientes WHERE id = ?').run(id);
       });
       await borrarArchivos(imagenes);
+      await borrarSubidos(subidos);
       return true;
+    },
+
+    // Lo pasa a otra persona: vuelve a Por hacer, arriba de todo, con su nuevo responsable. Es el mismo pendiente,
+    // así que conserva su historial, su chat y sus archivos.
+    traspasar(quien, id, { perfil_id: perfilId, nota }) {
+      const yo = quien.perfil_id;
+      const antes = pendiente(yo, id);
+      if (!antes) return null;
+      verificarPerfil(perfilId);
+      return transaction(db, () => {
+        const { minimo } = db.prepare('SELECT COALESCE(MIN(posicion), 0) AS minimo FROM pendientes').get();
+        db.prepare("UPDATE pendientes SET estado = 'pendiente', perfil_id = ?, posicion = ?, actualizado_en = ? WHERE id = ?")
+          .run(perfilId, minimo - 1, new Date().toISOString(), id);
+        const despues = pendiente(yo, id);
+        registrar(quien, despues, 'traspaso', {
+          de: nombreDePerfil(antes.perfil_id),
+          de_id: antes.perfil_id,
+          a: nombreDePerfil(perfilId),
+          a_id: perfilId,
+          estado: antes.estado,
+          ...(nota && { nota }),
+        }, [perfilId, antes.perfil_id, antes.creado_por]);
+        return despues;
+      });
     },
 
     ordenar(quien, orden) {
@@ -688,38 +797,106 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
     listarComentarios(yo, pendienteId) {
       if (!pendiente(yo, pendienteId)) return null;
-      return db.prepare(`${SELECT_COMENTARIO} WHERE pendiente_id = ? ORDER BY creado_en, rowid`).all(pendienteId).map(fila);
+      const adjuntos = Map.groupBy(db.prepare(`${SELECT_ARCHIVO} WHERE pendiente_id = ? AND comentario_id IS NOT NULL ORDER BY creado_en, rowid`)
+        .all(pendienteId).map(fila), (archivo) => archivo.comentario_id);
+      return db.prepare(`${SELECT_COMENTARIO} WHERE pendiente_id = ? ORDER BY creado_en, rowid`).all(pendienteId)
+        .map((row) => ({ ...fila(row), archivos: adjuntos.get(row.id) ?? [] }));
     },
 
     // Avisa al responsable, a quien lo creó, a quienes ya escribieron y a los @mencionados.
-    crearComentario(quien, pendienteId, texto) {
+    // Los archivos tienen que ser borradores de quien escribe, subidos para este mismo pendiente.
+    crearComentario(quien, pendienteId, { texto, archivos: archivoIds = [] }) {
       const item = pendiente(quien.perfil_id, pendienteId);
       if (!item) return null;
       const id = randomUUID();
       return transaction(db, () => {
+        const adjuntos = archivoIds.map((archivoId) => fila(db.prepare(`${SELECT_ARCHIVO} WHERE id = ? AND pendiente_id = ? AND borrador = 1`)
+          .get(archivoId, pendienteId)));
+        if (adjuntos.some((archivo) => !archivo || !esAutor(quien, archivo))) throw httpError(422, 'archivos_invalidos');
         db.prepare('INSERT INTO comentarios (id, pendiente_id, perfil_id, autor, texto, creado_en) VALUES (?, ?, ?, ?, ?, ?)')
           .run(id, pendienteId, quien.perfil_id, quien.nombre, texto, new Date().toISOString());
+        const adjuntar = db.prepare('UPDATE archivos SET comentario_id = ?, borrador = 0 WHERE id = ?');
+        for (const archivo of adjuntos) adjuntar.run(id, archivo.id);
         const participantes = db.prepare('SELECT DISTINCT perfil_id FROM comentarios WHERE pendiente_id = ? AND perfil_id IS NOT NULL').all(pendienteId)
           .map((row) => row.perfil_id);
         // Los mencionados quedan en el historial para que su aviso diga "te mencionó".
         const menciones = mencionadosEn(texto);
-        const datos = { comentario_id: id, extracto: texto.slice(0, MAX_EXTRACTO), ...(menciones.length > 0 && { menciones }) };
+        const datos = {
+          comentario_id: id,
+          extracto: texto.slice(0, MAX_EXTRACTO),
+          ...(menciones.length > 0 && { menciones }),
+          ...(adjuntos.length > 0 && { adjuntos: adjuntos.map((archivo) => archivo.nombre) }),
+        };
         registrar(quien, item, 'comentario', datos, [item.perfil_id, item.creado_por, ...participantes, ...menciones]);
-        return fila(db.prepare(`${SELECT_COMENTARIO} WHERE id = ?`).get(id));
+        return { ...fila(db.prepare(`${SELECT_COMENTARIO} WHERE id = ?`).get(id)), archivos: adjuntos.map((archivo) => ({ ...archivo, comentario_id: id })) };
       });
     },
 
     // Cada quien borra solo sus mensajes; con el mensaje se van su entrada del historial y sus avisos.
-    borrarComentario(quien, id) {
+    async borrarComentario(quien, id) {
       const comentario = db.prepare(`SELECT c.perfil_id, c.autor FROM comentarios c JOIN pendientes ON pendientes.id = c.pendiente_id
         WHERE c.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, quien.perfil_id);
       if (!comentario) return false;
       const esSuyo = comentario.perfil_id ? comentario.perfil_id === quien.perfil_id : quien.perfil_id === null && comentario.autor === quien.nombre;
       if (!esSuyo) throw httpError(403, 'solo_el_autor');
+      const subidos = db.prepare('SELECT id FROM archivos WHERE comentario_id = ?').all(id).map((row) => row.id);
       transaction(db, () => {
         db.prepare("DELETE FROM actividad WHERE tipo = 'comentario' AND json_extract(datos, '$.comentario_id') = ?").run(id);
         db.prepare('DELETE FROM comentarios WHERE id = ?').run(id);
       });
+      await borrarSubidos(subidos);
+      return true;
+    },
+
+    // Para el chat queda como borrador hasta que se envía el mensaje; si no, se adjunta al pendiente y se avisa.
+    async guardarArchivo(quien, pendienteId, { nombre, contenido, paraChat }) {
+      const item = pendiente(quien.perfil_id, pendienteId);
+      if (!item) return null;
+      if (contenido.length === 0) throw httpError(422, 'archivo_vacio');
+      await limpiarBorradores();
+      const id = randomUUID();
+      const destino = archivoSubido(id);
+      await writeFile(`${destino}.tmp`, contenido, { mode: 0o600 });
+      await rename(`${destino}.tmp`, destino);
+      return transaction(db, () => {
+        db.prepare(`INSERT INTO archivos (id, pendiente_id, comentario_id, borrador, nombre, tipo, tamano, perfil_id, autor, creado_en)
+          VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(id, pendienteId, paraChat ? 1 : 0, nombre, tipoDeArchivo(contenido), contenido.length, quien.perfil_id, quien.nombre, new Date().toISOString());
+        if (!paraChat) registrar(quien, item, 'archivo', { archivo_id: id, nombre }, [item.perfil_id, item.creado_por]);
+        return fila(db.prepare(`${SELECT_ARCHIVO} WHERE id = ?`).get(id));
+      });
+    },
+
+    // Los del pendiente y los de su chat (no los borradores).
+    listarArchivos(yo, pendienteId) {
+      if (!pendiente(yo, pendienteId)) return null;
+      return db.prepare(`${SELECT_ARCHIVO} WHERE pendiente_id = ? AND borrador = 0 ORDER BY creado_en, rowid`).all(pendienteId).map(fila);
+    },
+
+    async leerArchivo(yo, id) {
+      const archivo = fila(db.prepare(`SELECT a.nombre, a.tipo FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
+        WHERE a.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo));
+      if (!archivo) return null;
+      try {
+        return { ...archivo, contenido: await readFile(archivoSubido(id)) };
+      } catch (error) {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      }
+    },
+
+    // Cada quien quita lo que subió. Lo de un mensaje se va al borrar el mensaje.
+    async borrarArchivo(quien, id) {
+      const archivo = fila(db.prepare(`SELECT a.perfil_id, a.autor, a.comentario_id FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
+        WHERE a.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, quien.perfil_id));
+      if (!archivo) return false;
+      if (archivo.comentario_id) throw httpError(409, 'archivo_de_mensaje');
+      if (!esAutor(quien, archivo)) throw httpError(403, 'solo_el_autor');
+      transaction(db, () => {
+        db.prepare("DELETE FROM actividad WHERE tipo = 'archivo' AND json_extract(datos, '$.archivo_id') = ?").run(id);
+        db.prepare('DELETE FROM archivos WHERE id = ?').run(id);
+      });
+      await borrarSubidos([id]);
       return true;
     },
 
@@ -999,7 +1176,38 @@ export function createApp(options = {}) {
         return enviar(201, 'comentario', repo.crearComentario(usuario, pendienteDeComentarios, parseComentario(await readJson(req))));
       }
       const comentarioId = url.pathname.match(COMENTARIO_PATH)?.[1];
-      if (comentarioId && req.method === 'DELETE') return listo(repo.borrarComentario(usuario, comentarioId));
+      if (comentarioId && req.method === 'DELETE') return listo(await repo.borrarComentario(usuario, comentarioId));
+
+      const pendienteDeArchivos = url.pathname.match(ARCHIVOS_PATH)?.[1];
+      if (pendienteDeArchivos && req.method === 'GET') return enviar(200, 'archivos', repo.listarArchivos(yo, pendienteDeArchivos));
+      if (pendienteDeArchivos && req.method === 'POST') {
+        const nombre = nombreDeArchivo(req.headers['x-nombre-archivo']);
+        const contenido = await readBody(req, MAX_ARCHIVO_BYTES);
+        return enviar(201, 'archivo', await repo.guardarArchivo(usuario, pendienteDeArchivos, { nombre, contenido, paraChat: url.searchParams.get('para') === 'chat' }));
+      }
+
+      const archivoId = url.pathname.match(ARCHIVO_PATH)?.[1];
+      if (archivoId && req.method === 'GET') {
+        const archivo = await repo.leerArchivo(yo, archivoId);
+        if (!archivo) return json(res, 404, { error: 'not_found' });
+        // Solo imágenes y PDF se abren en el navegador; lo demás se descarga. Nada se ejecuta como página de este sitio.
+        const enLinea = archivo.tipo !== 'application/octet-stream';
+        res.writeHead(200, {
+          'Content-Type': archivo.tipo,
+          'Content-Length': archivo.contenido.length,
+          'Cache-Control': 'private, max-age=31536000, immutable',
+          'Content-Disposition': `${enLinea ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(archivo.nombre)}`,
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+          'X-Content-Type-Options': 'nosniff',
+        });
+        return res.end(archivo.contenido);
+      }
+      if (archivoId && req.method === 'DELETE') return listo(await repo.borrarArchivo(usuario, archivoId));
+
+      const pendienteDeTraspaso = url.pathname.match(TRASPASO_PATH)?.[1];
+      if (pendienteDeTraspaso && req.method === 'POST') {
+        return enviar(200, 'pendiente', repo.traspasar(usuario, pendienteDeTraspaso, parseTraspaso(await readJson(req))));
+      }
 
       if (url.pathname === PERFILES_PATH && req.method === 'GET') return json(res, 200, { perfiles: repo.listarPerfiles() });
       // El nombre de la cuenta del equipo no puede ser un perfil: al entrar no se sabría cuál es.

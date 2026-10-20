@@ -21,6 +21,7 @@ import {
   Folder,
   FolderKanban,
   FolderOpen,
+  Forward,
   History,
   ImageIcon,
   Inbox,
@@ -31,6 +32,7 @@ import {
   LogOut,
   MessageSquare,
   MoreVertical,
+  Paperclip,
   Plus,
   RotateCw,
   Search,
@@ -56,6 +58,7 @@ import {
   KanbanProvider,
 } from "@/components/kibo-ui/kanban"
 import { Notificaciones } from "@/components/notificaciones"
+import { PasarDialog } from "@/components/pasar-dialog"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { PerfilesDialog, type CambiosPerfil } from "@/components/perfiles-dialog"
 import { ProyectoCombobox } from "@/components/proyecto-combobox"
@@ -237,6 +240,8 @@ export function Tablero({
   // Un enlace con ?p=<id> (el de WhatsApp, por ejemplo) abre ese pendiente.
   const [abierto, setAbierto] = useState(() => new URLSearchParams(window.location.search).get("p"))
   const [ventana, setVentana] = useState<Ventana | null>(null)
+  // El pendiente hecho que se está pasando a otra persona.
+  const [pasando, setPasando] = useState<Pendiente | null>(null)
   const [confirmarLimpieza, setConfirmarLimpieza] = useState(false)
   const [sinAvisoEquipo, setSinAvisoEquipo] = useState(avisoEquipoCerrado)
   const ultimas = useRef<Tarjeta[]>([])
@@ -458,8 +463,8 @@ export function Tablero({
     }
   }
 
-  // Al crear un pendiente para otra persona, ofrece avisarle por WhatsApp con el enlace al pendiente.
-  function avisarPorWhatsApp(nuevo: Pendiente) {
+  // Al darle un pendiente a otra persona, ofrece avisarle por WhatsApp con el enlace al pendiente.
+  function avisarPorWhatsApp(nuevo: Pendiente, titulo?: string) {
     const asignado = nuevo.perfil_id ? perfilesPorId.get(nuevo.perfil_id) : undefined
     if (!asignado || asignado.id === usuario?.perfil_id) return
     const enlace = enlaceWhatsApp({
@@ -473,20 +478,41 @@ export function Tablero({
       ? "Ya le llegó el aviso en el tablero."
       : `${asignado.nombre} aún no entra con su perfil, así que no verá el aviso en el tablero.`
     const porWhatsApp = asignado.telefono ? "¿Le escribes por WhatsApp?" : "¿Le escribes por WhatsApp? Sin número guardado, elegirás el chat."
-    toast.success(`Pendiente asignado a ${asignado.nombre}`, {
+    toast.success(titulo ?? `Pendiente asignado a ${asignado.nombre}`, {
       description: `${enElTablero} ${porWhatsApp}`,
       action: { label: "WhatsApp", onClick: () => window.open(enlace, "_blank", "noopener,noreferrer") },
       duration: 15000,
     })
   }
 
-  const cambiarCantidadComentarios = useCallback((id: string, cantidad: number) => {
+  // El chat y los archivos del detalle avisan cuántos hay, para el contador de la tarjeta.
+  const cambiarConteo = useCallback((id: string, campo: "num_comentarios" | "num_archivos", cantidad: number) => {
     setTarjetas((actuales) =>
-      actuales.some((t) => t.id === id && t.num_comentarios !== cantidad)
-        ? actuales.map((t) => (t.id === id ? { ...t, num_comentarios: cantidad } : t))
+      actuales.some((t) => t.id === id && t[campo] !== cantidad)
+        ? actuales.map((t) => (t.id === id ? { ...t, [campo]: cantidad } : t))
         : actuales
     )
   }, [])
+  const cambiarCantidadComentarios = useCallback((id: string, cantidad: number) => cambiarConteo(id, "num_comentarios", cantidad), [cambiarConteo])
+  const cambiarCantidadArchivos = useCallback((id: string, cantidad: number) => cambiarConteo(id, "num_archivos", cantidad), [cambiarConteo])
+
+  // Vuelve a Por hacer, arriba de todo, con el nuevo responsable; el historial queda en el mismo pendiente.
+  async function pasar(perfilId: string, nota: string) {
+    if (!pasando) return false
+    try {
+      const pasado = await api.traspasar(credenciales, pasando.id, perfilId, nota)
+      setTarjetas((actuales) => [aTarjeta(pasado), ...actuales.filter((t) => t.id !== pasado.id)])
+      setPasando(null)
+      setError("")
+      const nombre = perfilesPorId.get(perfilId)?.nombre ?? "otra persona"
+      if (perfilId === usuario?.perfil_id) toast.success(`«${pasado.texto}» volvió a Por hacer contigo`)
+      else avisarPorWhatsApp(pasado, `«${pasado.texto}» pasó a ${nombre}`)
+      return true
+    } catch (err) {
+      fallar(err)
+      return false
+    }
+  }
 
   // El cambio se ve al instante; la respuesta trae además el resumen de la descripción para la tarjeta.
   const cambiarPendiente = useCallback(
@@ -1023,6 +1049,19 @@ export function Tablero({
                                 >
                                   {tarjeta.texto}
                                 </button>
+                                {tarjeta.column === "hecho" && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-xs"
+                                    className="text-muted-foreground hover:text-primary"
+                                    aria-label={`Pasar "${tarjeta.texto}" a otra persona`}
+                                    title="Pasar a otra persona (vuelve a Por hacer)"
+                                    {...noArrastrar}
+                                    onClick={() => setPasando(tarjeta)}
+                                  >
+                                    <Forward />
+                                  </Button>
+                                )}
                                 <Button
                                   variant="ghost"
                                   size="icon-xs"
@@ -1064,6 +1103,14 @@ export function Tablero({
                                     <MessageSquare className="size-3.5" /> {tarjeta.num_comentarios}
                                   </span>
                                 )}
+                                {tarjeta.num_archivos > 0 && (
+                                  <span
+                                    className="flex items-center gap-1 text-xs text-muted-foreground"
+                                    title={tarjeta.num_archivos === 1 ? "1 archivo" : `${tarjeta.num_archivos} archivos`}
+                                  >
+                                    <Paperclip className="size-3.5" /> {tarjeta.num_archivos}
+                                  </span>
+                                )}
                                 {tarjeta.num_imagenes > 0 && (
                                   <span
                                     className="flex items-center gap-1 text-xs text-muted-foreground"
@@ -1092,7 +1139,7 @@ export function Tablero({
                                       value={tarjeta.perfil_id ?? NADIE}
                                       onValueChange={(valor) => cambiarPendiente(tarjeta.id, { perfil_id: valor === NADIE ? null : valor })}
                                     >
-                                      {perfiles.map((opcion) => (
+                                      {involucrados(perfiles, organizacion, tarjeta.perfil_id).map((opcion) => (
                                         <DropdownMenuRadioItem key={opcion.id} value={opcion.id}>
                                           <PerfilAvatar perfil={opcion} size="sm" /> {opcion.nombre}
                                         </DropdownMenuRadioItem>
@@ -1181,6 +1228,12 @@ export function Tablero({
         onAbrir={abrirPendiente}
         onSalir={onSalir}
       />
+      <PasarDialog
+        pendiente={pasando}
+        personas={pasando ? involucrados(perfiles, organizacionDe(catalogo, pasando.proyecto_id)) : []}
+        onCerrar={() => setPasando(null)}
+        onPasar={pasar}
+      />
       <Toaster position="bottom-right" />
 
       <DetallePendiente
@@ -1192,6 +1245,8 @@ export function Tablero({
         onCrearProyecto={crearProyecto}
         onCambiar={cambiarPendiente}
         onCantidadComentarios={cambiarCantidadComentarios}
+        onCantidadArchivos={cambiarCantidadArchivos}
+        onPasar={setPasando}
         onBorrar={borrar}
         onCerrar={cerrarDetalle}
         onSalir={onSalir}

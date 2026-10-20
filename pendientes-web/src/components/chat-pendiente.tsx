@@ -1,18 +1,24 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react"
-import { SendHorizontal, Trash2 } from "lucide-react"
+import { Paperclip, SendHorizontal, Trash2 } from "lucide-react"
 import { cn } from "cn"
 
+import { ChipArchivo } from "@/components/archivos"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { Button } from "@/components/ui/button"
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { Textarea } from "@/components/ui/textarea"
-import { api, esNoAutorizado, mensajeDeError, type Comentario, type Perfil, type Usuario } from "@/lib/api"
+import { api, esNoAutorizado, MAX_IMAGEN_BYTES, mensajeDeError, type Archivo, type Comentario, type Perfil, type Usuario } from "@/lib/api"
 import { fechaCompleta, haceCuanto } from "@/lib/actividad"
+import { abrirArchivo, traeArchivos } from "@/lib/archivos"
 
 // Mientras el chat está abierto se buscan mensajes nuevos cada tanto (y al volver a la pestaña).
 const CADA_MS = 10_000
 const MAX_SUGERENCIAS = 6
+const MAX_ADJUNTOS = 10
+
+// Un archivo elegido para el próximo mensaje: mientras sube no tiene `archivo`.
+type Adjunto = { clave: string; nombre: string; tipo: string; tamano: number; archivo?: Archivo }
 // Lo escrito entre una @ y el cursor, mientras se escribe una mención.
 const MENCION_EN_CURSO = /(?:^|\s)@([^\s@]{0,30})$/u
 
@@ -74,7 +80,10 @@ export function ChatPendiente({
   // La mención que se está escribiendo: desde la @ hasta el cursor.
   const [mencion, setMencion] = useState<{ inicio: number; fin: number; consulta: string } | null>(null)
   const [elegido, setElegido] = useState(0)
+  const [adjuntos, setAdjuntos] = useState<Adjunto[]>([])
+  const [encima, setEncima] = useState(false)
   const idSugerencias = useId()
+  const entrada = useRef<HTMLInputElement>(null)
   const lista = useRef<HTMLDivElement>(null)
   const formulario = useRef<HTMLFormElement>(null)
   const campo = useRef<HTMLTextAreaElement>(null)
@@ -160,17 +169,43 @@ export function ChatPendiente({
   const esMio = (comentario: Comentario) =>
     comentario.perfil_id ? comentario.perfil_id === usuario?.perfil_id : usuario?.perfil_id === null && comentario.autor === usuario.nombre
 
+  // Se suben apenas se eligen (como borradores del próximo mensaje); el mensaje solo los nombra al enviarse.
+  async function adjuntar(lista: FileList | File[]) {
+    const archivos = [...lista].slice(0, Math.max(MAX_ADJUNTOS - adjuntos.length, 0))
+    if (archivos.length < lista.length) setError(`Un mensaje lleva hasta ${MAX_ADJUNTOS} archivos.`)
+    for (const archivo of archivos) {
+      if (archivo.size > MAX_IMAGEN_BYTES) {
+        setError(`«${archivo.name}» pesa más de 10 MB.`)
+        continue
+      }
+      const clave = crypto.randomUUID()
+      setAdjuntos((actuales) => [...actuales, { clave, nombre: archivo.name, tipo: archivo.type, tamano: archivo.size }])
+      try {
+        const subido = await api.archivos.subir(credenciales, pendienteId, archivo, true)
+        setAdjuntos((actuales) => actuales.map((a) => (a.clave === clave ? { ...a, archivo: subido } : a)))
+      } catch (err) {
+        setAdjuntos((actuales) => actuales.filter((a) => a.clave !== clave))
+        fallar(err)
+      }
+    }
+  }
+
+  const subiendo = adjuntos.some((adjunto) => !adjunto.archivo)
+  const listos = adjuntos.flatMap((adjunto) => (adjunto.archivo ? [adjunto.archivo.id] : []))
+  const puedeEnviar = (texto.trim() !== "" || listos.length > 0) && !subiendo && !enviando
+
   async function enviar(event?: FormEvent) {
     event?.preventDefault()
     const limpio = texto.trim()
-    if (!limpio || enviando) return
+    if (!puedeEnviar) return
     setEnviando(true)
     setMencion(null)
     try {
-      const nuevo = await api.comentarios.crear(credenciales, pendienteId, limpio)
+      const nuevo = await api.comentarios.crear(credenciales, pendienteId, limpio, listos)
       abajo.current = true
       setComentarios((actuales) => [...(actuales ?? []), nuevo])
       setTexto("")
+      setAdjuntos([])
       setError("")
     } catch (err) {
       fallar(err)
@@ -242,14 +277,23 @@ export function ChatPendiente({
                         </button>
                       ))}
                   </div>
-                  <p
-                    className={cn(
-                      "m-0 rounded-2xl px-3 py-2 text-sm break-words whitespace-pre-wrap",
-                      mio ? "rounded-tr-sm bg-primary text-primary-foreground" : "rounded-tl-sm bg-muted"
-                    )}
-                  >
-                    {formatear(comentario.texto, perfiles, yo, mio)}
-                  </p>
+                  {comentario.texto && (
+                    <p
+                      className={cn(
+                        "m-0 rounded-2xl px-3 py-2 text-sm break-words whitespace-pre-wrap",
+                        mio ? "rounded-tr-sm bg-primary text-primary-foreground" : "rounded-tl-sm bg-muted"
+                      )}
+                    >
+                      {formatear(comentario.texto, perfiles, yo, mio)}
+                    </p>
+                  )}
+                  {comentario.archivos.length > 0 && (
+                    <div className={cn("flex max-w-full flex-col gap-1", mio && "items-end")}>
+                      {comentario.archivos.map((archivo) => (
+                        <ChipArchivo key={archivo.id} archivo={archivo} onAbrir={() => abrirArchivo(credenciales, archivo).catch(fallar)} />
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )
@@ -263,48 +307,106 @@ export function ChatPendiente({
       )}
       <Popover open={sugerencias.length > 0} onOpenChange={(abierto) => !abierto && setMencion(null)}>
         <PopoverAnchor asChild>
-          <form ref={formulario} onSubmit={enviar} className="flex items-end gap-2 border-t p-3">
-            <Textarea
-              ref={campo}
-              aria-label="Mensaje"
-              aria-autocomplete="list"
-              aria-controls={sugerencias.length > 0 ? idSugerencias : undefined}
-              placeholder="Escribe un mensaje… (@ para mencionar)"
-              value={texto}
-              onChange={(event) => {
-                setTexto(event.target.value)
-                revisarMencion(event.target)
-              }}
-              onSelect={(event) => revisarMencion(event.currentTarget)}
-              onKeyDown={(event) => {
-                if (event.nativeEvent.isComposing) return
-                // Con la lista de menciones abierta, las flechas eligen y Enter o Tab mencionan.
-                if (sugerida) {
-                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                    event.preventDefault()
-                    const paso = event.key === "ArrowDown" ? 1 : -1
-                    setElegido((sugerencias.indexOf(sugerida) + paso + sugerencias.length) % sugerencias.length)
-                    return
-                  }
-                  if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
-                    event.preventDefault()
-                    mencionar(sugerida)
-                    return
-                  }
-                }
-                // Enter envía; Shift+Enter hace un salto de línea.
-                if (event.key === "Enter" && !event.shiftKey) {
+          <form
+            ref={formulario}
+            onSubmit={enviar}
+            className={cn("flex flex-col gap-2 border-t p-3 transition-colors", encima && "bg-primary/10")}
+            onDragOver={(event) => {
+              if (!traeArchivos(event)) return
+              event.preventDefault()
+              setEncima(true)
+            }}
+            onDragLeave={() => setEncima(false)}
+            onDrop={(event) => {
+              if (!traeArchivos(event)) return
+              event.preventDefault()
+              setEncima(false)
+              adjuntar(event.dataTransfer.files)
+            }}
+          >
+            {adjuntos.length > 0 && (
+              <div className="flex flex-wrap gap-1.5" aria-label="Archivos para enviar">
+                {adjuntos.map((adjunto) => (
+                  <ChipArchivo
+                    key={adjunto.clave}
+                    archivo={adjunto}
+                    subiendo={!adjunto.archivo}
+                    onQuitar={() => setAdjuntos((actuales) => actuales.filter((a) => a.clave !== adjunto.clave))}
+                  />
+                ))}
+              </div>
+            )}
+            <div className="flex items-end gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="shrink-0 text-muted-foreground"
+                aria-label="Adjuntar archivos"
+                title="Adjuntar archivos (también puedes pegarlos o soltarlos aquí)"
+                onClick={() => entrada.current?.click()}
+              >
+                <Paperclip />
+              </Button>
+              <input
+                ref={entrada}
+                type="file"
+                multiple
+                hidden
+                aria-label="Archivos para el mensaje"
+                onChange={(event) => {
+                  if (event.target.files) adjuntar(event.target.files)
+                  event.target.value = ""
+                }}
+              />
+              <Textarea
+                ref={campo}
+                aria-label="Mensaje"
+                aria-autocomplete="list"
+                aria-controls={sugerencias.length > 0 ? idSugerencias : undefined}
+                placeholder="Escribe un mensaje… (@ para mencionar)"
+                value={texto}
+                onChange={(event) => {
+                  setTexto(event.target.value)
+                  revisarMencion(event.target)
+                }}
+                onSelect={(event) => revisarMencion(event.currentTarget)}
+                onPaste={(event) => {
+                  // Una captura o un archivo copiado se adjunta; el texto se pega como siempre.
+                  if (event.clipboardData.files.length === 0) return
                   event.preventDefault()
-                  enviar()
-                }
-              }}
-              maxLength={2000}
-              rows={1}
-              className="max-h-32 min-h-9 resize-none py-2"
-            />
-            <Button type="submit" size="icon" className="shrink-0" disabled={!texto.trim() || enviando} aria-label="Enviar mensaje">
-              <SendHorizontal />
-            </Button>
+                  adjuntar(event.clipboardData.files)
+                }}
+                onKeyDown={(event) => {
+                  if (event.nativeEvent.isComposing) return
+                  // Con la lista de menciones abierta, las flechas eligen y Enter o Tab mencionan.
+                  if (sugerida) {
+                    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                      event.preventDefault()
+                      const paso = event.key === "ArrowDown" ? 1 : -1
+                      setElegido((sugerencias.indexOf(sugerida) + paso + sugerencias.length) % sugerencias.length)
+                      return
+                    }
+                    if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+                      event.preventDefault()
+                      mencionar(sugerida)
+                      return
+                    }
+                  }
+                  // Enter envía; Shift+Enter hace un salto de línea.
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault()
+                    enviar()
+                  }
+                }}
+                maxLength={2000}
+                rows={1}
+                className="max-h-32 min-h-9 resize-none py-2"
+              />
+              <Button type="submit" size="icon" className="shrink-0" disabled={!puedeEnviar} aria-label="Enviar mensaje">
+                <SendHorizontal />
+              </Button>
+            </div>
           </form>
         </PopoverAnchor>
         {/* El foco se queda en el mensaje mientras se elige; Escape cierra solo la lista. */}
