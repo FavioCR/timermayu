@@ -34,6 +34,7 @@ import {
   Lock,
   LogOut,
   MessageSquare,
+  MonitorDown,
   MoreVertical,
   Paperclip,
   Plus,
@@ -56,6 +57,7 @@ import { DetallePendiente } from "@/components/detalle-pendiente"
 import { EstadoConexion } from "@/components/estado-conexion"
 import { porNombre, PuntoEtiqueta } from "@/components/etiquetas-selector"
 import { HechosAnteriores } from "@/components/hechos-anteriores"
+import { InstalarDialog } from "@/components/instalar-dialog"
 import { IlustracionColumna } from "@/components/ilustraciones"
 import { InvolucradosMenu } from "@/components/involucrados-menu"
 import {
@@ -120,6 +122,7 @@ import { enlaceWhatsApp } from "@/lib/actividad"
 import { agrupar, conOrganizacion, conProyecto, involucrados, organizacionDe, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
 import { conectarCambios, revisarConexion, useCambios } from "@/lib/cambios"
 import { COLUMNAS, NADIE } from "@/lib/estados"
+import { instalar, useInstalacion } from "@/lib/instalar"
 import { separarTipo, TIPOS, tipoDe } from "@/lib/tipos"
 
 const PerfilesDialog = lazy(() => import("@/components/perfiles-dialog").then((modulo) => ({ default: modulo.PerfilesDialog })))
@@ -208,7 +211,7 @@ function leerSelecciones(): Selecciones {
   }
 }
 
-type Ventana = "proyectos" | "perfiles" | "actividad" | "ia" | "crear-ia"
+type Ventana = "proyectos" | "perfiles" | "actividad" | "ia" | "crear-ia" | "instalar"
 
 // Tocar un botón dentro de la tarjeta no debe empezar a arrastrarla.
 const detener = (event: SyntheticEvent) => event.stopPropagation()
@@ -378,6 +381,7 @@ export function Tablero({
   // Un enlace con ?p=<id> (el de WhatsApp, por ejemplo) abre ese pendiente.
   const [abierto, setAbierto] = useState(() => new URLSearchParams(window.location.search).get("p"))
   const [ventana, setVentana] = useState<Ventana | null>(null)
+  const instalacion = useInstalacion()
   // Abierta una vez, Perfiles queda montada para que se cierre con su animación.
   const [perfilesAbiertos, setPerfilesAbiertos] = useState(false)
   if (ventana === "perfiles" && !perfilesAbiertos) setPerfilesAbiertos(true)
@@ -680,7 +684,8 @@ export function Tablero({
         perfil_id: responsableDelFormulario === NADIE ? null : responsableDelFormulario,
         etiquetas: marcaFiltrada && !marcaFiltrada.startsWith(PREFIJO_TIPO) ? [marcaFiltrada] : [],
       })
-      setTarjetas((actuales) => [aTarjeta(nuevo), ...actuales])
+      // Sin responsable entra arriba; con responsable, al final de su cola (como lo ordena el servidor).
+      setTarjetas((actuales) => (nuevo.perfil_id ? [...actuales, aTarjeta(nuevo)] : [aTarjeta(nuevo), ...actuales]))
       if (nuevo.eligiendoTipo) {
         setEligiendoTipo((actuales) => new Set(actuales).add(nuevo.id))
         // Por si el aviso no llega (sin conexión en tiempo real): la IA tarda como mucho un minuto.
@@ -728,12 +733,12 @@ export function Tablero({
   const cambiarCantidadComentarios = useCallback((id: string, cantidad: number) => cambiarConteo(id, "num_comentarios", cantidad), [cambiarConteo])
   const cambiarCantidadArchivos = useCallback((id: string, cantidad: number) => cambiarConteo(id, "num_archivos", cantidad), [cambiarConteo])
 
-  // Vuelve a Por hacer, arriba de todo, con el nuevo responsable; el historial queda en el mismo pendiente.
+  // Vuelve a Por hacer, al final de la cola, con el nuevo responsable; el historial queda en el mismo pendiente.
   async function pasar(perfilId: string, nota: string) {
     if (!pasando) return false
     try {
       const pasado = await api.traspasar(credenciales, pasando.id, perfilId, nota)
-      setTarjetas((actuales) => [aTarjeta(pasado), ...actuales.filter((t) => t.id !== pasado.id)])
+      setTarjetas((actuales) => [...actuales.filter((t) => t.id !== pasado.id), aTarjeta(pasado)])
       setPasando(null)
       setError("")
       const nombre = perfilesPorId.get(perfilId)?.nombre ?? "otra persona"
@@ -747,12 +752,19 @@ export function Tablero({
   }
 
   // El cambio se ve al instante; la respuesta trae además el resumen de la descripción para la tarjeta.
+  // Al dárselo a otra persona va al final de la cola de su columna, igual que en el servidor.
   const cambiarPendiente = useCallback(
     async (id: string, cambios: CambiosPendiente) => {
       const { descripcion: _descripcion, ...enLaTarjeta } = cambios
       const fecha = (t: Tarjeta) =>
         cambios.estado && cambios.estado !== t.estado ? { hecho_en: cambios.estado === "hecho" ? new Date().toISOString() : null } : {}
-      setTarjetas((actuales) => actuales.map((t) => (t.id === id ? aTarjeta({ ...t, ...enLaTarjeta, ...fecha(t) }) : t)))
+      setTarjetas((actuales) => {
+        const antes = actuales.find((t) => t.id === id)
+        if (!antes) return actuales
+        const despues = aTarjeta({ ...antes, ...enLaTarjeta, ...fecha(antes) })
+        const asignado = Boolean(cambios.perfil_id) && cambios.perfil_id !== antes.perfil_id
+        return asignado ? [...actuales.filter((t) => t.id !== id), despues] : actuales.map((t) => (t.id === id ? despues : t))
+      })
       try {
         const actualizado = await api.actualizar(credenciales, id, cambios)
         setTarjetas((actuales) => actuales.map((t) => (t.id === id ? aTarjeta(actualizado) : t)))
@@ -839,9 +851,21 @@ export function Tablero({
     [credenciales, fallar, recargar]
   )
 
-  // Lo que crea la IA entra arriba del tablero, en su orden.
+  // Con la ventana del navegador si la ofrece; si no (Safari, Firefox…), los pasos para hacerlo a mano.
+  async function instalarApp() {
+    const resultado = await instalar()
+    if (resultado === null) setVentana("instalar")
+    else if (resultado === "accepted") toast.success("Listo: el tablero quedó instalado", { description: "Ábrelo desde el Dock, el Launchpad o el menú Inicio." })
+  }
+
+  // Lo que crea la IA entra en su orden: arriba del tablero lo que no tiene responsable, y al final de su cola lo asignado.
   function agregarCreados(nuevos: Pendiente[]) {
-    setTarjetas((actuales) => [...nuevos.map(aTarjeta), ...actuales.filter((t) => !nuevos.some((n) => n.id === t.id))])
+    const resto = (actuales: Tarjeta[]) => actuales.filter((t) => !nuevos.some((n) => n.id === t.id))
+    setTarjetas((actuales) => [
+      ...nuevos.filter((n) => !n.perfil_id).map(aTarjeta),
+      ...resto(actuales),
+      ...nuevos.filter((n) => n.perfil_id).map(aTarjeta),
+    ])
     toast.success(nuevos.length === 1 ? "Se creó 1 pendiente" : `Se crearon ${nuevos.length} pendientes`)
   }
 
@@ -965,6 +989,12 @@ export function Tablero({
           {/* En pantallas angostas solo quedan la campana y la cuenta; lo demás va en el menú de la cuenta. */}
           <div className="ml-auto flex items-center gap-1">
             <div className="hidden items-center gap-1 md:flex">
+              {/* Solo cuando el navegador puede instalarlo con un clic; si no, queda en el menú de la cuenta. */}
+              {instalacion.directa && !instalacion.instalada && (
+                <Button variant="ghost" onClick={instalarApp}>
+                  <MonitorDown /> Instalar
+                </Button>
+              )}
               <Button variant="ghost" onClick={() => setVentana("proyectos")}>
                 <FolderKanban /> Proyectos
               </Button>
@@ -1021,6 +1051,11 @@ export function Tablero({
                 <DropdownMenuItem onSelect={() => setVentana("ia")}>
                   <Sparkles /> Inteligencia artificial
                 </DropdownMenuItem>
+                {!instalacion.instalada && (
+                  <DropdownMenuItem onSelect={instalarApp}>
+                    <MonitorDown /> Instalar en el escritorio
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={onSalir}>
                   <LogOut /> Salir
@@ -1576,6 +1611,7 @@ export function Tablero({
           />
         </Suspense>
       )}
+      <InstalarDialog abierto={ventana === "instalar"} onAbiertoChange={(siguiente) => setVentana(siguiente ? "instalar" : null)} />
       {iaAbierta && (
         <Suspense fallback={null}>
           <IaDialog

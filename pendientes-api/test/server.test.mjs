@@ -776,7 +776,7 @@ test('pasar un pendiente hecho a otra persona: vuelve a Por hacer y conserva su 
 
   const { pendiente: pasado } = await diego.data('POST', `/${pendiente.id}/traspaso`, { perfil_id: junior.perfil.id, nota: ' El frontend ' });
   assert.deepEqual([pasado.id, pasado.estado, pasado.perfil_id, pasado.num_comentarios], [pendiente.id, 'pendiente', junior.perfil.id, 1]);
-  assert.equal((await diego.data('GET')).pendientes[0].id, pendiente.id);
+  assert.equal((await diego.data('GET')).pendientes.at(-1).id, pendiente.id, 'al final de la cola');
   const historial = (await diego.data('GET', `/${pendiente.id}/actividad`)).actividad;
   assert.deepEqual(historial.map((a) => a.tipo), ['traspaso', 'comentario', 'estado', 'creado']);
   assert.deepEqual(historial[0].datos, { de: 'Diego', de_id: diego.perfil.id, a: 'Junior', a_id: junior.perfil.id, estado: 'hecho', nota: 'El frontend' });
@@ -948,9 +948,9 @@ test('IA: arma el pedido de cada proveedor y pasa los nombres que contesta a ids
     await data('PUT', '/ia', { proveedor: id, claves: { [id]: clave } });
     const { sugerencias } = await diego.data('POST', '/ia/sugerir', { texto: 'Diego arregla el login', proyecto_id: otro.id });
     assert.deepEqual(sugerencias, [
-      { texto: 'Arreglar el login', detalle: 'Falla con Google', perfil_id: diego.perfil.id, proyecto_id: web.id, tipo: 'fix', etiquetas: [sprint.id], estado: 'haciendo' },
+      { texto: 'Arreglar el login', detalle: 'Falla con Google', perfil_id: diego.perfil.id, proyecto_id: web.id, tipo: 'fix', etiquetas: [sprint.id], estado: 'haciendo', imagenes: [] },
       // Responsable desconocido: nadie. Estado raro: pendiente. Proyecto "Web" a secas vale porque no se repite.
-      { texto: 'Escribir la nota', detalle: null, perfil_id: null, proyecto_id: web.id, tipo: null, etiquetas: [], estado: 'pendiente' },
+      { texto: 'Escribir la nota', detalle: null, perfil_id: null, proyecto_id: web.id, tipo: null, etiquetas: [], estado: 'pendiente', imagenes: [] },
     ], id);
     const pedido = proveedor.pedidos.at(-1);
     const sistema = pedido.cuerpo.system_instruction ?? pedido.cuerpo.instructions ?? pedido.cuerpo.messages?.[0].content;
@@ -978,24 +978,33 @@ test('IA: arma el pedido de cada proveedor y pasa los nombres que contesta a ids
     }
   }
 
-  // Con imágenes (y sin texto), cada proveedor las recibe en su formato, después del texto.
+  // Con imágenes (y sin texto), cada proveedor las recibe en su formato, después del texto y cada una con su rótulo.
   const png = PNG.toString('base64');
   for (const id of ['gemini', 'openai', 'openrouter']) {
     await data('PUT', '/ia', { proveedor: id });
     await diego.data('POST', '/ia/sugerir', { texto: '', imagenes: [{ datos: png }] });
     const { cuerpo } = proveedor.pedidos.at(-1);
     if (id === 'gemini') {
-      assert.deepEqual(cuerpo.input, [{ type: 'text', text: 'Saca los pendientes de las imágenes.' }, { type: 'image', data: png, mime_type: 'image/png' }]);
+      assert.deepEqual(cuerpo.input, [
+        { type: 'text', text: 'Saca los pendientes de las imágenes.' },
+        { type: 'text', text: 'Imagen 1:' },
+        { type: 'image', data: png, mime_type: 'image/png' },
+      ]);
     }
     if (id === 'openai') {
       assert.deepEqual(cuerpo.input, [{
         role: 'user',
-        content: [{ type: 'input_text', text: 'Saca los pendientes de las imágenes.' }, { type: 'input_image', image_url: `data:image/png;base64,${png}` }],
+        content: [
+          { type: 'input_text', text: 'Saca los pendientes de las imágenes.' },
+          { type: 'input_text', text: 'Imagen 1:' },
+          { type: 'input_image', image_url: `data:image/png;base64,${png}` },
+        ],
       }]);
     }
     if (id === 'openrouter') {
       assert.deepEqual(cuerpo.messages[1].content, [
         { type: 'text', text: 'Saca los pendientes de las imágenes.' },
+        { type: 'text', text: 'Imagen 1:' },
         { type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } },
       ]);
     }
@@ -1152,6 +1161,74 @@ test('IA: los errores del proveedor se traducen y no repiten la clave', async (t
   assert.equal((await sugerir()).error, 'ia_sin_imagenes');
   respuesta = { status: 400, json: { error: { message: 'Invalid content type. image_url is only supported by certain models.' } } };
   assert.equal((await sugerir()).error, 'ia_sin_imagenes');
+});
+
+test('IA: dice qué imágenes son de cada pendiente; con uno solo, se lleva todas', async (t) => {
+  let pendientes;
+  const proveedor = await startProveedor(t, () => ({
+    json: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: JSON.stringify({ pendientes }) }] }] },
+  }));
+  const { data } = await startServer(t, { basesIA: { gemini: proveedor.url, openai: proveedor.url, openrouter: proveedor.url } });
+  await data('PUT', '/ia', { proveedor: 'gemini', claves: { gemini: 'AIza-falsa' } });
+  const base = { detalle: null, responsable: null, proyecto: null, etiquetas: [], tipo: null, estado: 'pendiente' };
+  const png = { datos: PNG.toString('base64') };
+  const sugerir = async (cantidad) => (await data('POST', '/ia/sugerir', { texto: 'mira', imagenes: Array(cantidad).fill(png) })).sugerencias;
+
+  // Números de 1 en adelante → posiciones desde 0; los que no existen se ignoran y no se repiten.
+  pendientes = [{ ...base, titulo: 'Uno', imagenes: [2, 9, 0, 2] }, { ...base, titulo: 'Dos', imagenes: [] }, { ...base, titulo: 'Tres', imagenes: [1, 3] }];
+  assert.deepEqual((await sugerir(3)).map((s) => s.imagenes), [[1], [], [0, 2]]);
+  // Una sola tarea sin imágenes elegidas: todas son suyas. Si eligió alguna, solo esas.
+  pendientes = [{ ...base, titulo: 'Única', imagenes: [] }];
+  assert.deepEqual((await sugerir(2))[0].imagenes, [0, 1]);
+  pendientes = [{ ...base, titulo: 'Única', imagenes: [2] }];
+  assert.deepEqual((await sugerir(2))[0].imagenes, [1]);
+  // Sin imágenes enviadas no hay nada que adjuntar, diga lo que diga la IA.
+  assert.deepEqual((await data('POST', '/ia/sugerir', { texto: 'sin imágenes' })).sugerencias[0].imagenes, []);
+});
+
+test('al asignar un pendiente va al final de la cola de su columna; sin responsable, lo nuevo va arriba', async (t) => {
+  const { entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const columna = async (estado) => (await diego.data('GET')).pendientes.filter((p) => p.estado === estado).map((p) => p.texto);
+  const crear = async (texto, extra = {}) => (await diego.data('POST', '', { texto, ...extra })).pendiente;
+  const a = await crear('A');
+  await crear('Hecho', { estado: 'hecho' });
+  const b = await crear('B');
+  const c = await crear('C');
+  assert.deepEqual(await columna('pendiente'), ['C', 'B', 'A']);
+
+  // Creado ya con responsable: al final.
+  const d = await crear('D', { perfil_id: favio.perfil.id });
+  assert.deepEqual(await columna('pendiente'), ['C', 'B', 'A', 'D']);
+  // Asignar uno que estaba arriba lo manda al final; volver a mandar el mismo responsable o quitarlo no lo mueve.
+  await diego.data('PATCH', `/${c.id}`, { perfil_id: favio.perfil.id });
+  assert.deepEqual(await columna('pendiente'), ['B', 'A', 'D', 'C']);
+  await diego.data('PATCH', `/${d.id}`, { perfil_id: favio.perfil.id, texto: 'D2' });
+  await diego.data('PATCH', `/${a.id}`, { perfil_id: null });
+  assert.deepEqual(await columna('pendiente'), ['B', 'A', 'D2', 'C']);
+  // Reasignar a otra persona también, y en la columna a la que va si cambia de estado a la vez.
+  await diego.data('PATCH', `/${d.id}`, { perfil_id: diego.perfil.id });
+  assert.deepEqual(await columna('pendiente'), ['B', 'A', 'C', 'D2']);
+  await diego.data('PATCH', `/${b.id}`, { perfil_id: favio.perfil.id, estado: 'hecho' });
+  assert.deepEqual(await columna('hecho'), ['Hecho', 'B']);
+  // Pasarlo a otra persona: vuelve a Por hacer, al final.
+  await diego.data('POST', `/${b.id}/traspaso`, { perfil_id: diego.perfil.id });
+  assert.deepEqual(await columna('pendiente'), ['A', 'C', 'D2', 'B']);
+});
+
+test('escribir la descripción enseguida de crearlo es parte de crearlo; después sí queda en el historial', async (t) => {
+  const { entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const { pendiente } = await diego.data('POST', '', { texto: 'Con imágenes' });
+  const descripcion = JSON.stringify([{ type: 'paragraph', content: [{ type: 'text', text: 'Mira la captura', styles: {} }] }]);
+  await diego.data('PATCH', `/${pendiente.id}`, { descripcion });
+  const tipos = async () => (await diego.data('GET', `/${pendiente.id}/actividad`)).actividad.map((a) => `${a.autor}:${a.tipo}`);
+  assert.deepEqual(await tipos(), ['Diego:creado']);
+  // Si la edita otra persona, sí.
+  await favio.data('PATCH', `/${pendiente.id}`, { descripcion: JSON.stringify([]) });
+  assert.deepEqual(await tipos(), ['Favio:descripcion', 'Diego:creado']);
 });
 
 test('cambios en tiempo real: avisa a las otras pestañas lo que cambió, sin colar lo privado', async (t) => {

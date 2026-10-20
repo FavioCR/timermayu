@@ -55,6 +55,8 @@ const GRACIA_IMAGENES_MS = 60 * 60 * 1000;
 // La descripción se guarda sola mientras se escribe: si la misma persona sigue editando dentro de
 // este tiempo, el historial actualiza su última entrada en vez de sumar una nueva.
 const UNIR_DESCRIPCION_MS = 10 * 60 * 1000;
+// Escribir la descripción enseguida de crearlo ("Crear con IA" pone así sus imágenes) es parte de crearlo.
+const DESCRIBIR_AL_CREAR_MS = 2 * 60 * 1000;
 const ESTADOS = ['pendiente', 'haciendo', 'hecho'];
 // El tipo de trabajo, como en los commits convencionales.
 export const TIPOS = ['feat', 'fix', 'refactor', 'perf', 'docs', 'test', 'style', 'chore', 'ci'];
@@ -772,8 +774,10 @@ function createRepo(db, dataDir, graciaImagenesMs) {
   function anotarEdicion(quien, item) {
     const ultima = db.prepare('SELECT id, perfil_id, autor, tipo, datos, creado_en FROM actividad WHERE pendiente_id = ? ORDER BY creado_en DESC, rowid DESC LIMIT 1')
       .get(item.id);
-    if (ultima?.tipo === 'descripcion' && !ultima.datos && ultima.perfil_id === quien.perfil_id && ultima.autor === quien.nombre
-      && Date.now() - Date.parse(ultima.creado_en) < UNIR_DESCRIPCION_MS) {
+    const mia = ultima?.perfil_id === quien.perfil_id && ultima?.autor === quien.nombre;
+    const hace = ultima ? Date.now() - Date.parse(ultima.creado_en) : Infinity;
+    if (mia && ultima.tipo === 'creado' && hace < DESCRIBIR_AL_CREAR_MS) return;
+    if (mia && ultima.tipo === 'descripcion' && !ultima.datos && hace < UNIR_DESCRIPCION_MS) {
       db.prepare('UPDATE actividad SET creado_en = ?, texto_pendiente = ? WHERE id = ?').run(new Date().toISOString(), item.texto, ultima.id);
     } else {
       registrar(quien, item, 'descripcion', null, [item.creado_por]);
@@ -867,6 +871,11 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     for (const id of viejos) borrar.run(id);
     await borrarSubidos(viejos);
   }
+
+  // Lo nuevo va arriba de todo; lo que recibe un responsable, al final de la cola de su columna (el orden es uno
+  // solo para todo el tablero, así que después de todo queda último también en su columna).
+  const arriba = () => db.prepare('SELECT COALESCE(MIN(posicion), 0) - 1 AS posicion FROM pendientes').get().posicion;
+  const alFinal = () => db.prepare('SELECT COALESCE(MAX(posicion), 0) + 1 AS posicion FROM pendientes').get().posicion;
 
   // Imágenes del pendiente que pasaron el tiempo de gracia y ya no aparecen en ninguna descripción
   // (un bloque copiado a otra tarjeta sigue usando el mismo archivo).
@@ -986,7 +995,13 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         const porNombre = proyectos.filter((p) => normal(p.etiqueta.split(' › ').pop()) === normal(nombre));
         return exacto?.id ?? (porNombre.length === 1 ? porNombre[0].id : null);
       };
-      return sugerencias.slice(0, MAX_SUGERENCIAS).map((sugerencia) => ({
+      // Las imágenes que muestran cada tarea, por su posición entre las enviadas (desde 0). Si sale una sola tarea y la
+      // IA no eligió ninguna, se le ponen todas: casi siempre son la captura de lo que hay que hacer.
+      const deLaTarea = (numeros, unica) => (unica && numeros.length === 0 ? imagenes.map((_, i) => i + 1) : numeros)
+        .filter((numero) => numero >= 1 && numero <= imagenes.length)
+        .map((numero) => numero - 1);
+      const lista = sugerencias.slice(0, MAX_SUGERENCIAS);
+      return lista.map((sugerencia) => ({
         texto: sugerencia.titulo.slice(0, MAX_TEXTO),
         detalle: sugerencia.detalle,
         perfil_id: perfilDe(sugerencia.responsable),
@@ -994,6 +1009,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         tipo: sugerencia.tipo,
         etiquetas: [...new Set(sugerencia.etiquetas.map((nombre) => etiquetas.find((e) => normal(e.nombre) === normal(nombre))?.id).filter(Boolean))],
         estado: sugerencia.estado,
+        imagenes: deLaTarea(sugerencia.imagenes, lista.length === 1),
       }));
     },
 
@@ -1036,15 +1052,15 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       const now = new Date().toISOString();
       const id = randomUUID();
       return transaction(db, () => {
-        // Lo nuevo va arriba de todo.
-        const { minimo } = db.prepare('SELECT COALESCE(MIN(posicion), 0) AS minimo FROM pendientes').get();
+        // Sin responsable, arriba de todo; ya asignado, al final de la cola, como al asignarlo después.
+        const posicion = changes.perfil_id ? alFinal() : arriba();
         const estado = changes.estado ?? 'pendiente';
         const descripcion = changes.descripcion ?? null;
         const { resumen = null, num_imagenes: numImagenes = 0 } = descripcion ? resumirDescripcion(JSON.parse(descripcion)) : {};
         db.prepare(`INSERT INTO pendientes (id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, posicion, creado_en, actualizado_en, hecho_en,
             descripcion, resumen, num_imagenes)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-          .run(id, changes.texto, changes.proyecto_id ?? null, estado, changes.tipo ?? null, changes.perfil_id ?? null, yo, minimo - 1, now, now,
+          .run(id, changes.texto, changes.proyecto_id ?? null, estado, changes.tipo ?? null, changes.perfil_id ?? null, yo, posicion, now, now,
             estado === 'hecho' ? now : null, descripcion, resumen, numImagenes);
         if (changes.etiquetas) ponerEtiquetas(id, changes.etiquetas);
         const creado = pendiente(yo, id);
@@ -1075,9 +1091,11 @@ function createRepo(db, dataDir, graciaImagenesMs) {
           ? { resumen: null, num_imagenes: 0 }
           : resumirDescripcion(JSON.parse(changes.descripcion)));
       }
-      // Las columnas salen de parsePendiente, resumirDescripcion y hecho_en: solo campos conocidos.
-      const campos = Object.keys(columnas);
       const actualizado = transaction(db, () => {
+        // Al dárselo a alguien (otra persona que la de antes) va al final de la cola de su columna.
+        if (changes.perfil_id && changes.perfil_id !== antes.perfil_id) columnas.posicion = alFinal();
+        // Las columnas salen de parsePendiente, resumirDescripcion, hecho_en y posicion: solo campos conocidos.
+        const campos = Object.keys(columnas);
         db.prepare(`UPDATE pendientes SET ${[...campos.map((campo) => `${campo} = ?`), 'actualizado_en = ?'].join(', ')} WHERE id = ?`)
           .run(...campos.map((campo) => columnas[campo]), now, id);
         if (etiquetas) ponerEtiquetas(id, etiquetas);
@@ -1106,7 +1124,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       return true;
     },
 
-    // Lo pasa a otra persona: vuelve a Por hacer, arriba de todo, con su nuevo responsable. Es el mismo pendiente,
+    // Lo pasa a otra persona: vuelve a Por hacer, al final de la cola, con su nuevo responsable. Es el mismo pendiente,
     // así que conserva su historial, su chat y sus archivos.
     traspasar(quien, id, { perfil_id: perfilId, nota }) {
       const yo = quien.perfil_id;
@@ -1114,9 +1132,8 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (!antes) return null;
       verificarPerfil(perfilId);
       return transaction(db, () => {
-        const { minimo } = db.prepare('SELECT COALESCE(MIN(posicion), 0) AS minimo FROM pendientes').get();
         db.prepare("UPDATE pendientes SET estado = 'pendiente', hecho_en = NULL, perfil_id = ?, posicion = ?, actualizado_en = ? WHERE id = ?")
-          .run(perfilId, minimo - 1, new Date().toISOString(), id);
+          .run(perfilId, alFinal(), new Date().toISOString(), id);
         const despues = pendiente(yo, id);
         registrar(quien, despues, 'traspaso', {
           de: nombreDePerfil(antes.perfil_id),

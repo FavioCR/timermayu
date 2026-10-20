@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react"
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from "react"
 import { ArrowLeft, ImagePlus, LoaderCircle, Settings, Sparkles, X } from "lucide-react"
 import { cn } from "cn"
 
@@ -31,14 +31,22 @@ import { involucrados, organizacionDe, type Catalogo } from "@/lib/catalogo"
 import { imagenParaIA } from "@/lib/comprimir-imagen"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
-type Propuesta = Sugerencia & { clave: number; elegida: boolean }
-
 // Mientras se achica, la imagen todavía no tiene archivo ni vista previa.
 type ImagenAdjunta = { clave: number; nombre: string; archivo?: File; url?: string }
+
+// Cada propuesta lleva sus imágenes, que quedan en la descripción del pendiente.
+type Propuesta = Sugerencia & { clave: number; elegida: boolean; adjuntas: ImagenAdjunta[] }
+
+// Dónde van las imágenes: con el texto para la IA, o en una propuesta (por su clave).
+type Destino = "ia" | number
 
 // Lo que deja el servidor: hasta 6 imágenes y 7 MB entre todas (ya achicadas).
 const MAX_IMAGENES = 6
 const MAX_BYTES_IMAGENES = 7 * 1024 * 1024
+const MAX_IMAGENES_PENDIENTE = 10
+
+// En la descripción un GIF se queda como está (puede ser animado); lo demás se achica igual que para la IA.
+const paraDescripcion = (archivo: File) => (archivo.type === "image/gif" ? Promise.resolve(archivo) : imagenParaIA(archivo))
 
 const enBase64 = (archivo: File) =>
   new Promise<string>((resolve, reject) => {
@@ -48,15 +56,108 @@ const enBase64 = (archivo: File) =>
     lector.readAsDataURL(archivo)
   })
 
-// El detalle que propone la IA queda como la descripción del pendiente: un párrafo por línea.
-const descripcionDe = (detalle: string) =>
-  JSON.stringify(
-    detalle
+// El detalle que propone la IA queda como la descripción del pendiente: un párrafo por línea y, debajo, sus imágenes.
+const descripcionDe = (detalle: string, imagenes: { url: string; nombre: string }[] = []) =>
+  JSON.stringify([
+    ...detalle
       .split("\n")
       .map((linea) => linea.trim())
       .filter(Boolean)
-      .map((linea) => ({ type: "paragraph", content: [{ type: "text", text: linea, styles: {} }] }))
+      .map((linea) => ({ type: "paragraph", content: [{ type: "text", text: linea, styles: {} }] })),
+    ...imagenes.map(({ url, nombre }) => ({ type: "image", props: { url, name: nombre, showPreview: true } })),
+  ])
+
+const imagenesDe = (event: { clipboardData: DataTransfer } | { dataTransfer: DataTransfer }) =>
+  [...("clipboardData" in event ? event.clipboardData : event.dataTransfer).files].filter((archivo) => archivo.type.startsWith("image/"))
+
+// Miniaturas con su X y el botón para agregar más; el campo de archivos va escondido.
+function ImagenesAdjuntas({
+  imagenes,
+  maximo,
+  etiqueta,
+  otra,
+  vacio,
+  chico = false,
+  onElegir,
+  onQuitar,
+}: {
+  imagenes: ImagenAdjunta[]
+  maximo: number
+  // Nombre de la lista ("Imágenes para la IA") y del botón para sumar otra.
+  etiqueta: string
+  otra: string
+  vacio: string
+  chico?: boolean
+  onElegir: (archivos: FileList) => void
+  onQuitar: (imagen: ImagenAdjunta) => void
+}) {
+  const entrada = useRef<HTMLInputElement>(null)
+  const tamano = chico ? "size-12" : "size-16"
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {imagenes.length > 0 && (
+        <ul aria-label={etiqueta} className="m-0 flex list-none flex-wrap gap-2 p-0">
+          {imagenes.map((imagen) => (
+            <li key={imagen.clave} className={cn("relative overflow-hidden rounded-md border bg-muted", tamano)}>
+              {imagen.url ? (
+                <img src={imagen.url} alt={imagen.nombre} className="size-full object-cover" />
+              ) : (
+                <span className="flex size-full items-center justify-center text-muted-foreground" role="status" aria-label={`Preparando ${imagen.nombre}`}>
+                  <LoaderCircle className="size-4 animate-spin" />
+                </span>
+              )}
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon-xs"
+                className="absolute top-0.5 right-0.5 size-5 rounded-full opacity-90 shadow-sm"
+                aria-label={`Quitar ${imagen.nombre}`}
+                onClick={() => onQuitar(imagen)}
+              >
+                <X />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {imagenes.length < maximo &&
+        (imagenes.length ? (
+          <Button
+            type="button"
+            variant="outline"
+            className={cn("border-dashed text-muted-foreground", tamano)}
+            aria-label={otra}
+            title={otra}
+            onClick={() => entrada.current?.click()}
+          >
+            <ImagePlus className="size-5" />
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            variant={chico ? "ghost" : "outline"}
+            size={chico ? "xs" : "sm"}
+            className={cn(chico && "text-muted-foreground")}
+            onClick={() => entrada.current?.click()}
+          >
+            <ImagePlus /> {vacio}
+          </Button>
+        ))}
+      <input
+        ref={entrada}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        aria-label={`Elegir ${etiqueta[0].toLowerCase()}${etiqueta.slice(1)}`}
+        onChange={(event) => {
+          if (event.target.files) onElegir(event.target.files)
+          event.target.value = ""
+        }}
+      />
+    </div>
   )
+}
 
 type Props = {
   credenciales: string
@@ -89,16 +190,16 @@ function Contenido({
   const [texto, setTexto] = useState("")
   const [proyectoId, setProyectoId] = useState(proyectoPorDefecto)
   const [imagenes, setImagenes] = useState<ImagenAdjunta[]>([])
-  const [encima, setEncima] = useState(false)
+  // Dónde se está por soltar una imagen, para resaltarlo.
+  const [encima, setEncima] = useState<Destino | null>(null)
   const [propuestas, setPropuestas] = useState<Propuesta[] | null>(null)
   const [pensando, setPensando] = useState(false)
   const [creando, setCreando] = useState(false)
   const [error, setError] = useState("")
-  const entrada = useRef<HTMLInputElement>(null)
   const siguienteImagen = useRef(0)
   const vistas = useRef(new Set<string>())
 
-  // Las vistas previas se sueltan al cerrar.
+  // Las vistas previas se sueltan al cerrar (una misma puede estar con el texto y en una propuesta).
   useEffect(() => {
     const creadas = vistas.current
     return () => creadas.forEach((url) => URL.revokeObjectURL(url))
@@ -128,37 +229,67 @@ function Contenido({
   const preparando = adjuntas.length < imagenes.length
   const hayQueMandar = Boolean(texto.trim()) || imagenes.length > 0
 
-  // Capturas, fotos de una pizarra o de un papel: se achican aquí y se mandan con el texto.
-  async function adjuntar(lista: FileList | File[]) {
+  function cambiarImagenes(destino: Destino, cambio: (actuales: ImagenAdjunta[]) => ImagenAdjunta[]) {
+    if (destino === "ia") setImagenes(cambio)
+    else setPropuestas((actuales) => actuales?.map((p) => (p.clave === destino ? { ...p, adjuntas: cambio(p.adjuntas) } : p)) ?? null)
+  }
+
+  // Capturas, fotos de una pizarra o de un papel: se achican aquí y van con el texto para la IA, o a una propuesta.
+  async function adjuntar(lista: FileList | File[], destino: Destino) {
     setError("")
     const archivos = [...lista].filter((archivo) => archivo.type.startsWith("image/"))
-    const libres = MAX_IMAGENES - imagenes.length
+    const maximo = destino === "ia" ? MAX_IMAGENES : MAX_IMAGENES_PENDIENTE
+    const tiene = destino === "ia" ? imagenes.length : (propuestas?.find((p) => p.clave === destino)?.adjuntas.length ?? 0)
+    const libres = maximo - tiene
     if (archivos.length < lista.length) setError("Solo se pueden adjuntar imágenes.")
-    else if (archivos.length > libres) setError(`Se pueden adjuntar hasta ${MAX_IMAGENES} imágenes.`)
+    else if (archivos.length > libres) setError(`Se pueden adjuntar hasta ${maximo} imágenes.`)
     const nuevas = archivos.slice(0, Math.max(0, libres)).map((archivo) => ({ archivo, clave: siguienteImagen.current++ }))
     if (!nuevas.length) return
-    setImagenes((actuales) => [...actuales, ...nuevas.map(({ archivo, clave }) => ({ clave, nombre: archivo.name }))])
+    cambiarImagenes(destino, (actuales) => [...actuales, ...nuevas.map(({ archivo, clave }) => ({ clave, nombre: archivo.name }))])
     await Promise.all(
       nuevas.map(async ({ archivo, clave }) => {
-        const lista = await imagenParaIA(archivo)
+        const lista = await (destino === "ia" ? imagenParaIA : paraDescripcion)(archivo)
         if (!lista) {
-          setImagenes((actuales) => actuales.filter((imagen) => imagen.clave !== clave))
+          cambiarImagenes(destino, (actuales) => actuales.filter((imagen) => imagen.clave !== clave))
           setError(`No se pudo abrir «${archivo.name}». Prueba con una captura en PNG o JPG.`)
           return
         }
         const url = URL.createObjectURL(lista)
         vistas.current.add(url)
-        setImagenes((actuales) => actuales.map((imagen) => (imagen.clave === clave ? { ...imagen, archivo: lista, url } : imagen)))
+        cambiarImagenes(destino, (actuales) => actuales.map((imagen) => (imagen.clave === clave ? { ...imagen, archivo: lista, url } : imagen)))
       })
     )
   }
 
-  function quitarImagen(quitada: ImagenAdjunta) {
-    if (quitada.url) {
-      URL.revokeObjectURL(quitada.url)
-      vistas.current.delete(quitada.url)
-    }
-    setImagenes((actuales) => actuales.filter((imagen) => imagen.clave !== quitada.clave))
+  const quitarImagen = (quitada: ImagenAdjunta, destino: Destino) =>
+    cambiarImagenes(destino, (actuales) => actuales.filter((imagen) => imagen.clave !== quitada.clave))
+
+  // Para resaltar y recibir lo que se suelta encima (el texto para la IA o una propuesta).
+  const soltarEn = (destino: Destino) => ({
+    onDragOver: (event: DragEvent) => {
+      if (!traeArchivos(event)) return
+      event.preventDefault()
+      event.stopPropagation()
+      setEncima(destino)
+    },
+    onDragLeave: (event: DragEvent<HTMLElement>) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setEncima(null)
+    },
+    onDrop: (event: DragEvent) => {
+      if (!traeArchivos(event)) return
+      event.preventDefault()
+      event.stopPropagation()
+      setEncima(null)
+      adjuntar(event.dataTransfer.files, destino)
+    },
+  })
+
+  // Una captura pegada se adjunta; el texto se pega como siempre.
+  const pegarEn = (destino: Destino) => (event: ClipboardEvent) => {
+    const pegadas = imagenesDe(event)
+    if (!pegadas.length) return
+    event.preventDefault()
+    adjuntar(pegadas, destino)
   }
 
   async function proponer(event: FormEvent) {
@@ -172,7 +303,15 @@ function Contenido({
     setError("")
     try {
       const sugerencias = await api.ia.sugerir(credenciales, texto, proyectoId, await Promise.all(adjuntas.map(enBase64)))
-      setPropuestas(sugerencias.map((sugerencia, clave) => ({ ...sugerencia, clave, elegida: true })))
+      // Cada propuesta empieza con las imágenes que la IA dice que son suyas.
+      setPropuestas(
+        sugerencias.map((sugerencia, clave) => ({
+          ...sugerencia,
+          clave,
+          elegida: true,
+          adjuntas: sugerencia.imagenes.flatMap((i) => (imagenes[i] ? [{ ...imagenes[i], clave: siguienteImagen.current++ }] : [])),
+        }))
+      )
     } catch (err) {
       fallar(err)
     } finally {
@@ -185,18 +324,22 @@ function Contenido({
   }
 
   const elegidas = (propuestas ?? []).filter((p) => p.elegida)
-  const listas = elegidas.length > 0 && elegidas.every((p) => p.texto.trim())
+  const preparandoAlguna = elegidas.some((p) => p.adjuntas.some((imagen) => !imagen.archivo))
+  const listas = elegidas.length > 0 && elegidas.every((p) => p.texto.trim()) && !preparandoAlguna
 
-  // De abajo hacia arriba: lo nuevo queda arriba del tablero, así el primero de la lista queda primero.
+  // Sin responsable, cada uno entra arriba del tablero: se crean de abajo hacia arriba para que el primero quede primero.
+  // Con responsable, cada uno va al final de su cola: se crean en orden. Las imágenes se suben al pendiente ya creado
+  // y quedan debajo del detalle.
   async function crear() {
     if (!listas || creando) return
     setCreando(true)
     setError("")
-    const creados: Pendiente[] = []
-    const hechas = new Set<number>()
+    const creados = new Map<number, Pendiente>()
+    let sinImagenes: string | null = null
+    const orden = [...elegidas.filter((p) => !p.perfil_id).reverse(), ...elegidas.filter((p) => p.perfil_id)]
     try {
-      for (const propuesta of [...elegidas].reverse()) {
-        const detalle = propuesta.detalle?.trim()
+      for (const propuesta of orden) {
+        const detalle = propuesta.detalle?.trim() ?? ""
         const nuevo = await api.crear(credenciales, {
           texto: propuesta.texto.trim(),
           proyecto_id: propuesta.proyecto_id,
@@ -206,16 +349,23 @@ function Contenido({
           etiquetas: propuesta.etiquetas,
           ...(detalle && { descripcion: descripcionDe(detalle) }),
         })
-        creados.unshift(nuevo)
-        hechas.add(propuesta.clave)
+        creados.set(propuesta.clave, nuevo)
+        const fotos = propuesta.adjuntas.flatMap((imagen) => imagen.archivo ?? [])
+        if (!fotos.length) continue
+        sinImagenes = nuevo.texto
+        const subidas = []
+        for (const foto of fotos) subidas.push({ url: (await api.subirImagen(credenciales, nuevo.id, foto)).url, nombre: foto.name })
+        creados.set(propuesta.clave, await api.actualizar(credenciales, nuevo.id, { descripcion: descripcionDe(detalle, subidas) }))
+        sinImagenes = null
       }
-      onCreados(creados)
+      onCreados(elegidas.flatMap((p) => creados.get(p.clave) ?? []))
       onCerrar()
     } catch (err) {
       // Si algo falla a mitad, lo ya creado queda en el tablero y no se vuelve a ofrecer.
-      if (creados.length) onCreados(creados)
-      setPropuestas((actuales) => actuales?.filter((p) => !hechas.has(p.clave)) ?? null)
+      if (creados.size) onCreados(elegidas.flatMap((p) => creados.get(p.clave) ?? []))
+      setPropuestas((actuales) => actuales?.filter((p) => !creados.has(p.clave)) ?? null)
       fallar(err)
+      if (sinImagenes) setError(`«${sinImagenes}» se creó, pero sin sus imágenes: ${mensajeDeError(err)}`)
     } finally {
       setCreando(false)
     }
@@ -248,24 +398,7 @@ function Contenido({
 
   if (propuestas === null) {
     return (
-      <form
-        onSubmit={proponer}
-        className="flex flex-col gap-5"
-        onDragOver={(event) => {
-          if (!traeArchivos(event)) return
-          event.preventDefault()
-          setEncima(true)
-        }}
-        onDragLeave={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setEncima(false)
-        }}
-        onDrop={(event) => {
-          if (!traeArchivos(event)) return
-          event.preventDefault()
-          setEncima(false)
-          adjuntar(event.dataTransfer.files)
-        }}
-      >
+      <form onSubmit={proponer} className="flex flex-col gap-5" {...soltarEn("ia")}>
         <Field>
           <FieldLabel htmlFor="ia-texto">¿Qué hay que hacer?</FieldLabel>
           <Textarea
@@ -276,77 +409,27 @@ function Contenido({
             placeholder={"Pega un correo, las notas de una reunión, una captura o escribe lo que falta.\nEj.: Diego arregla el login con Google para el sprint 12 y Junior documenta la API de pagos."}
             value={texto}
             onChange={(event) => setTexto(event.target.value)}
-            onPaste={(event) => {
-              // Una captura pegada se adjunta; el texto se pega como siempre.
-              const pegadas = [...event.clipboardData.files].filter((archivo) => archivo.type.startsWith("image/"))
-              if (!pegadas.length) return
-              event.preventDefault()
-              adjuntar(pegadas)
-            }}
+            onPaste={pegarEn("ia")}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) proponer(event)
+              // Enter propone; Shift+Enter hace un salto de línea (no mientras se compone un acento o un emoji).
+              if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return
+              event.preventDefault()
+              proponer(event)
             }}
-            className={cn(encima && "border-primary bg-primary/5 ring-3 ring-primary/30")}
+            className={cn(encima === "ia" && "border-primary bg-primary/5 ring-3 ring-primary/30")}
           />
-          <div className="flex flex-wrap items-center gap-2">
-            {imagenes.length > 0 && (
-              <ul aria-label="Imágenes para la IA" className="m-0 flex list-none flex-wrap gap-2 p-0">
-                {imagenes.map((imagen) => (
-                  <li key={imagen.clave} className="relative size-16 overflow-hidden rounded-md border bg-muted">
-                    {imagen.url ? (
-                      <img src={imagen.url} alt={imagen.nombre} className="size-full object-cover" />
-                    ) : (
-                      <span className="flex size-full items-center justify-center text-muted-foreground" role="status" aria-label={`Preparando ${imagen.nombre}`}>
-                        <LoaderCircle className="size-4 animate-spin" />
-                      </span>
-                    )}
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="icon-xs"
-                      className="absolute top-0.5 right-0.5 size-5 rounded-full opacity-90 shadow-sm"
-                      aria-label={`Quitar ${imagen.nombre}`}
-                      onClick={() => quitarImagen(imagen)}
-                    >
-                      <X />
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {imagenes.length < MAX_IMAGENES &&
-              (imagenes.length ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="size-16 border-dashed text-muted-foreground"
-                  aria-label="Adjuntar otra imagen"
-                  title="Adjuntar otra imagen"
-                  onClick={() => entrada.current?.click()}
-                >
-                  <ImagePlus className="size-5" />
-                </Button>
-              ) : (
-                <Button type="button" variant="outline" size="sm" onClick={() => entrada.current?.click()}>
-                  <ImagePlus /> Adjuntar imágenes
-                </Button>
-              ))}
-            <input
-              ref={entrada}
-              type="file"
-              accept="image/*"
-              multiple
-              hidden
-              aria-label="Elegir imágenes para la IA"
-              onChange={(event) => {
-                if (event.target.files) adjuntar(event.target.files)
-                event.target.value = ""
-              }}
-            />
-          </div>
+          <ImagenesAdjuntas
+            imagenes={imagenes}
+            maximo={MAX_IMAGENES}
+            etiqueta="Imágenes para la IA"
+            otra="Adjuntar otra imagen"
+            vacio="Adjuntar imágenes"
+            onElegir={(archivos) => adjuntar(archivos, "ia")}
+            onQuitar={(imagen) => quitarImagen(imagen, "ia")}
+          />
           <FieldDescription>
             La IA propone los pendientes y tú los revisas antes de crearlos. Puedes adjuntar, pegar o soltar hasta {MAX_IMAGENES} imágenes
-            (capturas, fotos de una pizarra…). Ctrl+Enter o ⌘Enter para enviar.
+            (capturas, fotos de una pizarra…). Enter para enviar; Shift+Enter para un salto de línea.
           </FieldDescription>
         </Field>
         <Field>
@@ -381,7 +464,12 @@ function Contenido({
           {propuestas.map((propuesta) => {
             const personas = involucrados(perfiles, organizacionDe(catalogo, propuesta.proyecto_id), propuesta.perfil_id)
             return (
-              <li key={propuesta.clave} className="flex gap-3 p-3 data-[elegida=false]:opacity-55" data-elegida={propuesta.elegida}>
+              <li
+                key={propuesta.clave}
+                className={cn("flex gap-3 p-3 transition-colors data-[elegida=false]:opacity-55", encima === propuesta.clave && "bg-primary/10")}
+                data-elegida={propuesta.elegida}
+                {...soltarEn(propuesta.clave)}
+              >
                 <Checkbox
                   className="mt-2.5"
                   checked={propuesta.elegida}
@@ -445,10 +533,21 @@ function Contenido({
                   <Textarea
                     aria-label="Detalle"
                     rows={2}
-                    placeholder="Detalle (opcional): queda en la descripción"
+                    placeholder="Detalle (opcional): queda en la descripción. Puedes pegar o soltar imágenes aquí."
                     value={propuesta.detalle ?? ""}
                     onChange={(event) => cambiar(propuesta.clave, { detalle: event.target.value })}
+                    onPaste={pegarEn(propuesta.clave)}
                     className="min-h-0 text-sm"
+                  />
+                  <ImagenesAdjuntas
+                    chico
+                    imagenes={propuesta.adjuntas}
+                    maximo={MAX_IMAGENES_PENDIENTE}
+                    etiqueta={`Imágenes de «${propuesta.texto}»`}
+                    otra={`Adjuntar otra imagen a «${propuesta.texto}»`}
+                    vacio="Agregar imágenes"
+                    onElegir={(archivos) => adjuntar(archivos, propuesta.clave)}
+                    onQuitar={(imagen) => quitarImagen(imagen, propuesta.clave)}
                   />
                 </div>
               </li>

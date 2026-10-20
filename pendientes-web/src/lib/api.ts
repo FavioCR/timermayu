@@ -75,6 +75,8 @@ export type Sugerencia = {
   tipo: TipoTrabajo | null
   etiquetas: string[]
   estado: Estado
+  // Las imágenes enviadas que muestran esta tarea, por su posición (desde 0).
+  imagenes: number[]
 }
 
 export type Perfil = {

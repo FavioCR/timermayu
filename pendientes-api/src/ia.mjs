@@ -37,8 +37,9 @@ export const ESQUEMA_PENDIENTES = {
           // anyOf y no enum con null: Gemini solo acepta enum de textos.
           tipo: { anyOf: [{ type: 'string', enum: TIPOS }, { type: 'null' }], description: 'Tipo de trabajo como en los commits convencionales, o null.' },
           estado: { type: 'string', enum: ESTADOS },
+          imagenes: { type: 'array', items: { type: 'integer' }, description: 'Números de las imágenes adjuntas que muestran esta tarea (1 es «Imagen 1»), o lista vacía.' },
         },
-        required: ['titulo', 'detalle', 'responsable', 'proyecto', 'etiquetas', 'tipo', 'estado'],
+        required: ['titulo', 'detalle', 'responsable', 'proyecto', 'etiquetas', 'tipo', 'estado', 'imagenes'],
         additionalProperties: false,
       },
     },
@@ -80,6 +81,7 @@ export function instruccionesIA({ personas, proyectos, etiquetas, proyectoPorDef
     '- tipo: como en los commits convencionales: feat (algo nuevo), fix (corregir un error), refactor, perf, docs, test, style, chore (mantenimiento) o ci (despliegue); null si no es trabajo de software o no está claro.',
     '- estado: "pendiente", salvo que el texto diga que ya se está haciendo ("haciendo") o que ya está terminado ("hecho").',
     '- Si vienen imágenes (capturas de pantalla, fotos de una pizarra o de un papel, conversaciones), saca también de ellas las tareas; en el detalle anota lo que se ve que haga falta para entenderlas.',
+    '- imagenes: los números de las imágenes (vienen como «Imagen 1», «Imagen 2»…) que muestran esa tarea, para adjuntarlas al pendiente; lista vacía si no hay imágenes o ninguna es de esa tarea.',
     `Hoy es ${hoy}.`,
     `Personas: ${personas.length ? personas.join(', ') : '(ninguna)'}`,
     `Proyectos: ${proyectos.length ? proyectos.join(' | ') : '(ninguno)'}`,
@@ -97,6 +99,9 @@ export function instruccionesTipo({ extra }) {
   ].join('\n');
 }
 
+// Cada imagen va después de su rótulo («Imagen 1:»…), para que la IA diga cuáles son de cada pendiente.
+const conRotulos = (imagenes, rotulo, parte) => imagenes.flatMap((imagen, i) => [rotulo(`Imagen ${i + 1}:`), parte(imagen)]);
+
 const PEDIDOS = {
   gemini: ({ modelo, clave, sistema, texto, esquema, imagenes = [] }) => ({
     ruta: '/v1beta/interactions',
@@ -105,7 +110,10 @@ const PEDIDOS = {
       model: modelo,
       system_instruction: sistema,
       input: imagenes.length
-        ? [{ type: 'text', text: texto }, ...imagenes.map((imagen) => ({ type: 'image', data: imagen.datos, mime_type: imagen.tipo }))]
+        ? [
+          { type: 'text', text: texto },
+          ...conRotulos(imagenes, (text) => ({ type: 'text', text }), (imagen) => ({ type: 'image', data: imagen.datos, mime_type: imagen.tipo })),
+        ]
         : texto,
       response_format: { type: 'text', mime_type: 'application/json', schema: esquema },
       store: false,
@@ -132,7 +140,7 @@ const PEDIDOS = {
           role: 'user',
           content: [
             { type: 'input_text', text: texto },
-            ...imagenes.map((imagen) => ({ type: 'input_image', image_url: `data:${imagen.tipo};base64,${imagen.datos}` })),
+            ...conRotulos(imagenes, (text) => ({ type: 'input_text', text }), (imagen) => ({ type: 'input_image', image_url: `data:${imagen.tipo};base64,${imagen.datos}` })),
           ],
         }]
         : texto,
@@ -160,7 +168,10 @@ const PEDIDOS = {
         {
           role: 'user',
           content: imagenes.length
-            ? [{ type: 'text', text: texto }, ...imagenes.map((imagen) => ({ type: 'image_url', image_url: { url: `data:${imagen.tipo};base64,${imagen.datos}` } }))]
+            ? [
+              { type: 'text', text: texto },
+              ...conRotulos(imagenes, (text) => ({ type: 'text', text }), (imagen) => ({ type: 'image_url', image_url: { url: `data:${imagen.tipo};base64,${imagen.datos}` } })),
+            ]
             : texto,
         },
       ],
@@ -235,6 +246,7 @@ export function leerPendientes(texto) {
       etiquetas: (Array.isArray(item.etiquetas) ? item.etiquetas : []).map((nombre) => textoO(nombre, 200)).filter(Boolean),
       tipo: TIPOS.includes(item.tipo) ? item.tipo : null,
       estado: ESTADOS.includes(item.estado) ? item.estado : 'pendiente',
+      imagenes: [...new Set((Array.isArray(item.imagenes) ? item.imagenes : []).filter(Number.isInteger))],
     }];
   });
 }
