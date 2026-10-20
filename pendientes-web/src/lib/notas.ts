@@ -82,10 +82,9 @@ async function recursoRepetido(credenciales: string, cursoId: string, archivo: F
   } catch {
     throw new ApiError("sin_conexion", 0)
   }
-  if (response.status === 404) return null
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new ApiError(data.error ?? `http_${response.status}`, response.status)
-  return data.recurso as Recurso
+  return (data.recurso ?? null) as Recurso | null
 }
 
 // Sube un archivo como recurso de un curso, por partes y en orden. onProgreso va de 0 a 1.

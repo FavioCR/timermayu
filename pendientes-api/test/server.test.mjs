@@ -1747,8 +1747,12 @@ test('notas: un recurso que su dueño ya tiene se agrega sin volver a subirlo; l
     'X-Nombre-Archivo': encodeURIComponent('Copia de la guía.pdf'), 'X-Tamano': String(pdf.length), 'X-Sha256': sha(pdf), ...cabeceras,
   });
 
+  const noLoTiene = async (respuesta) => {
+    assert.equal(respuesta.status, 200);
+    assert.deepEqual(await respuesta.json(), { recurso: null });
+  };
   // Todavía no lo tiene: se sube como siempre.
-  assert.equal((await repetido(diego, quimica.id)).status, 404);
+  await noLoTiene(await repetido(diego, quimica.id));
   await subir(diego, `/notas/cursos/${fisica.id}/recursos`, pdf, { 'X-Nombre-Archivo': 'guia.pdf', 'X-Tamano': String(pdf.length) });
   const agregado = await repetido(diego, quimica.id);
   assert.equal(agregado.status, 201);
@@ -1759,10 +1763,10 @@ test('notas: un recurso que su dueño ya tiene se agrega sin volver a subirlo; l
   assert.deepEqual(blobs(dataDir), [sha(pdf)]);
 
   // Para Favio es como si nadie lo tuviera: no puede averiguar qué archivos tiene Diego mandando un hash.
-  assert.equal((await repetido(favio, deFavio.id)).status, 404);
+  await noLoTiene(await repetido(favio, deFavio.id));
   assert.equal((await repetido(favio, quimica.id)).status, 404);
   // Otro tamaño no es el mismo archivo; un hash mal formado no se acepta.
-  assert.equal((await repetido(diego, quimica.id, { 'X-Tamano': '10' })).status, 404);
+  await noLoTiene(await repetido(diego, quimica.id, { 'X-Tamano': '10' }));
   assert.equal((await repetido(diego, quimica.id, { 'X-Sha256': 'abc' })).status, 422);
 });
 

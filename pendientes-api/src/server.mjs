@@ -1885,12 +1885,12 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       return recurso(yo, id);
     },
 
-    // Antes de subir un recurso grande, el tablero pregunta si su dueño ya tiene ese contenido (en cualquiera de sus
-    // cursos): entonces lo agrega sin mandar nada. Solo mira lo propio, para que nadie pueda averiguar qué archivos
-    // tienen otros con solo mandar un hash. null: no lo tiene (y se sube como siempre).
-    crearRecursoRepetido(yo, cursoId, { nombre, tamano, sha256 }) {
+    // Antes de subir un recurso, el tablero pregunta si su dueño ya tiene ese contenido (en cualquiera de sus cursos):
+    // entonces lo agrega sin mandar nada. Solo mira lo propio, para que nadie pueda averiguar qué archivos tienen otros
+    // con solo mandar un hash. { recurso: null }: no lo tiene (y se sube como siempre); null: el curso no es suyo.
+    async crearRecursoRepetido(yo, cursoId, { nombre, tamano, sha256 }) {
       if (!curso(yo, cursoId)) return null;
-      return conCandado(sha256, () => {
+      return { recurso: await conCandado(sha256, () => {
         const propio = db.prepare(`SELECT r.tipo FROM recursos r JOIN cursos c ON c.id = r.curso_id
           WHERE c.perfil_id = ? AND r.sha256 = ? AND r.tamano = ? AND r.subido = r.tamano LIMIT 1`).get(yo, sha256, tamano);
         if (!propio || !existsSync(blob(sha256))) return null;
@@ -1898,7 +1898,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         db.prepare('INSERT INTO recursos (id, curso_id, nombre, tipo, tamano, subido, creado_en, sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
           .run(id, cursoId, nombre, propio.tipo, tamano, tamano, new Date().toISOString(), sha256);
         return recurso(yo, id);
-      });
+      }) };
     },
 
     async seguirRecurso(yo, id, { desde, parte }) {
@@ -2257,7 +2257,10 @@ export function createApp(options = {}) {
       const tamano = Number(req.headers['x-tamano']);
       if (!SHA256.test(sha256) || !Number.isInteger(tamano) || tamano < 1) throw httpError(422, 'parte_invalida');
       const nombre = nombreDeArchivo(req.headers['x-nombre-archivo']);
-      return enviar(201, 'recurso', await repo.crearRecursoRepetido(yo, cursoDeRepetido, { nombre, tamano, sha256 }));
+      const repetido = await repo.crearRecursoRepetido(yo, cursoDeRepetido, { nombre, tamano, sha256 });
+      if (!repetido) return json(res, 404, { error: 'not_found' });
+      // Que no lo tenga es lo normal: 200, no un error.
+      return json(res, repetido.recurso ? 201 : 200, repetido);
     }
     const recursoDeParte = pathname.match(PARTES_DE_RECURSO_PATH)?.[1];
     if (recursoDeParte && method === 'POST') {
