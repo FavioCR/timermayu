@@ -9,7 +9,7 @@ import { api, esNoAutorizado, type Notificacion, type Perfil } from "@/lib/api"
 import { describir, haceCuanto } from "@/lib/actividad"
 
 // Cada cuánto se buscan avisos nuevos (también al volver a la pestaña).
-const CADA_MS = 30_000
+const CADA_MS = 15_000
 const TITULO = "Pendientes"
 
 type Permiso = NotificationPermission | "sin_soporte"

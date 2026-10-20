@@ -1,4 +1,4 @@
-import type { Organizacion, Proyecto } from "@/lib/api"
+import type { Organizacion, Perfil, Proyecto } from "@/lib/api"
 
 // Organizaciones y proyectos que ve quien entró. Lo privado de otros ni siquiera llega del servidor.
 export type Catalogo = { organizaciones: Organizacion[]; proyectos: Proyecto[] }
@@ -20,6 +20,13 @@ export function agrupar({ organizaciones, proyectos }: Catalogo): Grupo[] {
 export function organizacionDe(catalogo: Catalogo, proyectoId: string | null) {
   const proyecto = catalogo.proyectos.find((p) => p.id === proyectoId)
   return proyecto?.organizacion_id ? (catalogo.organizaciones.find((o) => o.id === proyecto.organizacion_id) ?? null) : null
+}
+
+// A quiénes se filtra o asigna dentro de una organización: sus involucrados. Sin organización, o en una que
+// todavía no tiene a nadie, son todos. `ademas` suma a quien ya tenía asignado un pendiente aunque ya no esté.
+export function involucrados(perfiles: Perfil[], organizacion: Organizacion | null | undefined, ademas?: string | null) {
+  if (!organizacion || organizacion.miembros.length === 0) return perfiles
+  return perfiles.filter((perfil) => organizacion.miembros.includes(perfil.id) || perfil.id === ademas)
 }
 
 // Mismo orden que el servidor: por nombre, sin distinguir mayúsculas.

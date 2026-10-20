@@ -4,14 +4,17 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type CSSProperties,
   type FormEvent,
   type MouseEvent,
-  type ReactNode,
   type SyntheticEvent,
 } from "react"
 import {
   Building2,
+  ChevronDown,
+  ChevronRight,
+  ChevronsDownUp,
   CircleCheck,
   CircleDashed,
   ClipboardList,
@@ -33,6 +36,7 @@ import {
   Search,
   Timer,
   Trash2,
+  UserPlus,
   Users,
   UsersRound,
   X,
@@ -43,6 +47,7 @@ import { toast } from "sonner"
 import { ActividadSheet } from "@/components/actividad-sheet"
 import { DetallePendiente } from "@/components/detalle-pendiente"
 import { IlustracionColumna } from "@/components/ilustraciones"
+import { InvolucradosMenu } from "@/components/involucrados-menu"
 import {
   KanbanBoard,
   KanbanCard,
@@ -67,6 +72,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -89,12 +95,13 @@ import {
   partesDe,
   type CambiosPendiente,
   type Estado,
+  type Organizacion,
   type Pendiente,
   type Perfil,
   type Usuario,
 } from "@/lib/api"
 import { enlaceWhatsApp } from "@/lib/actividad"
-import { agrupar, conProyecto, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
+import { agrupar, conOrganizacion, conProyecto, involucrados, organizacionDe, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
 const ICONOS: Record<Estado, typeof Inbox> = { pendiente: Inbox, haciendo: RotateCw, hecho: CircleCheck }
@@ -149,6 +156,8 @@ type Selecciones = {
   perfil: string | null
   proyectoNuevo: string | null
   responsableNuevo: string
+  // Organizaciones y proyectos comprimidos en una sola línea "Organización › Proyecto".
+  compacto: boolean
 }
 
 function leerSelecciones(): Selecciones {
@@ -165,6 +174,7 @@ function leerSelecciones(): Selecciones {
     perfil: texto(guardadas.perfil),
     proyectoNuevo: texto(guardadas.proyectoNuevo),
     responsableNuevo: texto(guardadas.responsableNuevo) ?? NADIE,
+    compacto: guardadas.compacto === true,
   }
 }
 
@@ -182,16 +192,17 @@ function Contador({ valor }: { valor: number }) {
   return <span className="rounded-md bg-muted px-1.5 py-0.5 text-xs leading-none tabular-nums text-muted-foreground">{valor}</span>
 }
 
-function Filtro({ activo, onClick, children }: { activo: boolean; onClick: () => void; children: ReactNode }) {
+function Filtro({ activo, className, children, ...props }: { activo: boolean } & ComponentProps<"button">) {
   return (
     <button
       type="button"
       aria-pressed={activo}
-      onClick={onClick}
       className={cn(
         "inline-flex h-10 items-center gap-2 rounded-lg border bg-card px-3.5 text-sm font-medium transition-colors outline-none hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50 [&_svg]:size-4 [&_svg]:shrink-0",
-        activo && "border-primary bg-primary/25 ring-3 ring-primary/25 hover:bg-primary/30"
+        activo && "border-primary bg-primary/25 ring-3 ring-primary/25 hover:bg-primary/30",
+        className
       )}
+      {...props}
     >
       {children}
     </button>
@@ -220,6 +231,7 @@ export function Tablero({
   const [texto, setTexto] = useState("")
   const [proyectoId, setProyectoId] = useState(guardadas.proyectoNuevo)
   const [responsable, setResponsable] = useState(guardadas.responsableNuevo)
+  const [compacto, setCompacto] = useState(guardadas.compacto)
   // Columna donde cae lo que se agrega; se elige desde el menú de cada columna.
   const [destino, setDestino] = useState<Estado>("pendiente")
   // Un enlace con ?p=<id> (el de WhatsApp, por ejemplo) abre ese pendiente.
@@ -245,13 +257,14 @@ export function Tablero({
       perfil: filtroPerfil,
       proyectoNuevo: proyectoId,
       responsableNuevo: responsable,
+      compacto,
     }
     try {
       localStorage.setItem(SELECCIONES, JSON.stringify(selecciones))
     } catch {
       // Sin almacenamiento las selecciones duran lo que dure la pestaña.
     }
-  }, [filtroOrganizacion, filtroProyecto, filtroPerfil, proyectoId, responsable])
+  }, [filtroOrganizacion, filtroProyecto, filtroPerfil, proyectoId, responsable, compacto])
 
   // La dirección lleva el pendiente abierto, para poder compartirla o recargar sin perderlo.
   useEffect(() => {
@@ -318,23 +331,35 @@ export function Tablero({
   const organizacionFiltrada =
     filtroOrganizacion === SIN_ORGANIZACION || (filtroOrganizacion && organizacionesPorId.has(filtroOrganizacion)) ? filtroOrganizacion : null
   const proyectoFiltrado = filtroProyecto && proyectosPorId.has(filtroProyecto) ? filtroProyecto : null
+  const organizacionDelFiltro = organizacionFiltrada ? organizacionesPorId.get(organizacionFiltrada) : undefined
 
-  const filtrando = organizacionFiltrada !== null || proyectoFiltrado !== null || filtroPerfil !== null
+  // Se elige organización, luego proyecto y luego persona: las personas son los involucrados de esa organización.
+  const personasDelFiltro = involucrados(perfiles, organizacionDelFiltro)
+  const perfilFiltrado =
+    filtroPerfil === null || filtroPerfil === NADIE || personasDelFiltro.some((perfil) => perfil.id === filtroPerfil) ? filtroPerfil : null
 
-  const visibles = useMemo(
+  const filtrando = organizacionFiltrada !== null || proyectoFiltrado !== null || perfilFiltrado !== null
+
+  // Lo que queda con la organización y el proyecto elegidos; de ahí salen los números de cada persona.
+  const enAlcance = useMemo(
     () =>
       tarjetas.filter(
         (tarjeta) =>
           (organizacionFiltrada === null || claveOrganizacion(tarjeta) === organizacionFiltrada) &&
-          (proyectoFiltrado === null || tarjeta.proyecto_id === proyectoFiltrado) &&
-          (filtroPerfil === null || (tarjeta.perfil_id ?? NADIE) === filtroPerfil)
+          (proyectoFiltrado === null || tarjeta.proyecto_id === proyectoFiltrado)
       ),
-    [tarjetas, organizacionFiltrada, proyectoFiltrado, filtroPerfil, claveOrganizacion]
+    [tarjetas, organizacionFiltrada, proyectoFiltrado, claveOrganizacion]
+  )
+
+  const visibles = useMemo(
+    () => (perfilFiltrado === null ? enAlcance : enAlcance.filter((tarjeta) => (tarjeta.perfil_id ?? NADIE) === perfilFiltrado)),
+    [enAlcance, perfilFiltrado]
   )
 
   const porOrganizacion = useMemo(() => contar(tarjetas, claveOrganizacion), [tarjetas, claveOrganizacion])
   const porProyecto = useMemo(() => contar(tarjetas, (tarjeta) => tarjeta.proyecto_id), [tarjetas])
   const asignados = useMemo(() => contar(tarjetas, (tarjeta) => tarjeta.perfil_id ?? NADIE), [tarjetas])
+  const asignadosEnAlcance = useMemo(() => contar(enAlcance, (tarjeta) => tarjeta.perfil_id ?? NADIE), [enAlcance])
 
   // Los proyectos de la organización elegida en el filtro.
   const proyectosDelFiltro =
@@ -350,7 +375,9 @@ export function Tablero({
 
   // Lo guardado puede apuntar a algo borrado o que esta cuenta no ve: entonces el campo queda vacío.
   const proyectoDelFormulario = proyectoId && proyectosPorId.has(proyectoId) ? proyectoId : null
-  const responsableDelFormulario = perfilesPorId.has(responsable) ? responsable : NADIE
+  // En el formulario, como en los filtros, se asigna a los involucrados de la organización del proyecto elegido.
+  const personasDelFormulario = involucrados(perfiles, organizacionDe(catalogo, proyectoDelFormulario))
+  const responsableDelFormulario = personasDelFormulario.some((perfil) => perfil.id === responsable) ? responsable : NADIE
 
   function etiquetaDeProyecto(id: string | null) {
     const proyecto = id ? proyectosPorId.get(id) : undefined
@@ -363,12 +390,18 @@ export function Tablero({
   function filtrarPorPerfil(clave: string | null) {
     setFiltroPerfil(clave)
     if (clave !== null) setResponsable(clave)
-    else if (responsable === filtroPerfil) setResponsable(NADIE)
+    else if (responsable === perfilFiltrado) setResponsable(NADIE)
   }
 
   function filtrarPorOrganizacion(clave: string | null) {
     setFiltroOrganizacion(clave)
     setFiltroProyecto(null)
+    // Si la persona elegida no está en la nueva organización, deja de filtrarse (y de rellenar el formulario).
+    const personas = involucrados(perfiles, clave ? organizacionesPorId.get(clave) : undefined)
+    if (perfilFiltrado && perfilFiltrado !== NADIE && !personas.some((perfil) => perfil.id === perfilFiltrado)) {
+      setFiltroPerfil(null)
+      if (responsable === perfilFiltrado) setResponsable(NADIE)
+    }
     const delFormulario = proyectoDelFormulario ? proyectosPorId.get(proyectoDelFormulario) : undefined
     const deOtraOrganizacion = delFormulario && clave !== null && (delFormulario.organizacion_id ?? SIN_ORGANIZACION) !== clave
     if (deOtraOrganizacion || (clave === null && proyectoId === proyectoFiltrado)) setProyectoId(null)
@@ -381,6 +414,18 @@ export function Tablero({
   }
 
   const abrirPendiente = useCallback((id: string) => setAbierto(id), [])
+
+  // Se ve al instante, para poder marcar varias personas seguidas; si falla, vuelve a como estaba.
+  async function cambiarInvolucrados(organizacion: Organizacion, miembros: string[]) {
+    setCatalogo((actual) => conOrganizacion(actual, { ...organizacion, miembros }))
+    try {
+      await api.organizaciones.actualizar(credenciales, organizacion.id, { miembros })
+      setError("")
+    } catch (err) {
+      setCatalogo((actual) => conOrganizacion(actual, organizacion))
+      fallar(err)
+    }
+  }
 
   const abiertos = tarjetas.filter((tarjeta) => tarjeta.column !== "hecho").length
 
@@ -423,10 +468,13 @@ export function Tablero({
       proyecto: etiquetaDeProyecto(nuevo.proyecto_id),
       quien: usuario?.perfil_id ? usuario.nombre : null,
     })
+    // Sin contraseña todavía no puede entrar con su perfil: el aviso le espera en la campana, pero no lo verá aún.
+    const enElTablero = asignado.tiene_contrasena
+      ? "Ya le llegó el aviso en el tablero."
+      : `${asignado.nombre} aún no entra con su perfil, así que no verá el aviso en el tablero.`
+    const porWhatsApp = asignado.telefono ? "¿Le escribes por WhatsApp?" : "¿Le escribes por WhatsApp? Sin número guardado, elegirás el chat."
     toast.success(`Pendiente asignado a ${asignado.nombre}`, {
-      description: asignado.telefono
-        ? "¿Le avisas por WhatsApp?"
-        : `¿Le avisas por WhatsApp? No tiene número guardado: elegirás el chat.`,
+      description: `${enElTablero} ${porWhatsApp}`,
       action: { label: "WhatsApp", onClick: () => window.open(enlace, "_blank", "noopener,noreferrer") },
       duration: 15000,
     })
@@ -705,7 +753,7 @@ export function Tablero({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {perfiles.map((perfil) => (
+              {personasDelFormulario.map((perfil) => (
                 <SelectItem key={perfil.id} value={perfil.id}>
                   <PerfilAvatar perfil={perfil} size="sm" /> {perfil.nombre}
                 </SelectItem>
@@ -747,76 +795,123 @@ export function Tablero({
 
         {(perfiles.length > 0 || hayCatalogo) && (
           <div className="flex flex-col gap-2.5">
+            {hayCatalogo && (
+              <Collapsible open={!compacto} onOpenChange={(abierto) => setCompacto(!abierto)} className="flex flex-col gap-2.5">
+                {compacto && (
+                  <div className="flex">
+                    <CollapsibleTrigger asChild>
+                      <Filtro activo={organizacionFiltrada !== null} aria-pressed={undefined} aria-label="Mostrar organizaciones y proyectos">
+                        {organizacionDelFiltro ? (
+                          <span className="size-2.5 rounded-full" style={{ backgroundColor: organizacionDelFiltro.color }} />
+                        ) : organizacionFiltrada === SIN_ORGANIZACION ? (
+                          <CircleDashed className="text-muted-foreground" />
+                        ) : (
+                          <Building2 />
+                        )}
+                        {organizacionDelFiltro?.nombre ?? (organizacionFiltrada === SIN_ORGANIZACION ? "Sin organización" : "Todas las organizaciones")}
+                        {proyectoFiltrado && (
+                          <>
+                            <ChevronRight className="text-muted-foreground" />
+                            <Folder className="text-muted-foreground" /> {proyectosPorId.get(proyectoFiltrado)?.nombre}
+                          </>
+                        )}
+                        <Contador valor={enAlcance.length} />
+                        <ChevronDown className="text-muted-foreground" />
+                      </Filtro>
+                    </CollapsibleTrigger>
+                  </div>
+                )}
+                <CollapsibleContent className="flex flex-col gap-2.5">
+                  <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por organización">
+                    <Filtro activo={organizacionFiltrada === null} onClick={() => filtrarPorOrganizacion(null)}>
+                      <Building2 /> Todas
+                    </Filtro>
+                    {grupos.map(({ organizacion, proyectos }) => {
+                      const clave = organizacion?.id ?? SIN_ORGANIZACION
+                      const cantidad = porOrganizacion.get(clave) ?? 0
+                      // "Sin organización" solo sale si tiene algo.
+                      if (!organizacion && cantidad === 0 && proyectos.length === 0) return null
+                      return (
+                        <Filtro
+                          key={clave}
+                          activo={organizacionFiltrada === clave}
+                          onClick={() => filtrarPorOrganizacion(organizacionFiltrada === clave ? null : clave)}
+                        >
+                          {organizacion ? (
+                            <span className="size-2.5 rounded-full" style={{ backgroundColor: organizacion.color }} />
+                          ) : (
+                            <CircleDashed className="text-muted-foreground" />
+                          )}
+                          {organizacion?.nombre ?? "Sin organización"}
+                          {organizacion && !organizacion.compartida && <Lock className="text-muted-foreground" aria-label="Privada" />}
+                          <Contador valor={cantidad} />
+                        </Filtro>
+                      )
+                    })}
+                    <CollapsibleTrigger asChild>
+                      <Button variant="ghost" size="icon" className="size-10 text-muted-foreground" aria-label="Comprimir organizaciones y proyectos" title="Comprimir">
+                        <ChevronsDownUp />
+                      </Button>
+                    </CollapsibleTrigger>
+                  </div>
+                  {proyectosDelFiltro.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por proyecto">
+                      <Filtro activo={proyectoFiltrado === null} onClick={() => filtrarPorProyecto(null)}>
+                        <FolderOpen /> Todos los proyectos
+                      </Filtro>
+                      {proyectosDelFiltro.map((proyecto) => (
+                        <Filtro
+                          key={proyecto.id}
+                          activo={proyectoFiltrado === proyecto.id}
+                          onClick={() => filtrarPorProyecto(proyectoFiltrado === proyecto.id ? null : proyecto.id)}
+                        >
+                          <Folder className="text-muted-foreground" /> {proyecto.nombre} <Contador valor={porProyecto.get(proyecto.id) ?? 0} />
+                        </Filtro>
+                      ))}
+                    </div>
+                  )}
+                </CollapsibleContent>
+              </Collapsible>
+            )}
             {perfiles.length > 0 && (
-              <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por persona">
-                <Filtro activo={filtroPerfil === null} onClick={() => filtrarPorPerfil(null)}>
+              <div
+                className="flex flex-wrap items-center gap-2"
+                role="group"
+                aria-label={organizacionDelFiltro ? `Filtrar por persona de ${organizacionDelFiltro.nombre}` : "Filtrar por persona"}
+              >
+                <Filtro activo={perfilFiltrado === null} onClick={() => filtrarPorPerfil(null)}>
                   <Layers /> Todos
                 </Filtro>
-                {[...perfiles, null].map((perfil) => {
+                {[...personasDelFiltro, null].map((perfil) => {
                   const clave = perfil?.id ?? NADIE
                   return (
                     <Filtro
                       key={clave}
-                      activo={filtroPerfil === clave}
-                      onClick={() => filtrarPorPerfil(filtroPerfil === clave ? null : clave)}
+                      activo={perfilFiltrado === clave}
+                      onClick={() => filtrarPorPerfil(perfilFiltrado === clave ? null : clave)}
                     >
                       {perfil ? (
                         <span className="size-2.5 rounded-full" style={{ backgroundColor: perfil.color }} />
                       ) : (
                         <CircleDashed className="text-muted-foreground" />
                       )}
-                      {perfil?.nombre ?? "Sin asignar"} <Contador valor={asignados.get(clave) ?? 0} />
+                      {perfil?.nombre ?? "Sin asignar"} <Contador valor={asignadosEnAlcance.get(clave) ?? 0} />
                     </Filtro>
                   )
                 })}
-              </div>
-            )}
-            {hayCatalogo && (
-              <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por organización">
-                <Filtro
-                  activo={organizacionFiltrada === null}
-                  onClick={() => filtrarPorOrganizacion(null)}
-                >
-                  <Building2 /> Todas
-                </Filtro>
-                {grupos.map(({ organizacion, proyectos }) => {
-                  const clave = organizacion?.id ?? SIN_ORGANIZACION
-                  const cantidad = porOrganizacion.get(clave) ?? 0
-                  // "Sin organización" solo sale si tiene algo.
-                  if (!organizacion && cantidad === 0 && proyectos.length === 0) return null
-                  return (
-                    <Filtro
-                      key={clave}
-                      activo={organizacionFiltrada === clave}
-                      onClick={() => filtrarPorOrganizacion(organizacionFiltrada === clave ? null : clave)}
-                    >
-                      {organizacion ? (
-                        <span className="size-2.5 rounded-full" style={{ backgroundColor: organizacion.color }} />
-                      ) : (
-                        <CircleDashed className="text-muted-foreground" />
-                      )}
-                      {organizacion?.nombre ?? "Sin organización"}
-                      {organizacion && !organizacion.compartida && <Lock className="text-muted-foreground" aria-label="Privada" />}
-                      <Contador valor={cantidad} />
-                    </Filtro>
-                  )
-                })}
-              </div>
-            )}
-            {proyectosDelFiltro.length > 0 && (
-              <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por proyecto">
-                <Filtro activo={proyectoFiltrado === null} onClick={() => filtrarPorProyecto(null)}>
-                  <FolderOpen /> Todos los proyectos
-                </Filtro>
-                {proyectosDelFiltro.map((proyecto) => (
-                  <Filtro
-                    key={proyecto.id}
-                    activo={proyectoFiltrado === proyecto.id}
-                    onClick={() => filtrarPorProyecto(proyectoFiltrado === proyecto.id ? null : proyecto.id)}
+                {organizacionDelFiltro?.compartida && (
+                  <InvolucradosMenu
+                    organizacion={organizacionDelFiltro}
+                    perfiles={perfiles}
+                    onCambiar={(miembros) => cambiarInvolucrados(organizacionDelFiltro, miembros)}
+                    onNuevoPerfil={() => setVentana("perfiles")}
+                    align="start"
                   >
-                    <Folder className="text-muted-foreground" /> {proyecto.nombre} <Contador valor={porProyecto.get(proyecto.id) ?? 0} />
-                  </Filtro>
-                ))}
+                    <Button variant="ghost" className="h-10 text-muted-foreground" aria-label={`Agregar o quitar personas de ${organizacionDelFiltro.nombre}`}>
+                      <UserPlus /> <span className="hidden sm:inline">Personas</span>
+                    </Button>
+                  </InvolucradosMenu>
+                )}
               </div>
             )}
           </div>

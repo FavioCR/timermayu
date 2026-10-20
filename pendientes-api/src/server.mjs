@@ -15,6 +15,7 @@ const MAX_PROYECTO = 60;
 const MAX_NOMBRE = 40;
 const MAX_CORREO = 120;
 const MAX_COMENTARIO = 2000;
+const MAX_MIEMBROS = 100;
 // Lo que se guarda de un mensaje en el historial y en los avisos.
 const MAX_EXTRACTO = 140;
 const MAX_DESCRIPCION = 400 * 1024;
@@ -59,7 +60,8 @@ const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH
 const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en,
   (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios`;
 const SELECT_PERFIL = 'SELECT id, nombre, correo, telefono, color, password_hash IS NOT NULL AS tiene_contrasena, creado_en FROM perfiles';
-const SELECT_ORGANIZACION = 'SELECT id, nombre, color, duenio_id, compartida, creado_en FROM organizaciones';
+const SELECT_ORGANIZACION = `SELECT id, nombre, color, duenio_id, compartida, creado_en,
+  (SELECT json_group_array(perfil_id) FROM organizacion_miembros m WHERE m.organizacion_id = organizaciones.id) AS miembros FROM organizaciones`;
 const SELECT_PROYECTO = 'SELECT id, nombre, organizacion_id, creado_en FROM proyectos';
 
 // Lo privado de una organización (sus proyectos y los pendientes de esos proyectos) solo lo ve su dueño.
@@ -190,6 +192,19 @@ const MIGRACIONES = [
       );
       CREATE INDEX notificaciones_perfil ON notificaciones (perfil_id, creado_en);
       CREATE INDEX notificaciones_actividad ON notificaciones (actividad_id);
+    `);
+  },
+  // Involucrados de cada organización: en las compartidas, todos los perfiles que ya había; en las privadas, su dueño.
+  (db) => {
+    db.exec(`
+      CREATE TABLE organizacion_miembros (
+        organizacion_id TEXT NOT NULL REFERENCES organizaciones(id) ON DELETE CASCADE,
+        perfil_id TEXT NOT NULL REFERENCES perfiles(id) ON DELETE CASCADE,
+        PRIMARY KEY (organizacion_id, perfil_id)
+      );
+      CREATE INDEX organizacion_miembros_perfil ON organizacion_miembros (perfil_id);
+      INSERT INTO organizacion_miembros (organizacion_id, perfil_id)
+        SELECT o.id, p.id FROM organizaciones o JOIN perfiles p ON o.compartida = 1 OR p.id = o.duenio_id;
     `);
   },
 ];
@@ -379,6 +394,13 @@ export function parseOrganizacion(input, { partial = false } = {}) {
     if (typeof input.compartida !== 'boolean') throw httpError(422, 'compartida_invalida');
     changes.compartida = input.compartida;
   }
+  if ('miembros' in input) {
+    const { miembros } = input;
+    if (!Array.isArray(miembros) || miembros.length > MAX_MIEMBROS || miembros.some((id) => typeof id !== 'string' || id.length > 64)) {
+      throw httpError(422, 'miembros_invalidos');
+    }
+    changes.miembros = [...new Set(miembros)];
+  }
   return changes;
 }
 
@@ -404,7 +426,7 @@ function transaction(db, work) {
 // node:sqlite devuelve objetos sin prototipo; se copian para que se comporten como objetos normales.
 const fila = (row) => (row ? { ...row } : null);
 const perfilFila = (row) => (row ? { ...row, tiene_contrasena: Boolean(row.tiene_contrasena) } : null);
-const organizacionFila = (row) => (row ? { ...row, compartida: Boolean(row.compartida) } : null);
+const organizacionFila = (row) => (row ? { ...row, compartida: Boolean(row.compartida), miembros: JSON.parse(row.miembros).sort() } : null);
 const actividadFila = (row) => (row ? { ...row, datos: row.datos ? JSON.parse(row.datos) : null } : null);
 
 // Proyecto sin organización con ese nombre; se crea si no existe.
@@ -465,6 +487,11 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     return row ? (row.organizacion ? `${row.organizacion} › ${row.nombre}` : row.nombre) : null;
   }
 
+  // "@Diego" (sin importar mayúsculas) menciona a Diego; "@Diegoxx" no menciona a nadie.
+  const mencionadosEn = (texto) => db.prepare('SELECT id, nombre FROM perfiles').all()
+    .filter((p) => new RegExp(`@${p.nombre.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'iu').test(texto))
+    .map((p) => p.id);
+
   // Anota un cambio en el historial y avisa a los perfiles de `avisar`, salvo a quien lo hizo.
   // De un pendiente privado solo se avisa a su dueño, que es el único que lo ve.
   function registrar(quien, item, tipo, datos = null, avisar = []) {
@@ -515,6 +542,15 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
   function verificarOrganizacion(yo, organizacionId) {
     if (organizacionId && !organizacion(yo, organizacionId)) throw httpError(422, 'organizacion_invalida');
+  }
+
+  // Los involucrados de una organización (para filtrar y asignar). Los ids deben ser de perfiles que existen.
+  function ponerMiembros(organizacionId, miembros) {
+    const existentes = miembros.filter((id) => db.prepare('SELECT 1 FROM perfiles WHERE id = ?').get(id));
+    if (existentes.length !== miembros.length) throw httpError(422, 'miembros_invalidos');
+    db.prepare('DELETE FROM organizacion_miembros WHERE organizacion_id = ?').run(organizacionId);
+    const insertar = db.prepare('INSERT INTO organizacion_miembros (organizacion_id, perfil_id) VALUES (?, ?)');
+    for (const id of miembros) insertar.run(organizacionId, id);
   }
 
   // Nombre, color, privacidad y borrado de una organización son de su dueño; las del equipo (sin dueño), de todos.
@@ -665,11 +701,10 @@ function createRepo(db, dataDir, graciaImagenesMs) {
           .run(id, pendienteId, quien.perfil_id, quien.nombre, texto, new Date().toISOString());
         const participantes = db.prepare('SELECT DISTINCT perfil_id FROM comentarios WHERE pendiente_id = ? AND perfil_id IS NOT NULL').all(pendienteId)
           .map((row) => row.perfil_id);
-        const minusculas = texto.toLowerCase();
-        const mencionados = db.prepare('SELECT id, nombre FROM perfiles').all().filter((p) => minusculas.includes(`@${p.nombre.toLowerCase()}`))
-          .map((p) => p.id);
-        registrar(quien, item, 'comentario', { comentario_id: id, extracto: texto.slice(0, MAX_EXTRACTO) },
-          [item.perfil_id, item.creado_por, ...participantes, ...mencionados]);
+        // Los mencionados quedan en el historial para que su aviso diga "te mencionó".
+        const menciones = mencionadosEn(texto);
+        const datos = { comentario_id: id, extracto: texto.slice(0, MAX_EXTRACTO), ...(menciones.length > 0 && { menciones }) };
+        registrar(quien, item, 'comentario', datos, [item.perfil_id, item.creado_por, ...participantes, ...menciones]);
         return fila(db.prepare(`${SELECT_COMENTARIO} WHERE id = ?`).get(id));
       });
     },
@@ -805,25 +840,38 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       .all(yo).map(organizacionFila),
 
     // La cuenta del equipo crea organizaciones sin dueño, que siempre son compartidas.
-    crearOrganizacion(yo, { nombre, color, compartida = true }) {
+    // Si no se dicen sus involucrados, en una compartida son todos los perfiles; en una privada, solo su dueño.
+    crearOrganizacion(yo, { nombre, color, compartida = true, miembros }) {
       const { total } = db.prepare('SELECT COUNT(*) AS total FROM organizaciones').get();
       const id = randomUUID();
-      sinDuplicados('organizacion_duplicada', () => db.prepare(`INSERT INTO organizaciones (id, nombre, color, duenio_id, compartida, creado_en)
-        VALUES (?, ?, ?, ?, ?, ?)`).run(id, nombre, color ?? COLORES[total % COLORES.length], yo, yo === null || compartida ? 1 : 0, new Date().toISOString()));
-      return organizacion(yo, id);
+      const esCompartida = yo === null || compartida;
+      return transaction(db, () => {
+        sinDuplicados('organizacion_duplicada', () => db.prepare(`INSERT INTO organizaciones (id, nombre, color, duenio_id, compartida, creado_en)
+          VALUES (?, ?, ?, ?, ?, ?)`).run(id, nombre, color ?? COLORES[total % COLORES.length], yo, esCompartida ? 1 : 0, new Date().toISOString()));
+        ponerMiembros(id, !esCompartida ? [yo] : (miembros ?? db.prepare('SELECT id FROM perfiles').all().map((p) => p.id)));
+        return organizacion(yo, id);
+      });
     },
 
-    actualizarOrganizacion(yo, id, changes) {
-      const org = administrable(yo, id);
+    // Los involucrados de una compartida los cambia cualquiera que la ve, como sus proyectos; lo demás, quien la administra.
+    // Una privada solo tiene a su dueño: al volverla privada quedan solo él.
+    actualizarOrganizacion(yo, id, { miembros, ...changes }) {
+      const org = Object.keys(changes).length ? administrable(yo, id) : organizacion(yo, id);
       if (!org) return null;
       if (changes.compartida === false && org.duenio_id === null) throw httpError(422, 'organizacion_del_equipo');
+      const compartida = changes.compartida ?? org.compartida;
+      if (miembros && !compartida) throw httpError(422, 'miembros_en_privada');
       const columnas = { ...changes, ...('compartida' in changes ? { compartida: changes.compartida ? 1 : 0 } : {}) };
       const campos = Object.keys(columnas);
-      if (campos.length) {
-        sinDuplicados('organizacion_duplicada', () => db.prepare(`UPDATE organizaciones SET ${campos.map((campo) => `${campo} = ?`).join(', ')} WHERE id = ?`)
-          .run(...campos.map((campo) => columnas[campo]), id));
-      }
-      return organizacion(yo, id);
+      return transaction(db, () => {
+        if (campos.length) {
+          sinDuplicados('organizacion_duplicada', () => db.prepare(`UPDATE organizaciones SET ${campos.map((campo) => `${campo} = ?`).join(', ')} WHERE id = ?`)
+            .run(...campos.map((campo) => columnas[campo]), id));
+        }
+        if (miembros) ponerMiembros(id, miembros);
+        else if (!compartida && org.compartida) ponerMiembros(id, [org.duenio_id]);
+        return organizacion(yo, id);
+      });
     },
 
     // Con pendientes adentro no se borra: se perderían, o se verían de golpe los de una organización privada.

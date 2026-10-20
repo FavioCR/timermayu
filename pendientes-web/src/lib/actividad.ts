@@ -30,6 +30,7 @@ export function describir(actividad: Actividad, { conTitulo = true, yo = null }:
     case "descripcion":
       return conTitulo ? `editó la descripción de ${titulo}` : "editó la descripción"
     case "comentario":
+      if (yo && datos.menciones?.includes(yo)) return conTitulo ? `te mencionó en ${titulo}` : "te mencionó"
       return conTitulo ? `comentó en ${titulo}` : "comentó"
     case "borrado":
       return `borró ${titulo}`

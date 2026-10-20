@@ -1,6 +1,7 @@
 import { useRef, useState, type FormEvent } from "react"
-import { Folder, FolderInput, FolderOpen, Lock, MoreVertical, Palette, Pencil, Plus, Trash2, Users } from "lucide-react"
+import { Folder, FolderInput, FolderOpen, Lock, MoreVertical, Palette, Pencil, Plus, Trash2, UserPlus, Users, UsersRound } from "lucide-react"
 
+import { InvolucradosMenu } from "@/components/involucrados-menu"
 import { SelectorColor } from "@/components/selector-color"
 import { Button } from "@/components/ui/button"
 import {
@@ -198,6 +199,21 @@ export function ProyectosDialog({
       onCatalogo((actual) => conOrganizacion(actual, nueva))
     })
 
+  // Se ve al instante, para poder marcar varias personas seguidas; si falla, vuelve a como estaba.
+  async function cambiarInvolucrados(organizacion: Organizacion, miembros: string[]) {
+    onCatalogo((actual) => conOrganizacion(actual, { ...organizacion, miembros }))
+    const listo = await intentar(async () => {
+      await api.organizaciones.actualizar(credenciales, organizacion.id, { miembros })
+    })
+    if (!listo) onCatalogo((actual) => conOrganizacion(actual, organizacion))
+  }
+
+  const nombresDe = (miembros: string[]) =>
+    perfiles
+      .filter((perfil) => miembros.includes(perfil.id))
+      .map((perfil) => perfil.nombre)
+      .join(", ")
+
   const borrarOrganizacion = (organizacion: Organizacion) =>
     intentar(async () => {
       await api.organizaciones.borrar(credenciales, organizacion.id)
@@ -261,7 +277,8 @@ export function ProyectosDialog({
         <DialogHeader>
           <DialogTitle>Organizaciones y proyectos</DialogTitle>
           <DialogDescription>
-            Cada organización agrupa sus proyectos. Una privada, con todo lo que tiene dentro, solo la ve quien la creó.
+            Cada organización agrupa sus proyectos y a las personas involucradas. Una privada, con todo lo que tiene dentro, solo la ve
+            quien la creó.
           </DialogDescription>
         </DialogHeader>
 
@@ -370,6 +387,20 @@ export function ProyectosDialog({
                     )
                   )}
                 </div>
+
+                {organizacion?.compartida && (
+                  <div className="ml-1.5 flex min-h-9 items-center gap-2 border-l pl-3 text-sm">
+                    <UsersRound className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate text-muted-foreground" title={nombresDe(organizacion.miembros)}>
+                      {organizacion.miembros.length ? nombresDe(organizacion.miembros) : "Nadie todavía (se puede asignar a todos)"}
+                    </span>
+                    <InvolucradosMenu organizacion={organizacion} perfiles={perfiles} onCambiar={(miembros) => cambiarInvolucrados(organizacion, miembros)}>
+                      <Button variant="ghost" size="xs" className="shrink-0" aria-label={`Agregar o quitar personas de ${organizacion.nombre}`}>
+                        <UserPlus /> Personas
+                      </Button>
+                    </InvolucradosMenu>
+                  </div>
+                )}
 
                 {proyectos.length > 0 && (
                   <ul className="ml-1.5 flex flex-col border-l pl-3">

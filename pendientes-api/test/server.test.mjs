@@ -54,6 +54,9 @@ test('valida pendientes, perfiles, organizaciones, proyectos y orden', () => {
   assert.throws(() => parsePerfil({ nombre: 'Ana', color: 'rojo' }), /color_invalido/);
   assert.deepEqual(parseOrganizacion({ nombre: ' Mayugo ', compartida: false }), { nombre: 'Mayugo', compartida: false });
   assert.throws(() => parseOrganizacion({ nombre: 'Mayugo', compartida: 'sí' }), /compartida_invalida/);
+  assert.deepEqual(parseOrganizacion({ miembros: ['a', 'b', 'a'] }, { partial: true }), { miembros: ['a', 'b'] });
+  assert.throws(() => parseOrganizacion({ miembros: 'a' }, { partial: true }), /miembros_invalidos/);
+  assert.throws(() => parseOrganizacion({ miembros: [1] }, { partial: true }), /miembros_invalidos/);
   assert.deepEqual(parseProyecto({ nombre: ' Vendeizi ', organizacion_id: null }), { nombre: 'Vendeizi', organizacion_id: null });
   assert.throws(() => parseProyecto({ nombre: 'x'.repeat(61) }), /nombre_invalido/);
   assert.throws(() => parseOrden({ items: [{ id: 'a', estado: 'otro' }] }), /orden_invalido/);
@@ -253,6 +256,41 @@ test('lo de una organización privada solo lo ve su dueño hasta que la comparte
   await diego.call('PATCH', `/organizaciones/${personal.id}`, { compartida: true });
   assert.equal((await diego.call('DELETE', `/perfiles/${diego.perfil.id}`)).status, 200);
   assert.equal((await favio.data('GET', '/organizaciones')).organizaciones.find((o) => o.id === personal.id).duenio_id, null);
+});
+
+test('cada organización tiene sus involucrados: en una compartida los cambia cualquiera, una privada solo tiene a su dueño', async (t) => {
+  const { call, data, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const junior = await entrarComo('Junior');
+  const ids = (...perfiles) => perfiles.map((perfil) => perfil.perfil.id).sort();
+
+  // Sin decirlo, en una compartida están todos y en una privada solo su dueño.
+  const { organizacion: mayugo } = await data('POST', '/organizaciones', { nombre: 'Mayugo' });
+  assert.deepEqual(mayugo.miembros, ids(diego, favio, junior));
+  const { organizacion: personal } = await diego.data('POST', '/organizaciones', { nombre: 'Personal', compartida: false, miembros: [favio.perfil.id] });
+  assert.deepEqual(personal.miembros, ids(diego));
+  const { organizacion: vendeizi } = await diego.data('POST', '/organizaciones', { nombre: 'Vendeizi', miembros: [diego.perfil.id, junior.perfil.id] });
+  assert.deepEqual(vendeizi.miembros, ids(diego, junior));
+
+  // Cualquiera que la ve cambia los involucrados de una compartida, aunque no sea su dueño; renombrarla, no.
+  assert.deepEqual((await favio.data('PATCH', `/organizaciones/${vendeizi.id}`, { miembros: [favio.perfil.id, diego.perfil.id] })).organizacion.miembros,
+    ids(diego, favio));
+  assert.equal((await favio.call('PATCH', `/organizaciones/${vendeizi.id}`, { nombre: 'Mía', miembros: [] })).status, 403);
+  assert.deepEqual((await data('PATCH', `/organizaciones/${mayugo.id}`, { miembros: [junior.perfil.id] })).organizacion.miembros, ids(junior));
+  assert.equal((await call('PATCH', `/organizaciones/${mayugo.id}`, { miembros: [crypto.randomUUID()] })).status, 422);
+  assert.deepEqual((await data('GET', '/organizaciones')).organizaciones.find((o) => o.id === mayugo.id).miembros, ids(junior));
+
+  // En una privada no se agregan; al volverla privada queda solo su dueño, y al compartirla se agregan de nuevo.
+  assert.equal((await diego.call('PATCH', `/organizaciones/${personal.id}`, { miembros: ids(diego, favio) })).status, 422);
+  assert.equal((await favio.call('PATCH', `/organizaciones/${personal.id}`, { miembros: [] })).status, 404);
+  assert.deepEqual((await diego.data('PATCH', `/organizaciones/${vendeizi.id}`, { compartida: false })).organizacion.miembros, ids(diego));
+  const compartida = await diego.data('PATCH', `/organizaciones/${vendeizi.id}`, { compartida: true, miembros: ids(diego, junior) });
+  assert.deepEqual(compartida.organizacion.miembros, ids(diego, junior));
+
+  // Al quitar un perfil sale de las organizaciones.
+  assert.equal((await junior.call('DELETE', `/perfiles/${junior.perfil.id}`)).status, 200);
+  assert.deepEqual((await diego.data('GET', '/organizaciones')).organizaciones.find((o) => o.id === vendeizi.id).miembros, ids(diego));
 });
 
 test('las altas simultáneas no se pierden y lo nuevo queda arriba', async (t) => {
@@ -476,23 +514,30 @@ test('chat por pendiente: avisa a los que participan y a los @mencionados; cada 
   assert.equal((await diego.data('GET', '/notificaciones')).notificaciones[0].actividad.tipo, 'comentario');
   assert.equal((await junior.data('GET', '/notificaciones')).no_leidas, 0);
 
-  await diego.call('POST', `/${pendiente.id}/comentarios`, { texto: '@junior ¿lo puedes revisar?' });
+  // Una palabra que solo empieza con el nombre no es una mención.
+  await diego.call('POST', `/${pendiente.id}/comentarios`, { texto: 'Esto es para los @juniors del equipo' });
+  assert.equal((await junior.data('GET', '/notificaciones')).no_leidas, 0);
+  assert.equal((await favio.data('GET', '/notificaciones')).notificaciones[0].actividad.datos.menciones, undefined);
+
+  await diego.call('POST', `/${pendiente.id}/comentarios`, { texto: '@junior ¿lo puedes revisar?, @Favio.' });
   const deJunior = await junior.data('GET', '/notificaciones');
-  assert.deepEqual(deJunior.notificaciones[0].actividad.datos.extracto, '@junior ¿lo puedes revisar?');
+  assert.equal(deJunior.no_leidas, 1);
+  assert.deepEqual(deJunior.notificaciones[0].actividad.datos.extracto, '@junior ¿lo puedes revisar?, @Favio.');
+  assert.deepEqual(deJunior.notificaciones[0].actividad.datos.menciones.sort(), [favio.perfil.id, junior.perfil.id].sort());
   assert.equal((await favio.data('GET', '/notificaciones')).notificaciones[0].actividad.autor, 'Diego');
   await data('POST', `/${pendiente.id}/comentarios`, { texto: 'Desde la cuenta del equipo' });
 
   const { comentarios } = await diego.data('GET', `/${pendiente.id}/comentarios`);
-  assert.deepEqual(comentarios.map((c) => c.autor), ['Favio', 'Diego', 'Equipo']);
-  assert.equal((await diego.data('GET')).pendientes[0].num_comentarios, 3);
+  assert.deepEqual(comentarios.map((c) => c.autor), ['Favio', 'Diego', 'Diego', 'Equipo']);
+  assert.equal((await diego.data('GET')).pendientes[0].num_comentarios, 4);
   assert.equal((await call('POST', `/${pendiente.id}/comentarios`, { texto: ' ' })).status, 422);
   assert.equal((await call('POST', `/${crypto.randomUUID()}/comentarios`, { texto: 'nada' })).status, 404);
 
   assert.equal((await diego.call('DELETE', `/comentarios/${comentario.id}`)).status, 403);
   assert.equal((await call('DELETE', `/comentarios/${comentario.id}`)).status, 403);
   assert.equal((await favio.call('DELETE', `/comentarios/${comentario.id}`)).status, 200);
-  assert.equal((await call('DELETE', `/comentarios/${comentarios[2].id}`)).status, 200);
-  assert.deepEqual((await diego.data('GET', `/${pendiente.id}/comentarios`)).comentarios.map((c) => c.autor), ['Diego']);
+  assert.equal((await call('DELETE', `/comentarios/${comentarios[3].id}`)).status, 200);
+  assert.deepEqual((await diego.data('GET', `/${pendiente.id}/comentarios`)).comentarios.map((c) => c.autor), ['Diego', 'Diego']);
   // Con el mensaje se fue su aviso.
   assert.equal((await diego.data('GET', '/notificaciones')).notificaciones.some((n) => n.actividad.tipo === 'comentario'), false);
 

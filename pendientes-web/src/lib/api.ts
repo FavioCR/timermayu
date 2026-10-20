@@ -42,6 +42,8 @@ export type Organizacion = {
   duenio_id: string | null
   compartida: boolean
   creado_en: string
+  // Ids de sus involucrados: a quiénes se filtra y asigna dentro de ella.
+  miembros: string[]
 }
 
 export type Proyecto = {
@@ -53,6 +55,20 @@ export type Proyecto = {
 
 export type TipoActividad = "creado" | "texto" | "estado" | "asignado" | "proyecto" | "descripcion" | "comentario" | "borrado"
 
+// Lo que se anota según el tipo: de/a en los cambios, extracto y menciones (ids de perfil) en los mensajes, etc.
+export type DatosActividad = {
+  de?: string | null
+  a?: string | null
+  a_id?: string | null
+  estado?: string
+  asignado?: string | null
+  asignado_id?: string | null
+  proyecto?: string | null
+  comentario_id?: string
+  extracto?: string
+  menciones?: string[]
+}
+
 // Una entrada del historial. Guarda nombres (no solo ids) para leerse aunque el perfil o el proyecto ya no existan.
 // pendiente_id es null si el pendiente ya se borró.
 export type Actividad = {
@@ -62,7 +78,7 @@ export type Actividad = {
   perfil_id: string | null
   autor: string
   tipo: TipoActividad
-  datos: Record<string, string | null> | null
+  datos: DatosActividad | null
   creado_en: string
 }
 
@@ -113,6 +129,8 @@ const MENSAJES: Record<string, string> = {
   organizacion_con_pendientes: "Todavía tiene pendientes: muévelos a otro proyecto o bórralos antes.",
   organizacion_del_equipo: "Una organización del equipo no puede ser privada.",
   solo_el_duenio: "Solo quien creó la organización puede cambiarla o borrarla.",
+  miembros_invalidos: "Alguna de esas personas ya no existe. Recarga la página.",
+  miembros_en_privada: "Una organización privada solo es de su dueño. Compártela para agregar personas.",
   proyecto_duplicado: "Ya hay un proyecto con ese nombre en esa organización.",
   proyecto_con_pendientes: "Todavía tiene pendientes: muévelos a otro proyecto o bórralos antes.",
   descripcion_invalida: "La descripción es demasiado larga.",
@@ -278,7 +296,7 @@ export const api = {
       pedir<{ organizaciones: Organizacion[] }>(credenciales, "GET", "/organizaciones").then((data) => data.organizaciones),
     crear: (credenciales: string, datos: { nombre: string; color: string; compartida: boolean }) =>
       pedir<{ organizacion: Organizacion }>(credenciales, "POST", "/organizaciones", datos).then((data) => data.organizacion),
-    actualizar: (credenciales: string, id: string, cambios: Partial<Pick<Organizacion, "nombre" | "color" | "compartida">>) =>
+    actualizar: (credenciales: string, id: string, cambios: Partial<Pick<Organizacion, "nombre" | "color" | "compartida" | "miembros">>) =>
       pedir<{ organizacion: Organizacion }>(credenciales, "PATCH", `/organizaciones/${id}`, cambios).then((data) => data.organizacion),
     borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/organizaciones/${id}`),
   },

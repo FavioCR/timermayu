@@ -23,7 +23,7 @@ import {
   type Usuario,
 } from "@/lib/api"
 import { enlaceWhatsApp } from "@/lib/actividad"
-import { organizacionDe, type Catalogo } from "@/lib/catalogo"
+import { involucrados, organizacionDe, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
 const EditorDescripcion = lazy(() => import("@/components/editor-descripcion"))
@@ -234,7 +234,7 @@ function Contenido({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {perfiles.map((perfil) => (
+                {involucrados(perfiles, organizacion, pendiente.perfil_id).map((perfil) => (
                   <SelectItem key={perfil.id} value={perfil.id}>
                     <PerfilAvatar perfil={perfil} size="sm" /> {perfil.nombre}
                   </SelectItem>
