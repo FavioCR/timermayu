@@ -130,15 +130,11 @@ function conMenciones(bloques: Bloque[], perfiles: Perfil[]): Bloque[] {
   return bloques.map(visitar)
 }
 
-const diccionario = {
-  ...es,
-  placeholders: {
-    ...es.placeholders,
-    default: "Escribe una descripción: / para más bloques (/ia para escribir con IA), @ para mencionar, o pega una imagen o un archivo",
-  },
-}
+const PISTA_DESCRIPCION =
+  "Escribe una descripción: / para más bloques (/ia para escribir con IA), @ para mencionar, o pega una imagen o un archivo"
 
-// Se carga aparte (React.lazy) para que el tablero no espere al editor.
+// Se carga aparte (React.lazy) para que el tablero no espere al editor. También es el editor de las notas privadas,
+// sin perfiles (sin @menciones) y con su propia pista.
 export default function EditorDescripcion({
   inicial,
   oscuro,
@@ -146,9 +142,10 @@ export default function EditorDescripcion({
   subirArchivo,
   resolverUrl,
   abrirArchivo,
-  perfiles,
-  yo,
+  perfiles = [],
+  yo = null,
   redactar,
+  pista = PISTA_DESCRIPCION,
 }: {
   inicial: (typeof schema.PartialBlock)[] | undefined
   oscuro: boolean
@@ -156,15 +153,18 @@ export default function EditorDescripcion({
   subirArchivo: (archivo: File) => Promise<string>
   resolverUrl: (url: string) => Promise<string>
   abrirArchivo: (url: string, nombre: string) => void
-  perfiles: Perfil[]
-  yo: string | null
+  // Sin perfiles no hay @menciones.
+  perfiles?: Perfil[]
+  yo?: string | null
   // Sin IA (o sin quien pregunte) no sale «Escribir con IA» en el menú de /.
   redactar?: (texto: string) => Promise<string>
+  // Lo que se lee en una línea vacía.
+  pista?: string
 }) {
   const editor = useCreateBlockNote({
     schema,
     initialContent: inicial,
-    dictionary: diccionario,
+    dictionary: { ...es, placeholders: { ...es.placeholders, default: pista } },
     uploadFile: subirArchivo,
     resolveFileUrl: resolverUrl,
   })
@@ -208,7 +208,7 @@ export default function EditorDescripcion({
           {
             title: "Escribir con IA",
             subtext: "Escribe a la rápida y la IA lo redacta",
-            aliases: ["ia", "ai", "redactar", "mejorar"],
+            aliases: ["ia", "ai", "redactar", "mejorar", "resumir", "explicar"],
             group: "IA",
             icon: <Sparkles size={18} />,
             onItemClick: abrirIA,
@@ -235,7 +235,7 @@ export default function EditorDescripcion({
       <Personas.Provider value={personas}>
         <BlockNoteView editor={editor} theme={oscuro ? "dark" : "light"} slashMenu={false} onChange={() => onCambio(editor.document)}>
           <SuggestionMenuController triggerCharacter="/" getItems={itemsDeBarra} />
-          <SuggestionMenuController triggerCharacter="@" getItems={sugerencias} />
+          {perfiles.length > 0 && <SuggestionMenuController triggerCharacter="@" getItems={sugerencias} />}
         </BlockNoteView>
         <Popover open={ia !== null} onOpenChange={(abierto) => !abierto && setIa(null)}>
           <PopoverAnchor virtualRef={anclaIA} />

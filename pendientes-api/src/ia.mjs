@@ -126,6 +126,19 @@ export function instruccionesRedaccion({ donde, personas, pendiente, contexto })
   ].join('\n');
 }
 
+// /ia en las notas privadas: apuntes de un curso, no un tablero de equipo (no hay personas que mencionar).
+export function instruccionesApuntes({ curso, titulo, contexto }) {
+  return [
+    'Eres el asistente de los apuntes de estudio de una persona. Te pasan un borrador, o una indicación de lo que quiere anotar, y devuelves el texto bien redactado, listo para pegar en sus apuntes.',
+    '- Escribe en el idioma del borrador, claro y ordenado, con buena ortografía. Conserva el sentido, los datos, las fórmulas, el código y los enlaces; no inventes datos.',
+    '- Si el borrador es una indicación ("resume…", "explica…", "haz una lista de…"), escribe directamente el texto final, no una explicación de lo que harías. Si te piden explicar o dar ejemplos, agrega lo necesario, correcto y breve.',
+    '- Usa Markdown sencillo (subtítulos con ##, listas con -, pasos con 1., **negrita**, `código`) cuando ordene mejor la información.',
+    `Curso: ${curso}`,
+    `Nota: ${titulo || '(sin título)'}`,
+    ...(contexto ? [`La nota hasta ahora (el principio): ${contexto}`] : []),
+  ].join('\n');
+}
+
 // Cada imagen va después de su rótulo («Imagen 1:»…), para que la IA diga cuáles son de cada pendiente.
 const conRotulos = (imagenes, rotulo, parte) => imagenes.flatMap((imagen, i) => [rotulo(`Imagen ${i + 1}:`), parte(imagen)]);
 

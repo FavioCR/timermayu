@@ -46,6 +46,8 @@ services:
       AUTH_USER: ${PENDIENTES_USER:-pendientes}
       # Sin contraseña el API arranca pero rechaza todo; así no tumba al resto del compose.
       AUTH_PASSWORD: ${PENDIENTES_PASSWORD:-}
+      # Quién tiene notas privadas (apuntes de cursos): correos de perfiles, separados por comas. Vacío = nadie.
+      NOTAS_CORREOS: ${PENDIENTES_NOTAS_CORREOS:-}
     volumes:
       - pendientes_data:/data
     networks:

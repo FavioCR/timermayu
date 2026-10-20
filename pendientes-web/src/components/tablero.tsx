@@ -38,6 +38,7 @@ import {
   LogOut,
   MessageSquare,
   MonitorDown,
+  NotebookPen,
   MoreVertical,
   Paperclip,
   Plus,
@@ -1053,6 +1054,13 @@ export function Tablero({
               <Button variant="ghost" onClick={() => setVentana("actividad")}>
                 <History /> Actividad
               </Button>
+              {usuario?.notas && (
+                <Button asChild variant="ghost">
+                  <a href="/pendientes/notas">
+                    <NotebookPen /> Notas
+                  </a>
+                </Button>
+              )}
               <Button asChild variant="ghost">
                 <a href="/" aria-label="Timer">
                   <Timer /> <span className="hidden lg:inline">Timer</span>
@@ -1093,6 +1101,13 @@ export function Tablero({
                 <DropdownMenuItem className="md:hidden" onSelect={() => setVentana("actividad")}>
                   <History /> Actividad
                 </DropdownMenuItem>
+                {usuario?.notas && (
+                  <DropdownMenuItem className="md:hidden" asChild>
+                    <a href="/pendientes/notas">
+                      <NotebookPen /> Notas
+                    </a>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem className="md:hidden" asChild>
                   <a href="/">
                     <Timer /> Timer

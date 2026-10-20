@@ -9,12 +9,15 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 import {
   createApp,
+  extractoDe,
   nombreDeArchivo,
   openDb,
   parseAjustesIA,
   parseComentario,
+  parseCurso,
   parseEtiqueta,
   parseLeidas,
+  parseNota,
   parseOrden,
   parseOrganizacion,
   parsePedidoModelos,
@@ -193,10 +196,10 @@ test('la base nueva trae a Favio, Diego y Junior una sola vez', async () => {
 
 test('cada perfil entra con su contraseña, por nombre o por correo', async (t) => {
   const { call, data, entrarComo } = await startServer(t);
-  assert.deepEqual((await data('GET', '/yo')).usuario, { perfil_id: null, nombre: 'Equipo' });
+  assert.deepEqual((await data('GET', '/yo')).usuario, { perfil_id: null, nombre: 'Equipo', notas: false });
 
   const diego = await entrarComo('Diego');
-  assert.deepEqual((await diego.data('GET', '/yo')).usuario, { perfil_id: diego.perfil.id, nombre: 'Diego' });
+  assert.deepEqual((await diego.data('GET', '/yo')).usuario, { perfil_id: diego.perfil.id, nombre: 'Diego', notas: false });
   assert.equal((await call('GET', '/yo', undefined, { Authorization: basic('diego', diego.contrasena) })).status, 200);
   assert.equal((await call('GET', '/yo', undefined, { Authorization: basic('Diego', 'otra-clave') })).status, 401);
   assert.equal((await call('GET', '/yo', undefined, { Authorization: basic('Favio', '') })).status, 401);
@@ -1401,4 +1404,234 @@ test('cambios en tiempo real: avisa a las otras pestañas lo que cambió, sin co
   assert.deepEqual(otraPestana, [{ tipo: 'pendientes', pendiente_id: compartido.id }]);
 
   assert.equal((await fetch(`${base}/api/pendientes/eventos`)).status, 401);
+});
+
+// Las notas privadas: Diego tiene su correo en NOTAS_CORREOS. Favio también, para ver que cada quien ve solo lo suyo.
+async function conNotas(t, opciones = {}) {
+  const servidor = await startServer(t, { notasCorreos: 'Diego@Ejemplo.com, favio@ejemplo.com', ...opciones });
+  const diego = await servidor.entrarComo('Diego');
+  const favio = await servidor.entrarComo('Favio');
+  const junior = await servidor.entrarComo('Junior');
+  assert.equal((await diego.call('PATCH', `/perfiles/${diego.perfil.id}`, { correo: 'diego@ejemplo.com' })).status, 200);
+  assert.equal((await favio.call('PATCH', `/perfiles/${favio.perfil.id}`, { correo: 'favio@ejemplo.com' })).status, 200);
+  assert.equal((await junior.call('PATCH', `/perfiles/${junior.perfil.id}`, { correo: 'junior@ejemplo.com' })).status, 200);
+  // Para mandar el cuerpo tal cual (imágenes y partes de un recurso).
+  const subir = (quien, ruta, cuerpo, headers = {}) => fetch(`${servidor.base}/api/pendientes${ruta}`, { method: 'POST', headers: { ...quien.headers, ...headers }, body: cuerpo });
+  return { ...servidor, diego, favio, junior, subir };
+}
+
+const documento = (...textos) => JSON.stringify(textos.map((text) => ({ type: 'paragraph', content: [{ type: 'text', text }], children: [] })));
+
+test('valida cursos y notas', () => {
+  assert.deepEqual(parseCurso({ nombre: '  Cálculo II ', icono: ' 📐 ' }), { nombre: 'Cálculo II', icono: '📐' });
+  assert.deepEqual(parseCurso({ icono: '🧪' }, { partial: true }), { icono: '🧪' });
+  assert.throws(() => parseCurso({ nombre: '' }), /nombre_curso_invalido/);
+  assert.throws(() => parseCurso({ nombre: 'x'.repeat(81) }), /nombre_curso_invalido/);
+  assert.throws(() => parseCurso({ nombre: 'A', icono: '' }), /icono_invalido/);
+  assert.throws(() => parseCurso({ nombre: 'A', icono: 'x'.repeat(17) }), /icono_invalido/);
+  assert.deepEqual(parseNota({}), { titulo: '' });
+  assert.deepEqual(parseNota({ titulo: '  Clase   1 ' }), { titulo: 'Clase 1' });
+  assert.deepEqual(parseNota({ contenido: '[]' }, { partial: true }), { contenido: '[]' });
+  assert.throws(() => parseNota({ titulo: 'x'.repeat(201) }), /titulo_nota_invalido/);
+  assert.throws(() => parseNota({ contenido: '{}' }, { partial: true }), /contenido_nota_invalido/);
+  assert.throws(() => parseNota({ contenido: 'no es json' }, { partial: true }), /contenido_nota_invalido/);
+  assert.throws(() => parseNota({ curso_id: '' }, { partial: true }), /curso_invalido/);
+  assert.equal(extractoDe('La derivada de una función mide su cambio', 'funcion'), 'La derivada de una función mide su cambio');
+  assert.equal(extractoDe(`${'a'.repeat(100)} integral ${'b'.repeat(300)}`, 'integral').startsWith('…'), true);
+});
+
+test('notas: solo las tiene quien entra con su perfil y su correo está en la lista; para los demás no existen', async (t) => {
+  const { base, call, data, diego, favio, junior } = await conNotas(t);
+  assert.equal((await diego.data('GET', '/yo')).usuario.notas, true);
+  assert.equal((await junior.data('GET', '/yo')).usuario.notas, false);
+  assert.equal((await data('GET', '/yo')).usuario.notas, false);
+
+  const { curso } = await diego.data('POST', '/notas/cursos', { nombre: 'Cálculo II', icono: '📐' });
+  assert.equal(curso.icono, '📐');
+  const { nota } = await diego.data('POST', `/notas/cursos/${curso.id}/notas`, { titulo: 'Integrales por partes' });
+  assert.equal(nota.curso_id, curso.id);
+  const contenido = documento('La fórmula es ∫u dv = uv − ∫v du.', 'Ecuación de ejemplo con logaritmos.');
+  assert.equal((await diego.call('PATCH', `/notas/${nota.id}`, { contenido })).status, 200);
+  assert.equal((await diego.data('GET', `/notas/${nota.id}`)).nota.contenido, contenido);
+  const arbol = await diego.data('GET', '/notas');
+  assert.deepEqual(arbol.cursos.map((c) => c.nombre), ['Cálculo II']);
+  assert.deepEqual(arbol.notas.map((n) => n.titulo), ['Integrales por partes']);
+  assert.deepEqual(arbol.recursos, []);
+  // Se busca sin tildes ni mayúsculas, en el título y en el texto.
+  const { notas: halladas } = await diego.data('GET', `/notas/buscar?q=${encodeURIComponent('ecuacion LOGARITMOS')}`);
+  assert.deepEqual(halladas.map((n) => n.id), [nota.id]);
+  assert.match(halladas[0].extracto, /Ecuación de ejemplo/);
+  assert.deepEqual((await diego.data('GET', '/notas/buscar?q=derivadas')).notas, []);
+
+  // La cuenta del equipo y un perfil sin el correo en la lista no las ven, ni lo que hay dentro.
+  for (const [quien, headers] of [['equipo', { Authorization: auth }], ['junior', junior.headers]]) {
+    for (const [method, ruta] of [['GET', '/notas'], ['GET', `/notas/${nota.id}`], ['GET', '/notas/buscar?q=ecuacion'], ['POST', '/notas/cursos'],
+      ['PATCH', `/notas/${nota.id}`], ['DELETE', `/notas/cursos/${curso.id}`]]) {
+      assert.equal((await call(method, ruta, method === 'GET' || method === 'DELETE' ? undefined : { nombre: 'X' }, headers)).status, 404, `${quien} ${method} ${ruta}`);
+    }
+  }
+  // Favio también tiene notas, pero solo las suyas.
+  assert.deepEqual(await favio.data('GET', '/notas'), { cursos: [], notas: [], recursos: [] });
+  assert.equal((await favio.call('GET', `/notas/${nota.id}`)).status, 404);
+  assert.equal((await favio.call('PATCH', `/notas/${nota.id}`, { titulo: 'Mía' })).status, 404);
+  assert.equal((await favio.call('DELETE', `/notas/${nota.id}`)).status, 404);
+  assert.equal((await favio.call('POST', `/notas/cursos/${curso.id}/notas`, {})).status, 404);
+  assert.equal((await favio.call('PATCH', `/notas/cursos/${curso.id}`, { nombre: 'Mío' })).status, 404);
+  assert.deepEqual((await favio.data('GET', '/notas/buscar?q=ecuacion')).notas, []);
+  // Tampoco puede mover una nota suya a un curso ajeno.
+  const { curso: deFavio } = await favio.data('POST', '/notas/cursos', { nombre: 'Inglés' });
+  const { nota: suya } = await favio.data('POST', `/notas/cursos/${deFavio.id}/notas`, {});
+  assert.equal(suya.titulo, '');
+  assert.equal((await favio.data('PATCH', `/notas/${suya.id}`, { curso_id: curso.id })).error, 'curso_invalido');
+  assert.equal((await diego.data('PATCH', `/notas/${nota.id}`, { curso_id: deFavio.id })).error, 'curso_invalido');
+
+  // Si Diego cambia su correo por uno que no está en la lista, deja de verlas (y siguen ahí si lo vuelve a poner).
+  await diego.call('PATCH', `/perfiles/${diego.perfil.id}`, { correo: 'otro@ejemplo.com' });
+  assert.equal((await diego.call('GET', '/notas')).status, 404);
+  await diego.call('PATCH', `/perfiles/${diego.perfil.id}`, { correo: 'DIEGO@ejemplo.com' });
+  assert.equal((await diego.data('GET', '/notas')).notas.length, 1);
+
+  // Un perfil con notas no se puede borrar sin borrarlas antes.
+  assert.equal((await diego.data('DELETE', `/perfiles/${diego.perfil.id}`)).error, 'perfil_con_notas');
+
+  // Nada de esto viaja por los cambios en tiempo real.
+  const cambiar = async () => {
+    await diego.data('POST', `/notas/cursos/${curso.id}/notas`, { titulo: 'Clase 2' });
+    await diego.data('PATCH', `/notas/cursos/${curso.id}`, { nombre: 'Cálculo 2' });
+  };
+  assert.deepEqual(await leerEventos(base, favio.headers, { esperaMs: 600, alConectar: cambiar }), []);
+  assert.deepEqual(await leerEventos(base, diego.headers, { cliente: 'otra', esperaMs: 600, alConectar: cambiar }), []);
+
+  // Sin NOTAS_CORREOS nadie las tiene.
+  const sinLista = await startServer(t);
+  const otro = await sinLista.entrarComo('Diego');
+  await otro.call('PATCH', `/perfiles/${otro.perfil.id}`, { correo: 'diego@ejemplo.com' });
+  assert.equal((await otro.data('GET', '/yo')).usuario.notas, false);
+  assert.equal((await otro.call('GET', '/notas')).status, 404);
+});
+
+test('notas: las imágenes son de su dueño y se borran cuando ninguna nota las usa', async (t) => {
+  const { call, diego, favio, subir } = await conNotas(t, { graciaImagenesMs: 0 });
+  const { curso } = await diego.data('POST', '/notas/cursos', { nombre: 'Química' });
+  const { nota: primera } = await diego.data('POST', `/notas/cursos/${curso.id}/notas`, { titulo: 'Enlaces' });
+  const { nota: segunda } = await diego.data('POST', `/notas/cursos/${curso.id}/notas`, { titulo: 'Repaso' });
+  const res = await subir(diego, `/notas/${primera.id}/imagenes`, PNG, { 'Content-Type': 'image/png' });
+  assert.equal(res.status, 201);
+  const { imagen } = await res.json();
+  assert.equal(imagen.url, `/api/pendientes/notas/imagenes/${imagen.id}`);
+  assert.equal((await subir(diego, `/notas/${primera.id}/imagenes`, Buffer.from('<svg/>'))).status, 415);
+  assert.equal((await subir(favio, `/notas/${primera.id}/imagenes`, PNG)).status, 404);
+
+  const ver = (quien) => call('GET', `/notas/imagenes/${imagen.id}`, undefined, quien.headers);
+  const vista = await ver(diego);
+  assert.equal(vista.status, 200);
+  assert.equal(vista.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(await vista.arrayBuffer()), PNG);
+  assert.equal((await ver(favio)).status, 404);
+  assert.equal((await call('GET', `/notas/imagenes/${imagen.id}`)).status, 404);
+
+  // Copiada a otra nota sigue viva aunque se quite (o se borre) la primera.
+  const conImagen = JSON.stringify([{ type: 'image', props: { url: imagen.url }, children: [] }]);
+  await diego.data('PATCH', `/notas/${primera.id}`, { contenido: conImagen });
+  await diego.data('PATCH', `/notas/${segunda.id}`, { contenido: conImagen });
+  await diego.data('DELETE', `/notas/${primera.id}`);
+  assert.equal((await ver(diego)).status, 200);
+  await diego.data('PATCH', `/notas/${segunda.id}`, { contenido: documento('Sin imagen') });
+  assert.equal((await ver(diego)).status, 404);
+});
+
+test('notas: los recursos se suben por partes, en orden, y se abren con su tipo', async (t) => {
+  const { base, dataDir, diego, favio, subir } = await conNotas(t);
+  const { curso } = await diego.data('POST', '/notas/cursos', { nombre: 'Física', icono: '🧲' });
+  const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(3000, 0x41), Buffer.from('\n%%EOF\n')]);
+  const partes = [pdf.subarray(0, 1000), pdf.subarray(1000, 2000), pdf.subarray(2000)];
+  const nombre = encodeURIComponent('Guía de ejercicios.pdf');
+
+  const primera = await subir(diego, `/notas/cursos/${curso.id}/recursos`, partes[0], { 'X-Nombre-Archivo': nombre, 'X-Tamano': String(pdf.length) });
+  assert.equal(primera.status, 201);
+  const { recurso } = await primera.json();
+  assert.equal(recurso.nombre, 'Guía de ejercicios.pdf');
+  assert.equal(recurso.tipo, 'application/pdf');
+  assert.equal(recurso.subido, 1000);
+  // A medias no aparece ni se abre.
+  assert.deepEqual((await diego.data('GET', '/notas')).recursos, []);
+  assert.equal((await diego.call('GET', `/notas/recursos/${recurso.id}`)).status, 404);
+  // Una parte fuera de orden, o de otro perfil, no entra.
+  assert.equal((await subir(diego, `/notas/recursos/${recurso.id}/partes?desde=2000`, partes[2])).status, 409);
+  assert.equal((await subir(favio, `/notas/recursos/${recurso.id}/partes?desde=1000`, partes[1])).status, 404);
+  assert.equal((await subir(diego, `/notas/recursos/${recurso.id}/partes?desde=1000`, Buffer.alloc(5000))).status, 422);
+  assert.equal((await (await subir(diego, `/notas/recursos/${recurso.id}/partes?desde=1000`, partes[1])).json()).recurso.subido, 2000);
+  const ultima = await (await subir(diego, `/notas/recursos/${recurso.id}/partes?desde=2000`, partes[2])).json();
+  assert.equal(ultima.recurso.subido, pdf.length);
+  assert.equal((await subir(diego, `/notas/recursos/${recurso.id}/partes?desde=${pdf.length}`, Buffer.from('x'))).status, 409);
+
+  assert.deepEqual((await diego.data('GET', '/notas')).recursos.map((r) => r.nombre), ['Guía de ejercicios.pdf']);
+  const abierto = await diego.call('GET', `/notas/recursos/${recurso.id}`);
+  assert.equal(abierto.status, 200);
+  assert.equal(abierto.headers.get('content-type'), 'application/pdf');
+  assert.match(abierto.headers.get('content-disposition'), /^inline; filename\*=UTF-8''Gu%C3%ADa/);
+  assert.match(abierto.headers.get('content-security-policy'), /sandbox/);
+  assert.deepEqual(Buffer.from(await abierto.arrayBuffer()), pdf);
+  assert.equal((await favio.call('GET', `/notas/recursos/${recurso.id}`)).status, 404);
+  assert.deepEqual((await diego.data('GET', '/notas/buscar?q=guia')).recursos.map((r) => r.id), [recurso.id]);
+
+  // Lo que no es imagen ni PDF se descarga.
+  const zip = await (await subir(diego, `/notas/cursos/${curso.id}/recursos`, Buffer.from('PK\x03\x04datos'), { 'X-Nombre-Archivo': 'a.zip', 'X-Tamano': '9' })).json();
+  assert.equal(zip.recurso.subido, 9);
+  assert.match((await diego.call('GET', `/notas/recursos/${zip.recurso.id}`)).headers.get('content-disposition'), /^attachment/);
+
+  // Límites: el tamaño total, una parte más grande que lo que queda y una parte de más de 8 MB.
+  const nuevo = (cuerpo, tamano) => subir(diego, `/notas/cursos/${curso.id}/recursos`, cuerpo, { 'X-Nombre-Archivo': 'x.pdf', 'X-Tamano': String(tamano) });
+  assert.equal((await (await nuevo(Buffer.from('%PDF-'), 301 * 1024 * 1024)).json()).error, 'recurso_muy_grande');
+  assert.equal((await (await nuevo(Buffer.from('%PDF-'), 2)).json()).error, 'parte_invalida');
+  assert.equal((await (await nuevo(Buffer.from('%PDF-'), 'mucho')).json()).error, 'parte_invalida');
+  assert.equal((await nuevo(Buffer.alloc(8 * 1024 * 1024 + 1), 9 * 1024 * 1024)).status, 413);
+  assert.equal((await (await nuevo(Buffer.alloc(0), 5)).json()).error, 'archivo_vacio');
+  assert.equal((await subir(favio, `/notas/cursos/${curso.id}/recursos`, Buffer.from('%PDF-'), { 'X-Tamano': '5' })).status, 404);
+
+  // Se renombra; al borrarlo (o al borrar el curso) se va también del disco.
+  assert.equal((await diego.data('PATCH', `/notas/recursos/${recurso.id}`, { nombre: 'Guía 1.pdf' })).recurso.nombre, 'Guía 1.pdf');
+  assert.equal((await favio.call('PATCH', `/notas/recursos/${recurso.id}`, { nombre: 'Mía.pdf' })).status, 404);
+  assert.equal((await favio.call('DELETE', `/notas/recursos/${recurso.id}`)).status, 404);
+  const enDisco = (id) => existsSync(path.join(dataDir, 'notas', 'recursos', id));
+  assert.ok(enDisco(recurso.id));
+  assert.equal((await diego.call('DELETE', `/notas/recursos/${recurso.id}`)).status, 200);
+  assert.ok(!enDisco(recurso.id));
+  assert.ok(enDisco(zip.recurso.id));
+  const { nota } = await diego.data('POST', `/notas/cursos/${curso.id}/notas`, { titulo: 'Clase 1' });
+  assert.equal((await diego.call('DELETE', `/notas/cursos/${curso.id}`)).status, 200);
+  assert.ok(!enDisco(zip.recurso.id));
+  assert.equal((await diego.call('GET', `/notas/${nota.id}`)).status, 404);
+  assert.deepEqual(await diego.data('GET', '/notas'), { cursos: [], notas: [], recursos: [] });
+  assert.ok(base);
+});
+
+test('IA: en una nota redacta como apuntes del curso, y solo en las notas propias', async (t) => {
+  const pedidos = [];
+  const proveedor = await startProveedor(t, async (ruta, cuerpo) => {
+    pedidos.push(cuerpo);
+    const texto = cuerpo.input.includes('largo') ? 'x'.repeat(9000) : '## Integración por partes\n\n- Se elige **u** y dv.';
+    return { json: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: JSON.stringify({ texto }) }] }] } };
+  });
+  const { data, diego, favio, junior } = await conNotas(t, { basesIA: { gemini: proveedor.url } });
+  await data('PUT', '/ia', { proveedor: 'gemini', claves: { gemini: 'AIza-falsa-notas' } });
+  const { curso } = await diego.data('POST', '/notas/cursos', { nombre: 'Cálculo II' });
+  const { nota } = await diego.data('POST', `/notas/cursos/${curso.id}/notas`, { titulo: 'Integrales' });
+  await diego.data('PATCH', `/notas/${nota.id}`, { contenido: documento('Hoy vimos sustitución.') });
+
+  const { redaccion } = await diego.data('POST', '/ia/redactar', { texto: 'resume integracion por partes', donde: 'nota', nota_id: nota.id });
+  assert.equal(redaccion.texto, '## Integración por partes\n\n- Se elige **u** y dv.');
+  const [pedido] = pedidos;
+  assert.equal(pedido.input, 'resume integracion por partes');
+  for (const parte of ['apuntes de estudio', 'Curso: Cálculo II', 'Nota: Integrales', 'La nota hasta ahora (el principio): Hoy vimos sustitución.']) {
+    assert.ok(pedido.system_instruction.includes(parte), parte);
+  }
+  assert.ok(!/Personas:|diego@ejemplo/.test(pedido.system_instruction));
+  assert.equal((await diego.data('POST', '/ia/redactar', { texto: 'algo largo', donde: 'nota', nota_id: nota.id })).redaccion.texto.length, 8000);
+
+  assert.equal((await favio.call('POST', '/ia/redactar', { texto: 'hola', donde: 'nota', nota_id: nota.id })).status, 404);
+  assert.equal((await junior.call('POST', '/ia/redactar', { texto: 'hola', donde: 'nota', nota_id: nota.id })).status, 404);
+  assert.equal((await data('POST', '/ia/redactar', { texto: 'hola', donde: 'nota', nota_id: nota.id })).error, 'not_found');
+  assert.equal((await diego.data('POST', '/ia/redactar', { texto: 'hola', donde: 'nota' })).error, 'nota_id_invalido');
+  assert.equal(pedidos.length, 2);
 });

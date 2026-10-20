@@ -37,12 +37,14 @@ function guardarUltimoUsuario(usuario: string) {
 }
 
 // Basado en el bloque login-01 de shadcn/ui. Cada perfil entra con su nombre (o su correo) y su contraseña;
-// la cuenta del equipo sirve para entrar la primera vez y ponerle contraseña a cada perfil.
+// la cuenta del equipo sirve para entrar la primera vez y ponerle contraseña a cada perfil. Las notas privadas usan el
+// mismo acceso, con su título.
 export function LoginForm({
   className,
   onEntrar,
+  notas = false,
   ...props
-}: React.ComponentProps<"div"> & { onEntrar: (credenciales: string) => void }) {
+}: React.ComponentProps<"div"> & { onEntrar: (credenciales: string) => void; notas?: boolean }) {
   const [usuario, setUsuario] = useState(leerUltimoUsuario)
   const [contrasena, setContrasena] = useState("")
   const [error, setError] = useState("")
@@ -67,10 +69,11 @@ export function LoginForm({
     <div className={cn("flex flex-col gap-6", className)} {...props}>
       <Card>
         <CardHeader>
-          <CardTitle>Pendientes</CardTitle>
+          <CardTitle>{notas ? "Notas" : "Pendientes"}</CardTitle>
           <CardDescription>
-            Entra con tu nombre (o tu correo) y tu contraseña. Si tu perfil todavía no tiene contraseña, entra con la cuenta del equipo
-            y pónsela en Perfiles.
+            {notas
+              ? "Tus apuntes privados. Entra con tu correo y tu contraseña."
+              : "Entra con tu nombre (o tu correo) y tu contraseña. Si tu perfil todavía no tiene contraseña, entra con la cuenta del equipo y pónsela en Perfiles."}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -81,7 +84,7 @@ export function LoginForm({
                 <Input
                   id="usuario"
                   autoComplete="username"
-                  placeholder="Tu nombre"
+                  placeholder={notas ? "Tu correo" : "Tu nombre"}
                   autoFocus={!usuario}
                   value={usuario}
                   onChange={(event) => setUsuario(event.target.value)}

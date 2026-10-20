@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { api, esNoAutorizado, MAX_IMAGEN_BYTES, mensajeDeError, type Archivo, type Usuario } from "@/lib/api"
 import { abrirArchivo, claseDeArchivo, tamanoLegible, traeArchivos, urlDeArchivo, type ClaseDeArchivo } from "@/lib/archivos"
 
-const ICONOS: Record<ClaseDeArchivo, typeof File> = {
+export const ICONOS: Record<ClaseDeArchivo, typeof File> = {
   imagen: FileImage,
   documento: FileText,
   planilla: FileSpreadsheet,

@@ -94,7 +94,8 @@ export type Perfil = {
 }
 
 // Quien entró: un perfil, o la cuenta del equipo (perfil_id null), que solo ve lo compartido.
-export type Usuario = { perfil_id: string | null; nombre: string }
+// notas: si tiene las notas privadas (apuntes de cursos).
+export type Usuario = { perfil_id: string | null; nombre: string; notas: boolean }
 
 // Sin dueño es del equipo. Las privadas solo las ve su dueño, igual que sus proyectos y pendientes.
 export type Organizacion = {
@@ -268,6 +269,15 @@ const MENSAJES: Record<string, string> = {
   ia_tardo: "La IA tardó demasiado en responder. Vuelve a intentar.",
   ia_sin_conexion: "El servidor no pudo conectarse con el proveedor de IA.",
   ia_fallo: "El proveedor de IA devolvió un error.",
+  perfil_con_notas: "Ese perfil tiene notas: bórralas antes.",
+  nombre_curso_invalido: "Escribe el nombre del curso (máximo 80 caracteres).",
+  icono_invalido: "Elige un ícono para el curso.",
+  titulo_nota_invalido: "El título puede tener hasta 200 caracteres.",
+  contenido_nota_invalido: "La nota es demasiado larga para guardarla.",
+  curso_invalido: "Ese curso ya no existe. Recarga la página.",
+  recurso_muy_grande: "El archivo pesa más de 300 MB.",
+  parte_invalida: "El archivo no se pudo subir. Vuelve a intentar.",
+  parte_fuera_de_orden: "El archivo no se pudo subir. Vuelve a intentar.",
 }
 
 // Cada pestaña se identifica para que los cambios en tiempo real no le avisen de lo que ella misma hizo.
@@ -334,7 +344,7 @@ export function guardarCredenciales(credenciales: string | null) {
   }
 }
 
-async function pedir<T>(credenciales: string, method: string, ruta = "", body?: unknown): Promise<T> {
+export async function pedir<T>(credenciales: string, method: string, ruta = "", body?: unknown): Promise<T> {
   let response: Response
   try {
     response = await fetch(`${BASE}${ruta}`, {

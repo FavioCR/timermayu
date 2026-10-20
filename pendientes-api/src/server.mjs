@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
-import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
+import { appendFile, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  instruccionesApuntes,
   instruccionesIA,
   instruccionesRedaccion,
   instruccionesTipo,
@@ -56,6 +57,19 @@ const MAX_CLAVE_IA = 500;
 const MAX_MODELO_IA = 200;
 const MAX_ETIQUETA = 40;
 const MAX_ETIQUETAS_POR_PENDIENTE = 20;
+// Las notas: apuntes de cursos, como en Notion, privados de quien las escribe.
+const MAX_NOMBRE_CURSO = 80;
+const MAX_ICONO = 16;
+const MAX_TITULO_NOTA = 200;
+const MAX_CONTENIDO_NOTA = 3 * 1024 * 1024;
+const MAX_BODY_NOTA_BYTES = 4 * 1024 * 1024;
+// Un recurso (un PDF del curso, por ejemplo) puede pesar más de lo que nginx deja pasar en una petición (11 MB):
+// se sube por partes de hasta 8 MB.
+const MAX_RECURSO_BYTES = 300 * 1024 * 1024;
+const MAX_PARTE_BYTES = 8 * 1024 * 1024;
+const MAX_RESULTADOS_NOTAS = 30;
+// En las notas, /ia puede devolver más que en una descripción (un resumen, una explicación).
+const MAX_REDACCION_NOTA = 8000;
 // Cambios en tiempo real: nginx corta una respuesta que pasa 12 s sin datos, así que el flujo manda un latido antes.
 const LATIDO_MS = 9000;
 const MAX_CONEXIONES = 500;
@@ -91,6 +105,9 @@ const IA_SUGERIR_PATH = '/api/pendientes/ia/sugerir';
 const IA_REDACTAR_PATH = '/api/pendientes/ia/redactar';
 const ETIQUETAS_PATH = '/api/pendientes/etiquetas';
 const EVENTOS_PATH = '/api/pendientes/eventos';
+const NOTAS_PATH = '/api/pendientes/notas';
+const NOTAS_BUSCAR_PATH = '/api/pendientes/notas/buscar';
+const CURSOS_PATH = '/api/pendientes/notas/cursos';
 const ITEM_PATH = new RegExp(`^/api/pendientes/${UUID}$`);
 const PERFIL_PATH = new RegExp(`^/api/pendientes/perfiles/${UUID}$`);
 const CONTRASENA_PATH = new RegExp(`^/api/pendientes/perfiles/${UUID}/contrasena$`);
@@ -105,10 +122,19 @@ const ARCHIVOS_PATH = new RegExp(`^/api/pendientes/${UUID}/archivos$`);
 const ARCHIVO_PATH = new RegExp(`^/api/pendientes/archivos/${UUID}$`);
 const TRASPASO_PATH = new RegExp(`^/api/pendientes/${UUID}/traspaso$`);
 const ETIQUETA_PATH = new RegExp(`^/api/pendientes/etiquetas/${UUID}$`);
+const CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}$`);
+const NOTAS_DE_CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/notas$`);
+const RECURSOS_DE_CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/recursos$`);
+const NOTA_PATH = new RegExp(`^/api/pendientes/notas/${UUID}$`);
+const IMAGENES_DE_NOTA_PATH = new RegExp(`^/api/pendientes/notas/${UUID}/imagenes$`);
+const IMAGEN_DE_NOTA_PATH = new RegExp(`^/api/pendientes/notas/imagenes/${UUID}$`);
+const RECURSO_PATH = new RegExp(`^/api/pendientes/notas/recursos/${UUID}$`);
+const PARTES_DE_RECURSO_PATH = new RegExp(`^/api/pendientes/notas/recursos/${UUID}/partes$`);
 const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
-  IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH];
+  IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
-  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, ETIQUETA_PATH];
+  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, ETIQUETA_PATH,
+  CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH];
 const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en, hecho_en,
   (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios,
   (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0) AS num_archivos,
@@ -131,6 +157,10 @@ const ACTIVIDAD_VISIBLE = `(a.pendiente_id IN (SELECT id FROM pendientes WHERE $
 const SELECT_ACTIVIDAD = 'SELECT a.id, a.pendiente_id, a.texto_pendiente, a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en FROM actividad a';
 const SELECT_COMENTARIO = 'SELECT id, pendiente_id, perfil_id, autor, texto, respuesta_a, creado_en FROM comentarios';
 const SELECT_ARCHIVO = 'SELECT id, pendiente_id, comentario_id, nombre, tipo, tamano, perfil_id, autor, creado_en FROM archivos';
+// Lo de las notas se busca siempre junto con el dueño del curso: lo de otro perfil no existe.
+const SELECT_CURSO = 'SELECT id, nombre, icono, creado_en, actualizado_en FROM cursos';
+const SELECT_NOTA = 'SELECT n.id, n.curso_id, n.titulo, n.creado_en, n.actualizado_en FROM notas n JOIN cursos c ON c.id = n.curso_id';
+const SELECT_RECURSO = 'SELECT r.id, r.curso_id, r.nombre, r.tipo, r.tamano, r.subido, r.creado_en FROM recursos r JOIN cursos c ON c.id = r.curso_id';
 
 // Cada función lleva la base de una versión a la siguiente; la versión vive en PRAGMA user_version.
 const MIGRACIONES = [
@@ -315,6 +345,51 @@ const MIGRACIONES = [
         PRIMARY KEY (pendiente_id, etiqueta_id)
       );
       CREATE INDEX pendiente_etiquetas_etiqueta ON pendiente_etiquetas (etiqueta_id);
+    `);
+  },
+  // Notas privadas: cursos de un perfil con sus notas (el documento del editor y su texto plano, para buscar) y sus
+  // recursos (PDF y otros archivos, que se suben por partes: `subido` dice cuánto llegó). Las imágenes pegadas en una
+  // nota son de su dueño y no de la nota, porque un bloque copiado a otra nota sigue usando el mismo archivo.
+  (db) => {
+    db.exec(`
+      CREATE TABLE cursos (
+        id TEXT PRIMARY KEY,
+        perfil_id TEXT NOT NULL REFERENCES perfiles(id) ON DELETE CASCADE,
+        nombre TEXT NOT NULL,
+        icono TEXT NOT NULL,
+        creado_en TEXT NOT NULL,
+        actualizado_en TEXT NOT NULL
+      );
+      CREATE INDEX cursos_perfil ON cursos (perfil_id, creado_en);
+      CREATE TABLE notas (
+        id TEXT PRIMARY KEY,
+        curso_id TEXT NOT NULL REFERENCES cursos(id) ON DELETE CASCADE,
+        titulo TEXT NOT NULL DEFAULT '',
+        contenido TEXT,
+        texto TEXT NOT NULL DEFAULT '',
+        creado_en TEXT NOT NULL,
+        actualizado_en TEXT NOT NULL
+      );
+      CREATE INDEX notas_curso ON notas (curso_id, creado_en);
+      CREATE TABLE recursos (
+        id TEXT PRIMARY KEY,
+        curso_id TEXT NOT NULL REFERENCES cursos(id) ON DELETE CASCADE,
+        nombre TEXT NOT NULL,
+        tipo TEXT NOT NULL,
+        tamano INTEGER NOT NULL,
+        subido INTEGER NOT NULL,
+        creado_en TEXT NOT NULL
+      );
+      CREATE INDEX recursos_curso ON recursos (curso_id, creado_en);
+      CREATE TABLE nota_imagenes (
+        id TEXT PRIMARY KEY,
+        perfil_id TEXT NOT NULL REFERENCES perfiles(id) ON DELETE CASCADE,
+        nota_id TEXT,
+        tipo TEXT NOT NULL,
+        tamano INTEGER NOT NULL,
+        creado_en TEXT NOT NULL
+      );
+      CREATE INDEX nota_imagenes_perfil ON nota_imagenes (perfil_id, nota_id);
     `);
   },
 ];
@@ -660,12 +735,66 @@ export function parseSugerencia(input) {
   return { texto, imagenes, proyecto_id: 'proyecto_id' in input ? idOpcional(input, 'proyecto_id', 'proyecto_invalido') : null };
 }
 
+// En el chat o la descripción de un pendiente (pendiente_id), o en una nota (nota_id).
 export function parseRedaccion(input) {
   const texto = typeof input.texto === 'string' ? input.texto.trim() : '';
   if (!texto || texto.length > MAX_REDACCION) throw httpError(422, 'texto_ia_invalido');
-  if (input.donde !== 'chat' && input.donde !== 'descripcion') throw httpError(422, 'donde_invalido');
+  if (!['chat', 'descripcion', 'nota'].includes(input.donde)) throw httpError(422, 'donde_invalido');
+  if (input.donde === 'nota') {
+    if (typeof input.nota_id !== 'string' || !input.nota_id) throw httpError(422, 'nota_id_invalido');
+    return { texto, donde: input.donde, nota_id: input.nota_id };
+  }
   if (typeof input.pendiente_id !== 'string' || !input.pendiente_id) throw httpError(422, 'pendiente_invalido');
   return { texto, donde: input.donde, pendiente_id: input.pendiente_id };
+}
+
+// El ícono de un curso es un emoji (o unas pocas letras): se muestra como texto.
+export function parseCurso(input, { partial = false } = {}) {
+  const changes = {};
+  if (!partial || 'nombre' in input) changes.nombre = nombreValido(input.nombre, MAX_NOMBRE_CURSO, 'nombre_curso_invalido');
+  if ('icono' in input) {
+    const icono = typeof input.icono === 'string' ? input.icono.trim() : '';
+    if (!icono || icono.length > MAX_ICONO || /[\u0000-\u001f\u007f]/.test(icono)) throw httpError(422, 'icono_invalido');
+    changes.icono = icono;
+  }
+  return changes;
+}
+
+// El título puede quedar vacío ("Sin título"); el contenido es el documento del editor, en JSON.
+export function parseNota(input, { partial = false } = {}) {
+  const changes = {};
+  if (!partial || 'titulo' in input) {
+    if (input.titulo !== undefined && typeof input.titulo !== 'string') throw httpError(422, 'titulo_nota_invalido');
+    const titulo = (input.titulo ?? '').replace(/\s+/g, ' ').trim();
+    if (titulo.length > MAX_TITULO_NOTA) throw httpError(422, 'titulo_nota_invalido');
+    changes.titulo = titulo;
+  }
+  if ('contenido' in input) {
+    if (input.contenido !== null) {
+      if (typeof input.contenido !== 'string' || input.contenido.length > MAX_CONTENIDO_NOTA) throw httpError(422, 'contenido_nota_invalido');
+      let bloques;
+      try { bloques = JSON.parse(input.contenido); } catch { throw httpError(422, 'contenido_nota_invalido'); }
+      if (!Array.isArray(bloques)) throw httpError(422, 'contenido_nota_invalido');
+    }
+    changes.contenido = input.contenido;
+  }
+  if ('curso_id' in input) {
+    if (typeof input.curso_id !== 'string' || !input.curso_id) throw httpError(422, 'curso_invalido');
+    changes.curso_id = input.curso_id;
+  }
+  return changes;
+}
+
+// Sin tildes ni mayúsculas, para buscar en las notas.
+const normalizar = (texto) => texto.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+
+// Un pedazo del texto alrededor de donde aparece lo buscado.
+export function extractoDe(texto, palabra, largo = 160) {
+  const donde = Math.max(normalizar(texto).indexOf(palabra), 0);
+  const desde = Math.max(donde - 50, 0);
+  const pedazo = texto.slice(desde, desde + largo).trim();
+  if (!pedazo) return null;
+  return `${desde > 0 ? '…' : ''}${pedazo}${desde + largo < texto.length ? '…' : ''}`;
 }
 
 // La clave con la que se listan los modelos: la que se está escribiendo (va en el cuerpo, no en la URL) o la guardada.
@@ -744,6 +873,8 @@ function importarJson(db, dataDir) {
 export function openDb(dataDir) {
   mkdirSync(path.join(dataDir, 'imagenes'), { recursive: true });
   mkdirSync(path.join(dataDir, 'archivos'), { recursive: true });
+  mkdirSync(path.join(dataDir, 'notas', 'imagenes'), { recursive: true });
+  mkdirSync(path.join(dataDir, 'notas', 'recursos'), { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'pendientes.db'));
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   const { user_version: version } = db.prepare('PRAGMA user_version').get();
@@ -928,6 +1059,53 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     await borrarArchivos(sobrantes);
   }
 
+  // Notas: todo se busca con el dueño (`yo`); lo de otro perfil se trata como inexistente.
+  const imagenDeNota = (id) => path.join(dataDir, 'notas', 'imagenes', id);
+  const archivoDeRecurso = (id) => path.join(dataDir, 'notas', 'recursos', id);
+  const curso = (yo, id) => fila(db.prepare(`${SELECT_CURSO} WHERE id = ? AND perfil_id = ?`).get(id, yo));
+  const nota = (yo, id) => fila(db.prepare(`${SELECT_NOTA} WHERE n.id = ? AND c.perfil_id = ?`).get(id, yo));
+  const recurso = (yo, id) => fila(db.prepare(`${SELECT_RECURSO} WHERE r.id = ? AND c.perfil_id = ?`).get(id, yo));
+  // Los recursos que se están subiendo: dos partes del mismo a la vez se pisarían.
+  const recibiendo = new Set();
+
+  async function borrarRecursos(ids) {
+    await borrarArchivos(ids, archivoDeRecurso);
+    await borrarArchivos(ids, (id) => `${archivoDeRecurso(id)}.parcial`);
+  }
+
+  // Lo que quedó a medias (se cerró la página mientras subía) se borra pasado un día.
+  async function limpiarRecursosAMedias() {
+    const limite = new Date(Date.now() - VIDA_BORRADOR_MS).toISOString();
+    const viejos = db.prepare('SELECT id FROM recursos WHERE subido < tamano AND creado_en < ?').all(limite)
+      .map((row) => row.id).filter((id) => !recibiendo.has(id));
+    const borrar = db.prepare('DELETE FROM recursos WHERE id = ?');
+    for (const id of viejos) borrar.run(id);
+    await borrarRecursos(viejos);
+  }
+
+  // Imágenes de una nota (o de notas que ya no existen) que pasaron el tiempo de gracia y no aparecen en ninguna nota
+  // de su dueño.
+  async function limpiarImagenesDeNotas(yo, notaId = null) {
+    const limite = new Date(Date.now() - graciaImagenesMs).toISOString();
+    const enUso = db.prepare('SELECT 1 FROM notas n JOIN cursos c ON c.id = n.curso_id WHERE c.perfil_id = ? AND instr(n.contenido, ?) > 0 LIMIT 1');
+    const sobrantes = db.prepare(`SELECT id FROM nota_imagenes WHERE perfil_id = ? AND creado_en <= ?
+        AND (nota_id = ? OR nota_id IS NULL OR nota_id NOT IN (SELECT id FROM notas))`).all(yo, limite, notaId)
+      .map((row) => row.id)
+      .filter((id) => !enUso.get(yo, `${NOTAS_PATH}/imagenes/${id}`));
+    const borrar = db.prepare('DELETE FROM nota_imagenes WHERE id = ?');
+    for (const id of sobrantes) borrar.run(id);
+    await borrarArchivos(sobrantes, imagenDeNota);
+  }
+
+  // La IA que redacta: la de "Escribir con IA" si el equipo eligió otra, o la del equipo.
+  function iaDeRedaccion(ajustes) {
+    const { redaccion, modelos, claves, proveedor: delEquipo } = ajustes;
+    const proveedor = redaccion?.proveedor ?? delEquipo;
+    if (!proveedor) throw httpError(422, 'ia_no_configurada');
+    if (!claves[proveedor]) throw httpError(422, 'ia_sin_clave');
+    return { proveedor, modelo: redaccion?.modelo ?? modelos[proveedor] ?? PROVEEDORES_IA[proveedor].modelo, clave: claves[proveedor] };
+  }
+
   return {
     // Etiquetas de todo el equipo, para marcar pendientes (el sprint, por ejemplo).
     listarEtiquetas: () => db.prepare('SELECT id, nombre, color, creado_en FROM etiquetas ORDER BY nombre, creado_en').all().map(fila),
@@ -1060,10 +1238,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     async redactar(yo, { texto, donde, pendiente_id: pendienteId }, bases) {
       const item = pendiente(yo, pendienteId);
       if (!item) return null;
-      const { redaccion, modelos, claves, ...equipo } = this.ajustesIA();
-      const proveedor = redaccion?.proveedor ?? equipo.proveedor;
-      if (!proveedor) throw httpError(422, 'ia_no_configurada');
-      if (!claves[proveedor]) throw httpError(422, 'ia_sin_clave');
+      const ia = iaDeRedaccion(this.ajustesIA());
       const personas = db.prepare('SELECT id, nombre FROM perfiles ORDER BY creado_en, rowid').all();
       const responsable = personas.find((p) => p.id === item.perfil_id)?.nombre;
       const proyecto = etiquetaDeProyecto(item.proyecto_id);
@@ -1084,15 +1259,23 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         ],
       });
       const redactado = await pedirRedaccion({
-        proveedor,
-        modelo: redaccion?.modelo ?? modelos[proveedor] ?? PROVEEDORES_IA[proveedor].modelo,
-        clave: claves[proveedor],
-        base: bases[proveedor],
+        ...ia,
+        base: bases[ia.proveedor],
         sistema,
         texto,
         maximo: donde === 'chat' ? MAX_COMENTARIO : MAX_REDACCION,
       });
       return { texto: redactado };
+    },
+
+    // Lo mismo en una nota propia: viajan el borrador, el curso, el título y el principio de la nota.
+    async redactarEnNota(yo, { texto, nota_id: notaId }, bases) {
+      const datos = db.prepare('SELECT n.titulo, n.texto, c.nombre AS curso FROM notas n JOIN cursos c ON c.id = n.curso_id WHERE n.id = ? AND c.perfil_id = ?')
+        .get(notaId, yo);
+      if (!datos) return null;
+      const ia = iaDeRedaccion(this.ajustesIA());
+      const sistema = instruccionesApuntes({ curso: datos.curso, titulo: datos.titulo, contexto: datos.texto.slice(0, MAX_CONTEXTO_REDACCION) });
+      return { texto: await pedirRedaccion({ ...ia, base: bases[ia.proveedor], sistema, texto, maximo: MAX_REDACCION_NOTA }) };
     },
 
     // Le pide a la IA el tipo de un pendiente que se creó sin tipo. Solo viajan su título y su proyecto. Si mientras
@@ -1436,6 +1619,185 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       }
     },
 
+    // Notas. El correo decide quién las tiene (ver NOTAS_CORREOS en createApp).
+    correoDe: (perfilId) => db.prepare('SELECT lower(correo) AS correo FROM perfiles WHERE id = ?').get(perfilId)?.correo ?? null,
+
+    // Todo lo de la barra lateral de una vez: cursos, títulos de las notas y recursos ya subidos.
+    arbolDeNotas: (yo) => ({
+      cursos: db.prepare(`${SELECT_CURSO} WHERE perfil_id = ? ORDER BY creado_en, rowid`).all(yo).map(fila),
+      notas: db.prepare(`${SELECT_NOTA} WHERE c.perfil_id = ? ORDER BY n.creado_en, n.rowid`).all(yo).map(fila),
+      recursos: db.prepare(`${SELECT_RECURSO} WHERE c.perfil_id = ? AND r.subido = r.tamano ORDER BY r.creado_en, r.rowid`).all(yo).map(fila),
+    }),
+
+    crearCurso(yo, { nombre, icono }) {
+      const id = randomUUID();
+      const ahora = new Date().toISOString();
+      db.prepare('INSERT INTO cursos (id, perfil_id, nombre, icono, creado_en, actualizado_en) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, yo, nombre, icono ?? '📘', ahora, ahora);
+      return curso(yo, id);
+    },
+
+    actualizarCurso(yo, id, changes) {
+      if (!curso(yo, id)) return null;
+      const campos = Object.keys(changes);
+      db.prepare(`UPDATE cursos SET ${[...campos, 'actualizado_en'].map((campo) => `${campo} = ?`).join(', ')} WHERE id = ?`)
+        .run(...campos.map((campo) => changes[campo]), new Date().toISOString(), id);
+      return curso(yo, id);
+    },
+
+    // Se lleva sus notas y sus recursos.
+    async borrarCurso(yo, id) {
+      if (!curso(yo, id)) return false;
+      const recursos = db.prepare('SELECT id FROM recursos WHERE curso_id = ?').all(id).map((row) => row.id);
+      db.prepare('DELETE FROM cursos WHERE id = ?').run(id);
+      await borrarRecursos(recursos);
+      await limpiarImagenesDeNotas(yo);
+      return true;
+    },
+
+    crearNota(yo, cursoId, { titulo }) {
+      if (!curso(yo, cursoId)) return null;
+      const id = randomUUID();
+      const ahora = new Date().toISOString();
+      db.prepare('INSERT INTO notas (id, curso_id, titulo, contenido, texto, creado_en, actualizado_en) VALUES (?, ?, ?, NULL, \'\', ?, ?)')
+        .run(id, cursoId, titulo, ahora, ahora);
+      return nota(yo, id);
+    },
+
+    detalleNota(yo, id) {
+      const meta = nota(yo, id);
+      return meta && { ...meta, contenido: db.prepare('SELECT contenido FROM notas WHERE id = ?').get(id).contenido };
+    },
+
+    // El texto plano del documento se guarda aparte para buscar y para darle contexto a la IA.
+    async actualizarNota(yo, id, changes) {
+      if (!nota(yo, id)) return null;
+      if ('curso_id' in changes && !curso(yo, changes.curso_id)) throw httpError(422, 'curso_invalido');
+      const cambios = { ...changes };
+      if ('contenido' in changes) {
+        cambios.texto = changes.contenido ? resumirDescripcion(JSON.parse(changes.contenido), Infinity).resumen ?? '' : '';
+      }
+      const campos = Object.keys(cambios);
+      db.prepare(`UPDATE notas SET ${[...campos, 'actualizado_en'].map((campo) => `${campo} = ?`).join(', ')} WHERE id = ?`)
+        .run(...campos.map((campo) => cambios[campo]), new Date().toISOString(), id);
+      if ('contenido' in changes) await limpiarImagenesDeNotas(yo, id);
+      return nota(yo, id);
+    },
+
+    async borrarNota(yo, id) {
+      if (!nota(yo, id)) return false;
+      db.prepare('DELETE FROM notas WHERE id = ?').run(id);
+      await limpiarImagenesDeNotas(yo, id);
+      return true;
+    },
+
+    // Busca todas las palabras (sin tildes) en el título y el texto de las notas, y en el nombre de los recursos.
+    buscarEnNotas(yo, consulta) {
+      const palabras = normalizar(consulta).split(/\s+/).filter(Boolean);
+      if (palabras.length === 0) return { notas: [], recursos: [] };
+      const coincide = (texto) => palabras.every((palabra) => normalizar(texto).includes(palabra));
+      const notas = db.prepare(`SELECT n.id, n.curso_id, n.titulo, n.texto, n.actualizado_en FROM notas n JOIN cursos c ON c.id = n.curso_id
+          WHERE c.perfil_id = ? ORDER BY n.actualizado_en DESC`).all(yo)
+        .filter((row) => coincide(`${row.titulo} ${row.texto}`))
+        .slice(0, MAX_RESULTADOS_NOTAS)
+        .map(({ texto, ...row }) => ({ ...row, extracto: extractoDe(texto, palabras.find((palabra) => normalizar(texto).includes(palabra)) ?? '') }));
+      const recursos = db.prepare(`${SELECT_RECURSO} WHERE c.perfil_id = ? AND r.subido = r.tamano ORDER BY r.creado_en DESC`).all(yo)
+        .filter((row) => coincide(row.nombre))
+        .slice(0, MAX_RESULTADOS_NOTAS)
+        .map(fila);
+      return { notas, recursos };
+    },
+
+    async guardarImagenDeNota(yo, notaId, contenido) {
+      if (!nota(yo, notaId)) return null;
+      const tipo = tipoDeImagen(contenido);
+      if (!tipo) throw httpError(415, 'imagen_invalida');
+      const id = randomUUID();
+      const destino = imagenDeNota(id);
+      await writeFile(`${destino}.tmp`, contenido, { mode: 0o600 });
+      await rename(`${destino}.tmp`, destino);
+      db.prepare('INSERT INTO nota_imagenes (id, perfil_id, nota_id, tipo, tamano, creado_en) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, yo, notaId, tipo, contenido.length, new Date().toISOString());
+      return { id, url: `${NOTAS_PATH}/imagenes/${id}` };
+    },
+
+    async leerImagenDeNota(yo, id) {
+      const imagen = db.prepare('SELECT tipo FROM nota_imagenes WHERE id = ? AND perfil_id = ?').get(id, yo);
+      if (!imagen) return null;
+      try {
+        return { tipo: imagen.tipo, contenido: await readFile(imagenDeNota(id)) };
+      } catch (error) {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      }
+    },
+
+    // Un recurso se sube por partes y en orden: la primera lo crea con su tamaño total y cada una sigue donde quedó la
+    // anterior. Hasta completarse no aparece en la lista ni se puede abrir.
+    async crearRecurso(yo, cursoId, { nombre, tamano, parte }) {
+      if (!curso(yo, cursoId)) return null;
+      if (parte.length === 0) throw httpError(422, 'archivo_vacio');
+      if (parte.length > tamano) throw httpError(422, 'parte_invalida');
+      await limpiarRecursosAMedias();
+      const id = randomUUID();
+      const destino = archivoDeRecurso(id);
+      await writeFile(`${destino}.parcial`, parte, { mode: 0o600 });
+      if (parte.length === tamano) await rename(`${destino}.parcial`, destino);
+      db.prepare('INSERT INTO recursos (id, curso_id, nombre, tipo, tamano, subido, creado_en) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, cursoId, nombre, tipoDeArchivo(parte), tamano, parte.length, new Date().toISOString());
+      return recurso(yo, id);
+    },
+
+    async seguirRecurso(yo, id, { desde, parte }) {
+      const actual = recurso(yo, id);
+      if (!actual) return null;
+      if (recibiendo.has(id) || desde !== actual.subido || actual.subido === actual.tamano) throw httpError(409, 'parte_fuera_de_orden');
+      if (parte.length === 0 || actual.subido + parte.length > actual.tamano) throw httpError(422, 'parte_invalida');
+      recibiendo.add(id);
+      const destino = archivoDeRecurso(id);
+      try {
+        await appendFile(`${destino}.parcial`, parte);
+        // Lo que manda es lo que quedó en el disco.
+        const { size: subido } = await stat(`${destino}.parcial`);
+        if (subido !== actual.subido + parte.length) throw new Error(`El recurso ${id} quedó con ${subido} bytes`);
+        if (subido === actual.tamano) await rename(`${destino}.parcial`, destino);
+        db.prepare('UPDATE recursos SET subido = ? WHERE id = ?').run(subido, id);
+      } catch (error) {
+        db.prepare('DELETE FROM recursos WHERE id = ?').run(id);
+        await borrarRecursos([id]);
+        throw error;
+      } finally {
+        recibiendo.delete(id);
+      }
+      return recurso(yo, id);
+    },
+
+    renombrarRecurso(yo, id, nombre) {
+      if (!recurso(yo, id)) return null;
+      db.prepare('UPDATE recursos SET nombre = ? WHERE id = ?').run(nombre, id);
+      return recurso(yo, id);
+    },
+
+    // Para mandarlo por partes (puede pesar cientos de MB): dónde está y qué es. Solo si ya terminó de subirse.
+    async leerRecurso(yo, id) {
+      const actual = recurso(yo, id);
+      if (!actual || actual.subido < actual.tamano) return null;
+      try {
+        const { size } = await stat(archivoDeRecurso(id));
+        return { ...actual, tamano: size, ruta: archivoDeRecurso(id) };
+      } catch (error) {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      }
+    },
+
+    async borrarRecurso(yo, id) {
+      if (!recurso(yo, id) || recibiendo.has(id)) return false;
+      db.prepare('DELETE FROM recursos WHERE id = ?').run(id);
+      await borrarRecursos([id]);
+      return true;
+    },
+
     // Se entra con el nombre del perfil o con su correo, si tiene.
     perfilPorUsuario: (usuario) => fila(db.prepare('SELECT id, nombre, password_hash FROM perfiles WHERE nombre = ? OR lower(correo) = lower(?)')
       .get(usuario, usuario)),
@@ -1482,6 +1844,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (!actual) return false;
       if (actual.tiene_contrasena && id !== yo) throw httpError(403, 'solo_el_mismo');
       if (db.prepare('SELECT 1 FROM organizaciones WHERE duenio_id = ? AND compartida = 0').get(id)) throw httpError(409, 'perfil_con_privadas');
+      if (db.prepare('SELECT 1 FROM cursos WHERE perfil_id = ?').get(id)) throw httpError(409, 'perfil_con_notas');
       transaction(db, () => {
         db.prepare('UPDATE organizaciones SET duenio_id = NULL WHERE duenio_id = ?').run(id);
         db.prepare('DELETE FROM perfiles WHERE id = ?').run(id);
@@ -1580,6 +1943,11 @@ export function createApp(options = {}) {
   // para no correr scrypt en cada petición. Si la contraseña cambia, el hash ya no coincide.
   const verificadas = new Map();
   const fallos = new Map();
+  // Las notas son privadas: solo las tiene quien entra con su propio perfil y su correo está en NOTAS_CORREOS (separados
+  // por comas). Para cualquier otro, incluida la cuenta del equipo, no existen.
+  const correosNotas = new Set(String(options.notasCorreos ?? process.env.NOTAS_CORREOS ?? '').split(',')
+    .map((correo) => correo.trim().toLowerCase()).filter(Boolean));
+  const puedeNotas = (usuario) => Boolean(usuario.perfil_id && correosNotas.has(repo.correoDe(usuario.perfil_id)));
 
   // Cambios en tiempo real (SSE): cada pestaña abierta deja una conexión en GET /api/pendientes/eventos y, cuando
   // alguien cambia algo, se le avisa qué cambió (pendientes, un chat, archivos, el catálogo) para que lo vuelva a
@@ -1654,6 +2022,94 @@ export function createApp(options = {}) {
     return usuario;
   }
 
+  // Las rutas de las notas, ya con permiso. No avisan por los cambios en tiempo real: nadie más las ve.
+  async function rutasDeNotas(req, res, url, yo) {
+    const enviar = (status, clave, valor) => (valor ? json(res, status, { [clave]: valor }) : json(res, 404, { error: 'not_found' }));
+    const listo = (hecho) => (hecho ? json(res, 200, { ok: true }) : json(res, 404, { error: 'not_found' }));
+    const { pathname } = url;
+    const { method } = req;
+
+    if (pathname === NOTAS_PATH && method === 'GET') return json(res, 200, repo.arbolDeNotas(yo));
+    if (pathname === NOTAS_BUSCAR_PATH && method === 'GET') {
+      return json(res, 200, repo.buscarEnNotas(yo, (url.searchParams.get('q') ?? '').slice(0, 200)));
+    }
+    if (pathname === CURSOS_PATH && method === 'POST') return json(res, 201, { curso: repo.crearCurso(yo, parseCurso(await readJson(req))) });
+
+    const cursoId = pathname.match(CURSO_PATH)?.[1];
+    if (cursoId && method === 'PATCH') return enviar(200, 'curso', repo.actualizarCurso(yo, cursoId, parseCurso(await readJson(req), { partial: true })));
+    if (cursoId && method === 'DELETE') return listo(await repo.borrarCurso(yo, cursoId));
+
+    const cursoDeNota = pathname.match(NOTAS_DE_CURSO_PATH)?.[1];
+    if (cursoDeNota && method === 'POST') return enviar(201, 'nota', repo.crearNota(yo, cursoDeNota, parseNota(await readJson(req))));
+
+    const notaId = pathname.match(NOTA_PATH)?.[1];
+    if (notaId && method === 'GET') return enviar(200, 'nota', repo.detalleNota(yo, notaId));
+    if (notaId && method === 'PATCH') {
+      return enviar(200, 'nota', await repo.actualizarNota(yo, notaId, parseNota(await readJson(req, MAX_BODY_NOTA_BYTES), { partial: true })));
+    }
+    if (notaId && method === 'DELETE') return listo(await repo.borrarNota(yo, notaId));
+
+    const notaDeImagen = pathname.match(IMAGENES_DE_NOTA_PATH)?.[1];
+    if (notaDeImagen && method === 'POST') {
+      return enviar(201, 'imagen', await repo.guardarImagenDeNota(yo, notaDeImagen, await readBody(req, MAX_IMAGEN_BYTES)));
+    }
+    const imagenId = pathname.match(IMAGEN_DE_NOTA_PATH)?.[1];
+    if (imagenId && method === 'GET') {
+      const imagen = await repo.leerImagenDeNota(yo, imagenId);
+      if (!imagen) return json(res, 404, { error: 'not_found' });
+      res.writeHead(200, {
+        'Content-Type': imagen.tipo,
+        'Content-Length': imagen.contenido.length,
+        'Cache-Control': 'private, max-age=31536000, immutable',
+        'Content-Disposition': 'inline',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      return res.end(imagen.contenido);
+    }
+
+    // La primera parte de un recurso lleva su nombre (X-Nombre-Archivo) y su tamaño total (X-Tamano).
+    const cursoDeRecurso = pathname.match(RECURSOS_DE_CURSO_PATH)?.[1];
+    if (cursoDeRecurso && method === 'POST') {
+      const nombre = nombreDeArchivo(req.headers['x-nombre-archivo']);
+      const tamano = Number(req.headers['x-tamano']);
+      if (!Number.isInteger(tamano) || tamano < 1) throw httpError(422, 'parte_invalida');
+      if (tamano > MAX_RECURSO_BYTES) throw httpError(413, 'recurso_muy_grande');
+      return enviar(201, 'recurso', await repo.crearRecurso(yo, cursoDeRecurso, { nombre, tamano, parte: await readBody(req, MAX_PARTE_BYTES) }));
+    }
+    const recursoDeParte = pathname.match(PARTES_DE_RECURSO_PATH)?.[1];
+    if (recursoDeParte && method === 'POST') {
+      const desde = Number(url.searchParams.get('desde'));
+      if (!Number.isInteger(desde) || desde < 0) throw httpError(422, 'parte_invalida');
+      return enviar(200, 'recurso', await repo.seguirRecurso(yo, recursoDeParte, { desde, parte: await readBody(req, MAX_PARTE_BYTES) }));
+    }
+
+    const recursoId = pathname.match(RECURSO_PATH)?.[1];
+    if (recursoId && method === 'GET') {
+      const recurso = await repo.leerRecurso(yo, recursoId);
+      if (!recurso) return json(res, 404, { error: 'not_found' });
+      // Como los archivos de un pendiente: imágenes y PDF se abren en el navegador; nada se ejecuta como página del sitio.
+      const enLinea = recurso.tipo !== 'application/octet-stream';
+      res.writeHead(200, {
+        'Content-Type': recurso.tipo,
+        'Content-Length': recurso.tamano,
+        'Cache-Control': 'private, max-age=31536000, immutable',
+        'Content-Disposition': `${enLinea ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(recurso.nombre)}`,
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        'X-Content-Type-Options': 'nosniff',
+      });
+      const flujo = createReadStream(recurso.ruta);
+      flujo.on('error', (error) => res.destroy(error));
+      return flujo.pipe(res);
+    }
+    if (recursoId && method === 'PATCH') {
+      const input = await readJson(req);
+      return enviar(200, 'recurso', repo.renombrarRecurso(yo, recursoId, nombreValido(input.nombre, MAX_NOMBRE_ARCHIVO, 'nombre_archivo_invalido')));
+    }
+    if (recursoId && method === 'DELETE') return listo(await repo.borrarRecurso(yo, recursoId));
+
+    return json(res, 405, { error: 'method_not_allowed' });
+  }
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     try {
@@ -1677,7 +2133,12 @@ export function createApp(options = {}) {
       const enviar = (status, clave, valor) => (valor ? json(res, status, { [clave]: valor }) : json(res, 404, { error: 'not_found' }));
       const listo = (hecho) => (hecho ? json(res, 200, { ok: true }) : json(res, 404, { error: 'not_found' }));
 
-      if (url.pathname === YO_PATH && req.method === 'GET') return json(res, 200, { usuario });
+      if (url.pathname === YO_PATH && req.method === 'GET') return json(res, 200, { usuario: { ...usuario, notas: puedeNotas(usuario) } });
+
+      if (url.pathname === NOTAS_PATH || url.pathname.startsWith(`${NOTAS_PATH}/`)) {
+        if (!puedeNotas(usuario)) return json(res, 404, { error: 'not_found' });
+        return await rutasDeNotas(req, res, url, yo);
+      }
 
       if (url.pathname === EVENTOS_PATH && req.method === 'GET') {
         if (conexiones.size >= MAX_CONEXIONES) throw httpError(503, 'demasiadas_conexiones');
@@ -1721,7 +2182,9 @@ export function createApp(options = {}) {
         return json(res, 200, { modelos: await listarModelos({ proveedor, clave, base: basesIA[proveedor] }) });
       }
       if (url.pathname === IA_REDACTAR_PATH && req.method === 'POST') {
-        return enviar(200, 'redaccion', await repo.redactar(yo, parseRedaccion(await readJson(req)), basesIA));
+        const pedido = parseRedaccion(await readJson(req));
+        if (pedido.donde !== 'nota') return enviar(200, 'redaccion', await repo.redactar(yo, pedido, basesIA));
+        return enviar(200, 'redaccion', puedeNotas(usuario) ? await repo.redactarEnNota(yo, pedido, basesIA) : null);
       }
       if (url.pathname === IA_SUGERIR_PATH && req.method === 'POST') {
         return json(res, 200, { sugerencias: await repo.sugerirPendientes(yo, parseSugerencia(await readJson(req, MAX_BODY_IA_BYTES)), basesIA) });
