@@ -3,6 +3,7 @@ import { Paperclip, Reply, SendHorizontal, Trash2, X } from "lucide-react"
 import { cn } from "cn"
 
 import { ChipArchivo, esImagenVisible, MiniaturaArchivo } from "@/components/archivos"
+import { VisorImagenes } from "@/components/visor-imagenes"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { RedactarIA } from "@/components/redactar-ia"
 import { Button } from "@/components/ui/button"
@@ -150,6 +151,9 @@ export function ChatPendiente({
   const [adjuntos, setAdjuntos] = useState<Adjunto[]>([])
   const [encima, setEncima] = useState(false)
   const [respondiendo, setRespondiendo] = useState<Comentario | null>(null)
+  // Al agrandar una imagen se ven todas las del chat en carrusel, en el orden de los mensajes.
+  const imagenesDelChat = useMemo(() => (comentarios ?? []).flatMap((comentario) => comentario.archivos.filter(esImagenVisible)), [comentarios])
+  const [agrandada, setAgrandada] = useState<number | null>(null)
   // El mensaje al que se saltó desde una cita, resaltado un momento.
   const [resaltado, setResaltado] = useState<string | null>(null)
   const [deslizado, setDeslizado] = useState<{ id: string; dx: number } | null>(null)
@@ -485,7 +489,7 @@ export function ChatPendiente({
                               key={archivo.id}
                               credenciales={credenciales}
                               archivo={archivo}
-                              onAbrir={() => abrirArchivo(credenciales, archivo).catch(fallar)}
+                              onAbrir={() => setAgrandada(imagenesDelChat.findIndex((imagen) => imagen.id === archivo.id))}
                             />
                           ) : (
                             <ChipArchivo key={archivo.id} archivo={archivo} onAbrir={() => abrirArchivo(credenciales, archivo).catch(fallar)} />
@@ -500,6 +504,13 @@ export function ChatPendiente({
           })
         )}
       </div>
+      <VisorImagenes
+        credenciales={credenciales}
+        imagenes={imagenesDelChat}
+        inicial={agrandada}
+        onCerrar={() => setAgrandada(null)}
+        onAbrirOriginal={(archivo) => abrirArchivo(credenciales, archivo).catch(fallar)}
+      />
       {error && (
         <p role="alert" className="m-0 px-4 pb-2 text-sm text-destructive">
           {error}
