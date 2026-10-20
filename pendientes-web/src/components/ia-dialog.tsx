@@ -363,7 +363,7 @@ function Formulario({
       </FieldGroup>
 
       <p className="m-0 border-l-2 border-primary/50 pl-3 text-xs text-muted-foreground">
-        El texto que pegues, con los nombres de las personas, proyectos y etiquetas, se envía a {datos.nombre} para proponer los
+        El texto y las imágenes que pegues, con los nombres de las personas, proyectos y etiquetas, se envían a {datos.nombre} para proponer los
         pendientes{tipoAutomatico ? "; para elegir el tipo, el título y el proyecto de lo que se cree sin tipo" : ""}. Las claves quedan en el
         servidor del tablero y nunca se vuelven a mostrar.
       </p>

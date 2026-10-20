@@ -79,6 +79,7 @@ export function instruccionesIA({ personas, proyectos, etiquetas, proyectoPorDef
     '- etiquetas: solo nombres exactos de "Etiquetas" que el texto mencione o que claramente apliquen (un sprint, por ejemplo); si ninguna, lista vacía.',
     '- tipo: como en los commits convencionales: feat (algo nuevo), fix (corregir un error), refactor, perf, docs, test, style, chore (mantenimiento) o ci (despliegue); null si no es trabajo de software o no está claro.',
     '- estado: "pendiente", salvo que el texto diga que ya se está haciendo ("haciendo") o que ya está terminado ("hecho").',
+    '- Si vienen imágenes (capturas de pantalla, fotos de una pizarra o de un papel, conversaciones), saca también de ellas las tareas; en el detalle anota lo que se ve que haga falta para entenderlas.',
     `Hoy es ${hoy}.`,
     `Personas: ${personas.length ? personas.join(', ') : '(ninguna)'}`,
     `Proyectos: ${proyectos.length ? proyectos.join(' | ') : '(ninguno)'}`,
@@ -97,13 +98,15 @@ export function instruccionesTipo({ extra }) {
 }
 
 const PEDIDOS = {
-  gemini: ({ modelo, clave, sistema, texto, esquema }) => ({
+  gemini: ({ modelo, clave, sistema, texto, esquema, imagenes = [] }) => ({
     ruta: '/v1beta/interactions',
     headers: { 'x-goog-api-key': clave },
     body: {
       model: modelo,
       system_instruction: sistema,
-      input: texto,
+      input: imagenes.length
+        ? [{ type: 'text', text: texto }, ...imagenes.map((imagen) => ({ type: 'image', data: imagen.datos, mime_type: imagen.tipo }))]
+        : texto,
       response_format: { type: 'text', mime_type: 'application/json', schema: esquema },
       store: false,
     },
@@ -118,13 +121,21 @@ const PEDIDOS = {
         .join('');
     },
   }),
-  openai: ({ modelo, clave, sistema, texto, esquema, nombre }) => ({
+  openai: ({ modelo, clave, sistema, texto, esquema, nombre, imagenes = [] }) => ({
     ruta: '/v1/responses',
     headers: { Authorization: `Bearer ${clave}` },
     body: {
       model: modelo,
       instructions: sistema,
-      input: texto,
+      input: imagenes.length
+        ? [{
+          role: 'user',
+          content: [
+            { type: 'input_text', text: texto },
+            ...imagenes.map((imagen) => ({ type: 'input_image', image_url: `data:${imagen.tipo};base64,${imagen.datos}` })),
+          ],
+        }]
+        : texto,
       text: { format: { type: 'json_schema', name: nombre, schema: esquema, strict: true } },
       store: false,
     },
@@ -137,7 +148,7 @@ const PEDIDOS = {
       return partes.filter((parte) => parte.type === 'output_text').map((parte) => parte.text).join('');
     },
   }),
-  openrouter: ({ modelo, clave, sistema, texto, esquema, nombre }) => ({
+  openrouter: ({ modelo, clave, sistema, texto, esquema, nombre, imagenes = [] }) => ({
     ruta: '/api/v1/chat/completions',
     // Opcionales: identifican la app en OpenRouter.
     headers: { Authorization: `Bearer ${clave}`, 'HTTP-Referer': 'https://timer.practi.dev/pendientes/', 'X-OpenRouter-Title': 'Pendientes' },
@@ -145,7 +156,13 @@ const PEDIDOS = {
       model: modelo,
       messages: [
         { role: 'system', content: sistema },
-        { role: 'user', content: texto },
+        // El texto va antes de las imágenes, como recomienda OpenRouter.
+        {
+          role: 'user',
+          content: imagenes.length
+            ? [{ type: 'text', text: texto }, ...imagenes.map((imagen) => ({ type: 'image_url', image_url: { url: `data:${imagen.tipo};base64,${imagen.datos}` } }))]
+            : texto,
+        },
       ],
       response_format: { type: 'json_schema', json_schema: { name: nombre, strict: true, schema: esquema } },
     },
@@ -165,6 +182,7 @@ function errorDelProveedor(status, data, clave) {
   const crudo = JSON.stringify(data?.error ?? '');
   if (status === 401 || status === 403 || /API_KEY_INVALID|invalid_api_key/.test(crudo)) return iaError(422, 'ia_clave_invalida');
   if (status === 402) return iaError(422, 'ia_sin_saldo', mensaje);
+  if (/image|vision/i.test(mensaje) && /support|not allowed|no endpoints|unsupported|invalid/i.test(mensaje)) return iaError(422, 'ia_sin_imagenes', mensaje);
   if (status === 429) return iaError(429, 'ia_limite', mensaje);
   if (status === 404 || /model/i.test(mensaje) && /not found|does not exist|not a valid|invalid model|unknown/i.test(mensaje)) {
     return iaError(422, 'ia_modelo_invalido', mensaje);
@@ -226,8 +244,8 @@ export function leerTipo(texto) {
   return TIPOS.includes(tipo) ? tipo : null;
 }
 
-async function consultar({ proveedor, modelo, clave, base, sistema, texto, esquema, nombre }) {
-  const pedido = PEDIDOS[proveedor]({ modelo, clave, sistema, texto, esquema, nombre });
+async function consultar({ proveedor, modelo, clave, base, sistema, texto, esquema, nombre, imagenes }) {
+  const pedido = PEDIDOS[proveedor]({ modelo, clave, sistema, texto, esquema, nombre, imagenes });
   const data = await pedir(`${base}${pedido.ruta}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...pedido.headers },

@@ -824,8 +824,19 @@ test('valida etiquetas, ajustes de IA y textos para la IA', () => {
   assert.throws(() => parsePedidoModelos({ proveedor: 'otro' }), { message: 'proveedor_invalido' });
   assert.throws(() => parsePedidoModelos({ proveedor: 'openai', clave: 'con espacio' }), { message: 'clave_invalida' });
 
-  assert.deepEqual(parseSugerencia({ texto: ' hola ' }), { texto: 'hola', proyecto_id: null });
+  assert.deepEqual(parseSugerencia({ texto: ' hola ' }), { texto: 'hola', imagenes: [], proyecto_id: null });
   assert.throws(() => parseSugerencia({ texto: ' ' }), { message: 'texto_ia_invalido' });
+  // Con imágenes el texto puede faltar; el tipo sale del contenido y solo vale lo que aceptan los tres proveedores.
+  const png = PNG.toString('base64');
+  assert.deepEqual(parseSugerencia({ imagenes: [{ datos: png }] }).imagenes, [{ tipo: 'image/png', datos: png }]);
+  const gif = Buffer.from('GIF89a-animado').toString('base64');
+  assert.throws(() => parseSugerencia({ imagenes: [{ datos: gif }] }), { message: 'imagenes_ia_invalidas' });
+  assert.throws(() => parseSugerencia({ imagenes: [{ datos: Buffer.from('hola').toString('base64') }] }), { message: 'imagenes_ia_invalidas' });
+  assert.throws(() => parseSugerencia({ imagenes: [{ datos: `data:image/png;base64,${png}` }] }), { message: 'imagenes_ia_invalidas' });
+  assert.throws(() => parseSugerencia({ imagenes: { datos: png } }), { message: 'imagenes_ia_invalidas' });
+  assert.throws(() => parseSugerencia({ imagenes: Array(7).fill({ datos: png }) }), { message: 'imagenes_ia_invalidas' });
+  const grande = Buffer.concat([PNG, Buffer.alloc(4 * 1024 * 1024)]).toString('base64');
+  assert.throws(() => parseSugerencia({ imagenes: [{ datos: grande }, { datos: grande }] }), { message: 'imagenes_ia_muy_grandes' });
   assert.throws(() => parseSugerencia({ texto: 'x'.repeat(20001) }), { message: 'texto_ia_invalido' });
 });
 
@@ -964,6 +975,29 @@ test('IA: arma el pedido de cada proveedor y pasa los nombres que contesta a ids
       assert.equal(pedido.cuerpo.response_format.json_schema.strict, true);
       assert.equal(pedido.cuerpo.messages[1].content, 'Diego arregla el login');
       assert.equal(pedido.headers['x-openrouter-title'], 'Pendientes');
+    }
+  }
+
+  // Con imágenes (y sin texto), cada proveedor las recibe en su formato, después del texto.
+  const png = PNG.toString('base64');
+  for (const id of ['gemini', 'openai', 'openrouter']) {
+    await data('PUT', '/ia', { proveedor: id });
+    await diego.data('POST', '/ia/sugerir', { texto: '', imagenes: [{ datos: png }] });
+    const { cuerpo } = proveedor.pedidos.at(-1);
+    if (id === 'gemini') {
+      assert.deepEqual(cuerpo.input, [{ type: 'text', text: 'Saca los pendientes de las imágenes.' }, { type: 'image', data: png, mime_type: 'image/png' }]);
+    }
+    if (id === 'openai') {
+      assert.deepEqual(cuerpo.input, [{
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Saca los pendientes de las imágenes.' }, { type: 'input_image', image_url: `data:image/png;base64,${png}` }],
+      }]);
+    }
+    if (id === 'openrouter') {
+      assert.deepEqual(cuerpo.messages[1].content, [
+        { type: 'text', text: 'Saca los pendientes de las imágenes.' },
+        { type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } },
+      ]);
     }
   }
 
@@ -1113,6 +1147,11 @@ test('IA: los errores del proveedor se traducen y no repiten la clave', async (t
   assert.equal((await sugerir()).error, 'ia_se_nego');
   respuesta = { json: { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'no es json' }] }] } };
   assert.equal((await sugerir()).error, 'ia_respuesta_invalida');
+  // Un modelo que no lee imágenes (así lo dice OpenRouter, con 404).
+  respuesta = { status: 404, json: { error: { message: 'No endpoints found that support image input' } } };
+  assert.equal((await sugerir()).error, 'ia_sin_imagenes');
+  respuesta = { status: 400, json: { error: { message: 'Invalid content type. image_url is only supported by certain models.' } } };
+  assert.equal((await sugerir()).error, 'ia_sin_imagenes');
 });
 
 test('cambios en tiempo real: avisa a las otras pestañas lo que cambió, sin colar lo privado', async (t) => {

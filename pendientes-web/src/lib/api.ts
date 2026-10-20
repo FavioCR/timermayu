@@ -244,7 +244,10 @@ const MENSAJES: Record<string, string> = {
   clave_invalida: "Esa clave no parece válida: pégala completa, sin espacios.",
   modelo_invalido: "Escribe el nombre del modelo, sin espacios.",
   instrucciones_invalidas: "Las indicaciones pueden tener hasta 2000 caracteres.",
-  texto_ia_invalido: "Escribe o pega el texto (hasta 20 000 caracteres).",
+  texto_ia_invalido: "Escribe o pega el texto (hasta 20 000 caracteres), o adjunta una imagen.",
+  imagenes_ia_invalidas: "Alguna imagen no se pudo leer. Usa PNG, JPG o WebP, hasta 6.",
+  imagenes_ia_muy_grandes: "Las imágenes pesan demasiado juntas. Quita alguna y vuelve a intentar.",
+  ia_sin_imagenes: "Ese modelo no lee imágenes. Elige otro en la configuración de la IA o quita las imágenes.",
   ia_no_configurada: "Todavía no hay una IA configurada.",
   ia_sin_clave: "Falta la clave de ese proveedor. Agrégala en la configuración de la IA.",
   ia_clave_invalida: "El proveedor rechazó la clave. Revísala en la configuración de la IA.",
@@ -511,8 +514,13 @@ export const api = {
     modelos: (credenciales: string, proveedor: ProveedorIA, clave?: string) =>
       pedir<{ modelos: ModeloIA[] }>(credenciales, "POST", "/ia/modelos", { proveedor, clave }).then((data) => data.modelos),
     // Propone pendientes a partir de un texto; no crea nada.
-    sugerir: (credenciales: string, texto: string, proyectoId: string | null) =>
-      pedir<{ sugerencias: Sugerencia[] }>(credenciales, "POST", "/ia/sugerir", { texto, proyecto_id: proyectoId }).then((data) => data.sugerencias),
+    // Las imágenes van en base64 dentro del JSON (sin el prefijo "data:…;base64,").
+    sugerir: (credenciales: string, texto: string, proyectoId: string | null, imagenes: string[] = []) =>
+      pedir<{ sugerencias: Sugerencia[] }>(credenciales, "POST", "/ia/sugerir", {
+        texto,
+        proyecto_id: proyectoId,
+        imagenes: imagenes.map((datos) => ({ datos })),
+      }).then((data) => data.sugerencias),
   },
   proyectos: {
     listar: (credenciales: string) =>

@@ -11,6 +11,12 @@ import { instruccionesIA, instruccionesTipo, listarModelos, MAX_SUGERENCIAS, ped
 
 // Alcanza para el orden completo del tablero (hasta 5000 pendientes de ~60 bytes cada uno).
 const MAX_BODY_BYTES = 512 * 1024;
+// "Crear con IA" puede llevar imágenes (en base64): hasta 6 y 7 MB entre todas, bajo los 11 MB que deja pasar nginx.
+const MAX_BODY_IA_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGENES_IA = 6;
+const MAX_BYTES_IMAGENES_IA = 7 * 1024 * 1024;
+// Los formatos que aceptan los tres proveedores.
+const TIPOS_IMAGEN_IA = ['image/png', 'image/jpeg', 'image/webp'];
 const MAX_IMAGEN_BYTES = 10 * 1024 * 1024;
 const MAX_TEXTO = 500;
 const MAX_PROYECTO = 60;
@@ -329,8 +335,8 @@ async function readBody(req, limit) {
   return Buffer.concat(chunks);
 }
 
-async function readJson(req) {
-  const input = JSON.parse((await readBody(req, MAX_BODY_BYTES)).toString('utf8') || '{}');
+async function readJson(req, maximo = MAX_BODY_BYTES) {
+  const input = JSON.parse((await readBody(req, maximo)).toString('utf8') || '{}');
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw httpError(400, 'invalid_json');
   return input;
 }
@@ -604,10 +610,23 @@ export function parseAjustesIA(input) {
   return changes;
 }
 
+// El texto puede faltar si vienen imágenes. Cada imagen es { datos } en base64; su tipo se mira en el contenido.
 export function parseSugerencia(input) {
   const texto = typeof input.texto === 'string' ? input.texto.trim() : '';
-  if (!texto || texto.length > MAX_TEXTO_IA) throw httpError(422, 'texto_ia_invalido');
-  return { texto, proyecto_id: 'proyecto_id' in input ? idOpcional(input, 'proyecto_id', 'proyecto_invalido') : null };
+  const lista = input.imagenes ?? [];
+  if (!Array.isArray(lista) || lista.length > MAX_IMAGENES_IA) throw httpError(422, 'imagenes_ia_invalidas');
+  let total = 0;
+  const imagenes = lista.map((imagen) => {
+    if (typeof imagen?.datos !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(imagen.datos)) throw httpError(422, 'imagenes_ia_invalidas');
+    const contenido = Buffer.from(imagen.datos, 'base64');
+    total += contenido.length;
+    const tipo = tipoDeImagen(contenido);
+    if (!TIPOS_IMAGEN_IA.includes(tipo)) throw httpError(422, 'imagenes_ia_invalidas');
+    return { tipo, datos: imagen.datos };
+  });
+  if (total > MAX_BYTES_IMAGENES_IA) throw httpError(413, 'imagenes_ia_muy_grandes');
+  if ((!texto && imagenes.length === 0) || texto.length > MAX_TEXTO_IA) throw httpError(422, 'texto_ia_invalido');
+  return { texto, imagenes, proyecto_id: 'proyecto_id' in input ? idOpcional(input, 'proyecto_id', 'proyecto_invalido') : null };
 }
 
 // La clave con la que se listan los modelos: la que se está escribiendo (va en el cuerpo, no en la URL) o la guardada.
@@ -928,9 +947,10 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       return nuevo;
     },
 
-    // Le pasa el texto a la IA con los nombres de las personas y de los proyectos que ve quien pregunta (sin correos
-    // ni teléfonos) y devuelve los pendientes que propone, sin crear nada: el tablero los muestra para revisarlos.
-    async sugerirPendientes(yo, { texto, proyecto_id: proyectoId }, bases) {
+    // Le pasa el texto (y las imágenes, si vienen) a la IA con los nombres de las personas y de los proyectos que ve
+    // quien pregunta (sin correos ni teléfonos) y devuelve los pendientes que propone, sin crear nada: el tablero los
+    // muestra para revisarlos.
+    async sugerirPendientes(yo, { texto, imagenes = [], proyecto_id: proyectoId }, bases) {
       verificarProyecto(yo, proyectoId);
       const { proveedor, modelos, claves, instrucciones } = this.ajustesIA();
       if (!proveedor) throw httpError(422, 'ia_no_configurada');
@@ -954,7 +974,8 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         clave: claves[proveedor],
         base: bases[proveedor],
         sistema,
-        texto,
+        texto: texto || 'Saca los pendientes de las imágenes.',
+        imagenes,
       });
       // La IA contesta con nombres: se pasan a ids. Un proyecto vale con su etiqueta completa o, si no se repite, solo con su nombre.
       const normal = (valor) => valor.trim().replace(/^@/, '').toLocaleLowerCase('es');
@@ -1589,7 +1610,7 @@ export function createApp(options = {}) {
         return json(res, 200, { modelos: await listarModelos({ proveedor, clave, base: basesIA[proveedor] }) });
       }
       if (url.pathname === IA_SUGERIR_PATH && req.method === 'POST') {
-        return json(res, 200, { sugerencias: await repo.sugerirPendientes(yo, parseSugerencia(await readJson(req)), basesIA) });
+        return json(res, 200, { sugerencias: await repo.sugerirPendientes(yo, parseSugerencia(await readJson(req, MAX_BODY_IA_BYTES)), basesIA) });
       }
 
       if (url.pathname === ETIQUETAS_PATH && req.method === 'GET') return json(res, 200, { etiquetas: repo.listarEtiquetas() });
