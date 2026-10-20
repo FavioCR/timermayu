@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent } from "react"
-import { Folder, FolderInput, FolderKanban, FolderOpen, Lock, MoreVertical, Palette, Pencil, Plus, Trash2, Users } from "lucide-react"
+import { Folder, FolderInput, FolderOpen, Lock, MoreVertical, Palette, Pencil, Plus, Trash2, Users } from "lucide-react"
 
 import { SelectorColor } from "@/components/selector-color"
 import { Button } from "@/components/ui/button"
@@ -9,7 +9,6 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog"
 import {
   DropdownMenu,
@@ -47,6 +46,8 @@ import {
 } from "@/lib/catalogo"
 
 type Props = {
+  abierto: boolean
+  onAbiertoChange: (abierto: boolean) => void
   credenciales: string
   catalogo: Catalogo
   onCatalogo: (cambiar: (actual: Catalogo) => Catalogo) => void
@@ -123,7 +124,17 @@ function NuevoProyecto({ organizacion, onCrear }: { organizacion: Organizacion |
 }
 
 // Organizaciones con sus proyectos. Una privada, con sus proyectos y pendientes, solo la ve quien la creó.
-export function ProyectosDialog({ credenciales, catalogo, onCatalogo, perfiles, usuario, pendientesPorProyecto, onSalir }: Props) {
+export function ProyectosDialog({
+  abierto,
+  onAbiertoChange,
+  credenciales,
+  catalogo,
+  onCatalogo,
+  perfiles,
+  usuario,
+  pendientesPorProyecto,
+  onSalir,
+}: Props) {
   const [error, setError] = useState("")
   const [renombrando, setRenombrando] = useState<string | null>(null)
   const [confirmando, setConfirmando] = useState<string | null>(null)
@@ -234,17 +245,14 @@ export function ProyectosDialog({ credenciales, catalogo, onCatalogo, perfiles, 
 
   return (
     <Dialog
-      onOpenChange={() => {
+      open={abierto}
+      onOpenChange={(siguiente) => {
         setRenombrando(null)
         setConfirmando(null)
         setError("")
+        onAbiertoChange(siguiente)
       }}
     >
-      <DialogTrigger asChild>
-        <Button variant="ghost" aria-label="Proyectos">
-          <FolderKanban /> <span className="hidden sm:inline">Proyectos</span>
-        </Button>
-      </DialogTrigger>
       <DialogContent
         className="max-h-[90svh] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-lg"
         // Mientras se renombra, Escape cancela el nombre y no cierra la ventana.

@@ -6,8 +6,11 @@ export type Pendiente = {
   proyecto_id: string | null
   estado: Estado
   perfil_id: string | null
+  // Null si lo creó la cuenta del equipo o es de antes de que se anotara.
+  creado_por: string | null
   resumen: string | null
   num_imagenes: number
+  num_comentarios: number
   creado_en: string
   actualizado_en: string
 }
@@ -21,6 +24,8 @@ export type Perfil = {
   id: string
   nombre: string
   correo: string | null
+  // Solo dígitos, con código de país (como lo pide wa.me).
+  telefono: string | null
   color: string
   tiene_contrasena: boolean
   creado_en: string
@@ -43,6 +48,32 @@ export type Proyecto = {
   id: string
   nombre: string
   organizacion_id: string | null
+  creado_en: string
+}
+
+export type TipoActividad = "creado" | "texto" | "estado" | "asignado" | "proyecto" | "descripcion" | "comentario" | "borrado"
+
+// Una entrada del historial. Guarda nombres (no solo ids) para leerse aunque el perfil o el proyecto ya no existan.
+// pendiente_id es null si el pendiente ya se borró.
+export type Actividad = {
+  id: string
+  pendiente_id: string | null
+  texto_pendiente: string
+  perfil_id: string | null
+  autor: string
+  tipo: TipoActividad
+  datos: Record<string, string | null> | null
+  creado_en: string
+}
+
+export type Notificacion = { id: string; leida: boolean; actividad: Actividad }
+
+export type Comentario = {
+  id: string
+  pendiente_id: string
+  perfil_id: string | null
+  autor: string
+  texto: string
   creado_en: string
 }
 
@@ -69,6 +100,9 @@ const MENSAJES: Record<string, string> = {
   perfil_duplicado: "Ya hay un perfil con ese nombre.",
   nombre_reservado: "Ese nombre es el de la cuenta del equipo; elige otro.",
   correo_invalido: "Ese correo no parece válido.",
+  telefono_invalido: "Escribe el teléfono con código de país, por ejemplo +506 8888 8888.",
+  comentario_invalido: "Escribe el mensaje (máximo 2000 caracteres).",
+  solo_el_autor: "Solo quien escribió el mensaje lo puede borrar.",
   correo_duplicado: "Ese correo ya lo tiene otro perfil.",
   contrasena_invalida: "La contraseña debe tener al menos 8 caracteres.",
   solo_el_mismo: "Ese perfil ya tiene contraseña: solo esa persona puede cambiarlo.",
@@ -210,13 +244,34 @@ export const api = {
   perfiles: {
     listar: (credenciales: string) =>
       pedir<{ perfiles: Perfil[] }>(credenciales, "GET", "/perfiles").then((data) => data.perfiles),
-    crear: (credenciales: string, datos: { nombre: string; color: string; correo: string | null }) =>
+    crear: (credenciales: string, datos: { nombre: string; color: string; correo: string | null; telefono: string | null }) =>
       pedir<{ perfil: Perfil }>(credenciales, "POST", "/perfiles", datos).then((data) => data.perfil),
-    actualizar: (credenciales: string, id: string, cambios: Partial<Pick<Perfil, "nombre" | "correo" | "color">>) =>
+    actualizar: (credenciales: string, id: string, cambios: Partial<Pick<Perfil, "nombre" | "correo" | "telefono" | "color">>) =>
       pedir<{ perfil: Perfil }>(credenciales, "PATCH", `/perfiles/${id}`, cambios).then((data) => data.perfil),
     ponerContrasena: (credenciales: string, id: string, contrasena: string) =>
       pedir<{ perfil: Perfil }>(credenciales, "PUT", `/perfiles/${id}/contrasena`, { contrasena }).then((data) => data.perfil),
     borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/perfiles/${id}`),
+  },
+  actividad: {
+    listar: (credenciales: string, antes?: string) =>
+      pedir<{ actividad: Actividad[] }>(credenciales, "GET", `/actividad${antes ? `?antes=${encodeURIComponent(antes)}` : ""}`).then(
+        (data) => data.actividad
+      ),
+    dePendiente: (credenciales: string, id: string) =>
+      pedir<{ actividad: Actividad[] }>(credenciales, "GET", `/${id}/actividad`).then((data) => data.actividad),
+  },
+  comentarios: {
+    listar: (credenciales: string, pendienteId: string) =>
+      pedir<{ comentarios: Comentario[] }>(credenciales, "GET", `/${pendienteId}/comentarios`).then((data) => data.comentarios),
+    crear: (credenciales: string, pendienteId: string, texto: string) =>
+      pedir<{ comentario: Comentario }>(credenciales, "POST", `/${pendienteId}/comentarios`, { texto }).then((data) => data.comentario),
+    borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/comentarios/${id}`),
+  },
+  notificaciones: {
+    listar: (credenciales: string) => pedir<{ notificaciones: Notificacion[]; no_leidas: number }>(credenciales, "GET", "/notificaciones"),
+    // Sin ids marca todas.
+    marcarLeidas: (credenciales: string, ids?: string[]) =>
+      pedir<{ no_leidas: number }>(credenciales, "POST", "/notificaciones/leidas", ids ? { ids } : {}).then((data) => data.no_leidas),
   },
   organizaciones: {
     listar: (credenciales: string) =>

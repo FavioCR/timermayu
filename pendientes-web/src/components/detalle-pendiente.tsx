@@ -1,14 +1,28 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
-import { Lock, Trash2, Users } from "lucide-react"
+import { History, Lock, MessageCircle, MessageSquare, Trash2, Users } from "lucide-react"
 
+import { ChatPendiente } from "@/components/chat-pendiente"
 import type { DocumentoDescripcion } from "@/components/editor-descripcion"
+import { HistorialPendiente } from "@/components/historial"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { ProyectoCombobox } from "@/components/proyecto-combobox"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
-import { api, esNoAutorizado, mensajeDeError, type CambiosPendiente, type Estado, type Pendiente, type Perfil, type Proyecto } from "@/lib/api"
+import {
+  api,
+  esNoAutorizado,
+  mensajeDeError,
+  type CambiosPendiente,
+  type Estado,
+  type Pendiente,
+  type Perfil,
+  type Proyecto,
+  type Usuario,
+} from "@/lib/api"
+import { enlaceWhatsApp } from "@/lib/actividad"
 import { organizacionDe, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
@@ -22,16 +36,19 @@ const fechaLarga = new Intl.DateTimeFormat("es", { day: "numeric", month: "long"
 type Props = {
   credenciales: string
   pendiente: Pendiente | null
+  usuario: Usuario | null
   perfiles: Perfil[]
   catalogo: Catalogo
   onCrearProyecto: (datos: { nombre: string; organizacion_id: string | null }) => Promise<Proyecto | null>
   onCambiar: (id: string, cambios: CambiosPendiente) => Promise<Pendiente | null>
+  onCantidadComentarios: (id: string, cantidad: number) => void
   onBorrar: (pendiente: Pendiente) => void
   onCerrar: () => void
   onSalir: () => void
 }
 
-// Página de un pendiente al estilo Notion: propiedades arriba y la descripción con imágenes debajo.
+// Página de un pendiente al estilo Notion: propiedades arriba y la descripción con imágenes debajo;
+// al costado (debajo en pantallas angostas), su chat y su historial.
 export function DetallePendiente({ pendiente, onCerrar, ...props }: Props) {
   // Mientras el panel se cierra con su animación se sigue mostrando el último pendiente.
   const [mostrado, setMostrado] = useState(pendiente)
@@ -40,7 +57,7 @@ export function DetallePendiente({ pendiente, onCerrar, ...props }: Props) {
   return (
     <Sheet open={pendiente !== null} onOpenChange={(abierto) => !abierto && onCerrar()}>
       <SheetContent
-        className="gap-0 overflow-y-auto data-[side=right]:w-full data-[side=right]:sm:max-w-2xl"
+        className="gap-0 overflow-y-auto data-[side=right]:w-full data-[side=right]:sm:max-w-2xl lg:overflow-hidden data-[side=right]:lg:max-w-5xl"
         // Radix enfocaría el título y lo dejaría seleccionado; el foco va al panel y se escribe donde se haga clic.
         onOpenAutoFocus={(event) => {
           event.preventDefault()
@@ -56,10 +73,12 @@ export function DetallePendiente({ pendiente, onCerrar, ...props }: Props) {
 function Contenido({
   credenciales,
   pendiente,
+  usuario,
   perfiles,
   catalogo,
   onCrearProyecto,
   onCambiar,
+  onCantidadComentarios,
   onBorrar,
   onSalir,
 }: Omit<Props, "pendiente" | "onCerrar"> & { pendiente: Pendiente }) {
@@ -154,10 +173,16 @@ function Contenido({
   const estadoGuardado = guardando ? "Guardando…" : guardado ? "Guardado" : ""
   const organizacion = organizacionDe(catalogo, pendiente.proyecto_id)
   const privado = organizacion !== null && !organizacion.compartida
+  const perfilesPorId = new Map(perfiles.map((perfil) => [perfil.id, perfil]))
+  const asignado = pendiente.perfil_id ? perfilesPorId.get(pendiente.perfil_id) : undefined
+  const creador = pendiente.creado_por ? perfilesPorId.get(pendiente.creado_por) : undefined
+  const proyecto = catalogo.proyectos.find((p) => p.id === pendiente.proyecto_id)
+  const etiquetaProyecto = proyecto ? (organizacion ? `${organizacion.nombre} › ${proyecto.nombre}` : proyecto.nombre) : null
 
   return (
-    <>
-      <SheetHeader className="gap-1 pr-12">
+    <div className="flex flex-col lg:h-full lg:flex-row">
+      <div className="min-w-0 flex-1 lg:overflow-y-auto">
+      <SheetHeader className="gap-1 pr-12 lg:pr-4">
         <SheetTitle className="sr-only">{pendiente.texto}</SheetTitle>
         <Textarea
           aria-label="Título del pendiente"
@@ -176,6 +201,7 @@ function Contenido({
         />
         <SheetDescription>
           Creado el {fechaLarga.format(new Date(pendiente.creado_en))}
+          {creador && ` por ${creador.nombre}`}
           {estadoGuardado && ` · ${estadoGuardado}`}
         </SheetDescription>
       </SheetHeader>
@@ -185,7 +211,7 @@ function Contenido({
           <dt className="text-muted-foreground">Estado</dt>
           <dd>
             <Select value={pendiente.estado} onValueChange={(valor) => onCambiar(id, { estado: valor as Estado })}>
-              <SelectTrigger aria-label="Estado" size="sm" className="w-full sm:w-72">
+              <SelectTrigger aria-label="Estado" size="sm" className="w-full sm:w-64">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -199,12 +225,12 @@ function Contenido({
           </dd>
 
           <dt className="text-muted-foreground">Responsable</dt>
-          <dd>
+          <dd className="flex flex-wrap items-center gap-2">
             <Select
               value={pendiente.perfil_id ?? NADIE}
               onValueChange={(valor) => onCambiar(id, { perfil_id: valor === NADIE ? null : valor })}
             >
-              <SelectTrigger aria-label="Responsable del pendiente" size="sm" className="w-full sm:w-72">
+              <SelectTrigger aria-label="Responsable del pendiente" size="sm" className="w-full sm:w-64">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -218,6 +244,22 @@ function Contenido({
                 </SelectItem>
               </SelectContent>
             </Select>
+            {asignado && asignado.id !== usuario?.perfil_id && (
+              <Button asChild variant="outline" size="sm" title={asignado.telefono ? undefined : `${asignado.nombre} no tiene teléfono guardado: elegirás el chat en WhatsApp`}>
+                <a
+                  href={enlaceWhatsApp({
+                    perfil: asignado,
+                    pendiente,
+                    proyecto: etiquetaProyecto,
+                    quien: usuario?.perfil_id ? usuario.nombre : null,
+                  })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <MessageCircle /> Avisar por WhatsApp
+                </a>
+              </Button>
+            )}
           </dd>
 
           <dt className="text-muted-foreground">Proyecto</dt>
@@ -228,7 +270,7 @@ function Contenido({
               onCambiar={(proyectoId) => onCambiar(id, { proyecto_id: proyectoId })}
               catalogo={catalogo}
               onCrear={onCrearProyecto}
-              className="h-8 w-full sm:w-72"
+              className="h-8 w-full sm:w-80"
             />
           </dd>
 
@@ -291,6 +333,42 @@ function Contenido({
           )}
         </div>
       </div>
-    </>
+      </div>
+
+      <aside aria-label="Chat e historial" className="flex flex-col border-t lg:h-full lg:w-96 lg:shrink-0 lg:border-t-0 lg:border-l">
+        <Tabs defaultValue="chat" className="flex min-h-0 flex-1 flex-col gap-0">
+          <div className="flex h-14 shrink-0 items-center border-b px-4 lg:pr-12">
+            <TabsList>
+              <TabsTrigger value="chat" className="px-3">
+                <MessageSquare /> Chat
+                {pendiente.num_comentarios > 0 && <span className="text-xs tabular-nums text-muted-foreground">{pendiente.num_comentarios}</span>}
+              </TabsTrigger>
+              <TabsTrigger value="historial" className="px-3">
+                <History /> Historial
+              </TabsTrigger>
+            </TabsList>
+          </div>
+          <TabsContent value="chat" className="flex min-h-0 flex-col">
+            <ChatPendiente
+              credenciales={credenciales}
+              pendienteId={id}
+              usuario={usuario}
+              perfilesPorId={perfilesPorId}
+              onCantidad={(cantidad) => onCantidadComentarios(id, cantidad)}
+              onSalir={onSalir}
+            />
+          </TabsContent>
+          <TabsContent value="historial" className="min-h-0 overflow-y-auto p-4">
+            <HistorialPendiente
+              credenciales={credenciales}
+              pendienteId={id}
+              version={`${pendiente.actualizado_en}:${pendiente.num_comentarios}`}
+              yo={usuario?.perfil_id ?? null}
+              onSalir={onSalir}
+            />
+          </TabsContent>
+        </Tabs>
+      </aside>
+    </div>
   )
 }

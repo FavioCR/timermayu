@@ -1,5 +1,5 @@
 import { useId, useState, type FormEvent } from "react"
-import { KeyRound, Lock, Pencil, Plus, Trash2, Users } from "lucide-react"
+import { KeyRound, Lock, Pencil, Plus, Trash2 } from "lucide-react"
 
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { SelectorColor } from "@/components/selector-color"
@@ -11,13 +11,12 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { colorLibre, type Perfil, type Usuario } from "@/lib/api"
 
-export type CambiosPerfil = { nombre: string; correo: string | null; color: string; contrasena: string }
+export type CambiosPerfil = { nombre: string; correo: string | null; telefono: string | null; color: string; contrasena: string }
 
 function EditorPerfil({
   perfil,
@@ -33,6 +32,7 @@ function EditorPerfil({
   const id = useId()
   const [nombre, setNombre] = useState(perfil.nombre)
   const [correo, setCorreo] = useState(perfil.correo ?? "")
+  const [telefono, setTelefono] = useState(perfil.telefono ? `+${perfil.telefono}` : "")
   const [color, setColor] = useState(perfil.color.toUpperCase())
   const [contrasena, setContrasena] = useState("")
   const [guardando, setGuardando] = useState(false)
@@ -40,7 +40,7 @@ function EditorPerfil({
   async function guardar(event: FormEvent) {
     event.preventDefault()
     setGuardando(true)
-    const listo = await onGuardar({ nombre: nombre.trim(), correo: correo.trim() || null, color, contrasena })
+    const listo = await onGuardar({ nombre: nombre.trim(), correo: correo.trim() || null, telefono: telefono.trim() || null, color, contrasena })
     setGuardando(false)
     if (listo) onCancelar()
   }
@@ -65,6 +65,21 @@ function EditorPerfil({
             onChange={(event) => setCorreo(event.target.value)}
             maxLength={120}
           />
+        </Field>
+        <Field>
+          <FieldLabel htmlFor={`${id}-telefono`}>
+            WhatsApp <span className="font-normal text-muted-foreground">(opcional)</span>
+          </FieldLabel>
+          <Input
+            id={`${id}-telefono`}
+            type="tel"
+            autoComplete="off"
+            placeholder="+506 8888 8888"
+            value={telefono}
+            onChange={(event) => setTelefono(event.target.value)}
+            maxLength={24}
+          />
+          <FieldDescription>Con código de país. Sirve para avisarle por WhatsApp cuando le asignan algo.</FieldDescription>
         </Field>
         <Field>
           <FieldLabel htmlFor={`${id}-contrasena`}>{perfil.tiene_contrasena ? "Nueva contraseña" : "Contraseña"}</FieldLabel>
@@ -100,6 +115,8 @@ function EditorPerfil({
 
 // Los callbacks devuelven el mensaje de error, o null si salió bien.
 export function PerfilesDialog({
+  abierto,
+  onAbiertoChange,
   perfiles,
   asignados,
   usuario,
@@ -107,15 +124,18 @@ export function PerfilesDialog({
   onActualizar,
   onBorrar,
 }: {
+  abierto: boolean
+  onAbiertoChange: (abierto: boolean) => void
   perfiles: Perfil[]
   asignados: Map<string, number>
   usuario: Usuario | null
-  onCrear: (datos: { nombre: string; color: string; correo: string | null }) => Promise<string | null>
+  onCrear: (datos: { nombre: string; color: string; correo: string | null; telefono: string | null }) => Promise<string | null>
   onActualizar: (perfil: Perfil, cambios: CambiosPerfil) => Promise<string | null>
   onBorrar: (perfil: Perfil) => Promise<string | null>
 }) {
   const [nombre, setNombre] = useState("")
   const [correo, setCorreo] = useState("")
+  const [telefono, setTelefono] = useState("")
   const [color, setColor] = useState<string | null>(null)
   const [editando, setEditando] = useState<string | null>(null)
   const [confirmando, setConfirmando] = useState<string | null>(null)
@@ -126,11 +146,12 @@ export function PerfilesDialog({
   async function agregar(event: FormEvent) {
     event.preventDefault()
     if (!nombre.trim()) return
-    const fallo = await onCrear({ nombre: nombre.trim(), color: colorElegido, correo: correo.trim() || null })
+    const fallo = await onCrear({ nombre: nombre.trim(), color: colorElegido, correo: correo.trim() || null, telefono: telefono.trim() || null })
     setError(fallo ?? "")
     if (!fallo) {
       setNombre("")
       setCorreo("")
+      setTelefono("")
       setColor(null)
     }
   }
@@ -149,17 +170,14 @@ export function PerfilesDialog({
 
   return (
     <Dialog
-      onOpenChange={() => {
+      open={abierto}
+      onOpenChange={(siguiente) => {
         setEditando(null)
         setConfirmando(null)
         setError("")
+        onAbiertoChange(siguiente)
       }}
     >
-      <DialogTrigger asChild>
-        <Button variant="ghost" aria-label="Perfiles">
-          <Users /> <span className="hidden sm:inline">Perfiles</span>
-        </Button>
-      </DialogTrigger>
       <DialogContent className="max-h-[90svh] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Perfiles</DialogTitle>
@@ -194,7 +212,11 @@ export function PerfilesDialog({
                               ? "Su pendiente quedará sin asignar"
                               : `Sus ${cantidad} pendientes quedarán sin asignar`
                             : "No tiene pendientes asignados"
-                        : [perfil.correo, cantidad === 0 ? "Sin pendientes asignados" : `${cantidad} pendiente${cantidad === 1 ? "" : "s"}`]
+                        : [
+                            perfil.correo,
+                            perfil.telefono && `+${perfil.telefono}`,
+                            cantidad === 0 ? "Sin pendientes asignados" : `${cantidad} pendiente${cantidad === 1 ? "" : "s"}`,
+                          ]
                             .filter(Boolean)
                             .join(" · ")}
                     </p>
@@ -261,15 +283,26 @@ export function PerfilesDialog({
               <Plus /> Agregar
             </Button>
           </div>
-          <Input
-            type="email"
-            aria-label="Correo del perfil nuevo (opcional)"
-            placeholder="Correo (opcional)"
-            autoComplete="off"
-            value={correo}
-            onChange={(event) => setCorreo(event.target.value)}
-            maxLength={120}
-          />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Input
+              type="email"
+              aria-label="Correo del perfil nuevo (opcional)"
+              placeholder="Correo (opcional)"
+              autoComplete="off"
+              value={correo}
+              onChange={(event) => setCorreo(event.target.value)}
+              maxLength={120}
+            />
+            <Input
+              type="tel"
+              aria-label="WhatsApp del perfil nuevo (opcional)"
+              placeholder="WhatsApp: +506 8888 8888"
+              autoComplete="off"
+              value={telefono}
+              onChange={(event) => setTelefono(event.target.value)}
+              maxLength={24}
+            />
+          </div>
           <SelectorColor valor={colorElegido} onCambiar={setColor} etiqueta="Color del perfil" />
           {error && (
             <p role="alert" className="text-sm text-destructive">

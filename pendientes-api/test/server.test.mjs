@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { createApp, openDb, parseOrden, parseOrganizacion, parsePendiente, parsePerfil, parseProyecto, resumirDescripcion, tipoDeImagen } from '../src/server.mjs';
+import { createApp, openDb, parseComentario, parseLeidas, parseOrden, parseOrganizacion, parsePendiente, parsePerfil, parseProyecto, resumirDescripcion, tipoDeImagen } from '../src/server.mjs';
 
 const password = 'test-password';
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
@@ -57,6 +57,17 @@ test('valida pendientes, perfiles, organizaciones, proyectos y orden', () => {
   assert.deepEqual(parseProyecto({ nombre: ' Vendeizi ', organizacion_id: null }), { nombre: 'Vendeizi', organizacion_id: null });
   assert.throws(() => parseProyecto({ nombre: 'x'.repeat(61) }), /nombre_invalido/);
   assert.throws(() => parseOrden({ items: [{ id: 'a', estado: 'otro' }] }), /orden_invalido/);
+  assert.deepEqual(parsePerfil({ nombre: 'Ana', telefono: '+506 8888-8888' }), { nombre: 'Ana', telefono: '50688888888' });
+  assert.deepEqual(parsePerfil({ nombre: 'Ana', telefono: '00 1 (555) 123 4567' }), { nombre: 'Ana', telefono: '15551234567' });
+  assert.deepEqual(parsePerfil({ nombre: 'Ana', telefono: '' }), { nombre: 'Ana', telefono: null });
+  assert.throws(() => parsePerfil({ nombre: 'Ana', telefono: '8888 8888' }), /telefono_invalido/);
+  assert.throws(() => parsePerfil({ nombre: 'Ana', telefono: '+506 8888 abcd' }), /telefono_invalido/);
+  assert.equal(parseComentario({ texto: '  hola  ' }), 'hola');
+  assert.throws(() => parseComentario({ texto: '   ' }), /comentario_invalido/);
+  assert.throws(() => parseComentario({ texto: 'x'.repeat(2001) }), /comentario_invalido/);
+  assert.equal(parseLeidas({}), null);
+  assert.deepEqual(parseLeidas({ ids: ['a'] }), ['a']);
+  assert.throws(() => parseLeidas({ ids: 'a' }), /ids_invalidos/);
 });
 
 test('sin credenciales correctas responde 401 sin pedir la ventana del navegador', async (t) => {
@@ -391,6 +402,129 @@ test('borra las imágenes que salen de la descripción, salvo si otra tarjeta la
   assert.equal(existsSync(archivo(queda)), false);
 });
 
+test('el historial anota quién cambió qué y avisa al responsable y a quien lo creó, nunca a quien lo hizo', async (t) => {
+  const { data, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const junior = await entrarComo('Junior');
+  const { organizacion } = await diego.data('POST', '/organizaciones', { nombre: 'Mayugo' });
+  const { proyecto } = await diego.data('POST', '/proyectos', { nombre: 'Vendeizi', organizacion_id: organizacion.id });
+
+  const { pendiente } = await diego.data('POST', '', { texto: 'Facturación', perfil_id: favio.perfil.id, proyecto_id: proyecto.id });
+  assert.equal(pendiente.creado_por, diego.perfil.id);
+  assert.equal(pendiente.num_comentarios, 0);
+  const avisos = async (quien) => quien.data('GET', '/notificaciones');
+  assert.equal((await avisos(diego)).no_leidas, 0);
+  let deFavio = await avisos(favio);
+  assert.equal(deFavio.no_leidas, 1);
+  assert.deepEqual([deFavio.notificaciones[0].actividad.tipo, deFavio.notificaciones[0].actividad.autor], ['creado', 'Diego']);
+  assert.deepEqual(deFavio.notificaciones[0].actividad.datos, { estado: 'pendiente', asignado: 'Favio', asignado_id: favio.perfil.id, proyecto: 'Mayugo › Vendeizi' });
+
+  // Favio lo empieza: le avisa a Diego (quien lo creó), no a sí mismo.
+  await favio.data('PATCH', `/${pendiente.id}`, { estado: 'haciendo' });
+  assert.equal((await avisos(diego)).notificaciones[0].actividad.tipo, 'estado');
+  assert.equal((await avisos(favio)).no_leidas, 1);
+  // Diego se lo pasa a Junior: avisa a Favio (lo tenía) y a Junior (lo recibe).
+  await diego.data('PATCH', `/${pendiente.id}`, { perfil_id: junior.perfil.id, texto: 'Facturación electrónica' });
+  deFavio = await avisos(favio);
+  assert.deepEqual(deFavio.notificaciones.map((n) => n.actividad.tipo), ['asignado', 'creado']);
+  assert.deepEqual(deFavio.notificaciones[0].actividad.datos, { de: 'Favio', a: 'Junior', a_id: junior.perfil.id });
+  assert.deepEqual((await avisos(junior)).notificaciones.map((n) => n.actividad.tipo).sort(), ['asignado', 'texto']);
+
+  // La descripción que se guarda sola cuenta una vez por racha; guardar lo mismo no anota nada.
+  const descripcion = JSON.stringify([{ type: 'paragraph', content: [{ type: 'text', text: 'a' }], children: [] }]);
+  await junior.data('PATCH', `/${pendiente.id}`, { descripcion });
+  await junior.data('PATCH', `/${pendiente.id}`, { descripcion: descripcion.replace('"a"', '"ab"') });
+  await diego.data('PATCH', `/${pendiente.id}`, { descripcion: descripcion.replace('"a"', '"ab"') });
+  const { actividad } = await diego.data('GET', `/${pendiente.id}/actividad`);
+  assert.deepEqual(actividad.map((a) => `${a.autor}:${a.tipo}`),
+    ['Junior:descripcion', 'Diego:asignado', 'Diego:texto', 'Favio:estado', 'Diego:creado']);
+  assert.deepEqual(actividad.find((a) => a.tipo === 'texto').datos, { de: 'Facturación', a: 'Facturación electrónica' });
+
+  // Arrastrar a Hecho también queda; el tablero general ve todo, el más nuevo primero.
+  await junior.call('PUT', '/orden', { items: [{ id: pendiente.id, estado: 'hecho' }] });
+  const general = (await data('GET', '/actividad')).actividad;
+  assert.deepEqual([general[0].tipo, general[0].datos, general[0].autor], ['estado', { de: 'haciendo', a: 'hecho' }, 'Junior']);
+  assert.equal((await data('GET', `/actividad?antes=${encodeURIComponent(general[0].creado_en)}&limite=2`)).actividad.length, 2);
+  assert.equal((await data('GET', '/actividad?antes=ayer')).error, 'antes_invalido');
+
+  // Leer avisos: unos o todos. La cuenta del equipo no tiene.
+  const ids = (await avisos(favio)).notificaciones.map((n) => n.id);
+  assert.equal((await favio.data('POST', '/notificaciones/leidas', { ids: [ids[0]] })).no_leidas, (await avisos(favio)).no_leidas);
+  assert.equal((await avisos(favio)).notificaciones.find((n) => n.id === ids[0]).leida, true);
+  assert.equal((await favio.data('POST', '/notificaciones/leidas', {})).no_leidas, 0);
+  assert.deepEqual(await data('GET', '/notificaciones'), { notificaciones: [], no_leidas: 0 });
+
+  // Al borrarlo queda en el historial con su título, y se avisa.
+  await diego.data('DELETE', `/${pendiente.id}`);
+  assert.deepEqual([(await data('GET', '/actividad')).actividad[0].tipo, (await data('GET', '/actividad')).actividad[0].texto_pendiente],
+    ['borrado', 'Facturación electrónica']);
+  assert.equal((await avisos(junior)).notificaciones[0].actividad.tipo, 'borrado');
+});
+
+test('chat por pendiente: avisa a los que participan y a los @mencionados; cada quien borra solo lo suyo', async (t) => {
+  const { call, entrarComo, data } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const junior = await entrarComo('Junior');
+  const { pendiente } = await diego.data('POST', '', { texto: 'Revisar túnel', perfil_id: favio.perfil.id });
+
+  const primero = await favio.call('POST', `/${pendiente.id}/comentarios`, { texto: '  Ya lo vi, falta el certificado  ' });
+  assert.equal(primero.status, 201);
+  const { comentario } = await primero.json();
+  assert.deepEqual([comentario.autor, comentario.texto, comentario.perfil_id], ['Favio', 'Ya lo vi, falta el certificado', favio.perfil.id]);
+  assert.equal((await diego.data('GET', '/notificaciones')).notificaciones[0].actividad.tipo, 'comentario');
+  assert.equal((await junior.data('GET', '/notificaciones')).no_leidas, 0);
+
+  await diego.call('POST', `/${pendiente.id}/comentarios`, { texto: '@junior ¿lo puedes revisar?' });
+  const deJunior = await junior.data('GET', '/notificaciones');
+  assert.deepEqual(deJunior.notificaciones[0].actividad.datos.extracto, '@junior ¿lo puedes revisar?');
+  assert.equal((await favio.data('GET', '/notificaciones')).notificaciones[0].actividad.autor, 'Diego');
+  await data('POST', `/${pendiente.id}/comentarios`, { texto: 'Desde la cuenta del equipo' });
+
+  const { comentarios } = await diego.data('GET', `/${pendiente.id}/comentarios`);
+  assert.deepEqual(comentarios.map((c) => c.autor), ['Favio', 'Diego', 'Equipo']);
+  assert.equal((await diego.data('GET')).pendientes[0].num_comentarios, 3);
+  assert.equal((await call('POST', `/${pendiente.id}/comentarios`, { texto: ' ' })).status, 422);
+  assert.equal((await call('POST', `/${crypto.randomUUID()}/comentarios`, { texto: 'nada' })).status, 404);
+
+  assert.equal((await diego.call('DELETE', `/comentarios/${comentario.id}`)).status, 403);
+  assert.equal((await call('DELETE', `/comentarios/${comentario.id}`)).status, 403);
+  assert.equal((await favio.call('DELETE', `/comentarios/${comentario.id}`)).status, 200);
+  assert.equal((await call('DELETE', `/comentarios/${comentarios[2].id}`)).status, 200);
+  assert.deepEqual((await diego.data('GET', `/${pendiente.id}/comentarios`)).comentarios.map((c) => c.autor), ['Diego']);
+  // Con el mensaje se fue su aviso.
+  assert.equal((await diego.data('GET', '/notificaciones')).notificaciones.some((n) => n.actividad.tipo === 'comentario'), false);
+
+  // Al borrar el pendiente se van sus mensajes.
+  await diego.call('DELETE', `/${pendiente.id}`);
+  assert.equal((await diego.call('GET', `/${pendiente.id}/comentarios`)).status, 404);
+});
+
+test('el historial, el chat y los avisos de lo privado solo los ve su dueño, también después de borrarlo', async (t) => {
+  const { data, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const { organizacion } = await diego.data('POST', '/organizaciones', { nombre: 'Personal', compartida: false });
+  const { proyecto } = await diego.data('POST', '/proyectos', { nombre: 'Casa', organizacion_id: organizacion.id });
+  // Asignado a Favio, pero Favio no lo ve: no se le avisa.
+  const { pendiente } = await diego.data('POST', '', { texto: 'Pagar luz', proyecto_id: proyecto.id, perfil_id: favio.perfil.id });
+  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: '@Favio mira' });
+  assert.equal((await favio.data('GET', '/notificaciones')).no_leidas, 0);
+  for (const otro of [favio, { data }]) {
+    assert.equal((await otro.data('GET', '/actividad')).actividad.length, 0);
+  }
+  assert.equal((await favio.call('GET', `/${pendiente.id}/actividad`)).status, 404);
+  assert.equal((await favio.call('GET', `/${pendiente.id}/comentarios`)).status, 404);
+  assert.equal((await favio.call('POST', `/${pendiente.id}/comentarios`, { texto: 'colado' })).status, 404);
+  assert.equal((await diego.data('GET', '/actividad')).actividad.length, 2);
+
+  await diego.data('DELETE', `/${pendiente.id}`);
+  assert.equal((await favio.data('GET', '/actividad')).actividad.length, 0);
+  assert.equal((await data('GET', '/actividad')).actividad.length, 0);
+  assert.deepEqual((await diego.data('GET', '/actividad')).actividad.map((a) => a.tipo), ['borrado', 'comentario', 'creado']);
+});
+
 test('rechaza JSON roto y rutas desconocidas', async (t) => {
   const { base, call } = await startServer(t);
   const broken = await fetch(`${base}/api/pendientes`, { method: 'POST', headers: { Authorization: auth, 'Content-Type': 'application/json' }, body: '{' });
@@ -398,5 +532,6 @@ test('rechaza JSON roto y rutas desconocidas', async (t) => {
   assert.equal((await call('PUT')).status, 405);
   assert.equal((await call('PATCH', '/perfiles')).status, 405);
   assert.equal((await call('PUT', '/organizaciones')).status, 405);
+  assert.equal((await call('DELETE', '/actividad')).status, 405);
   assert.equal((await fetch(`${base}/otra-cosa`)).status, 404);
 });

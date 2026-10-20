@@ -14,6 +14,9 @@ const MAX_TEXTO = 500;
 const MAX_PROYECTO = 60;
 const MAX_NOMBRE = 40;
 const MAX_CORREO = 120;
+const MAX_COMENTARIO = 2000;
+// Lo que se guarda de un mensaje en el historial y en los avisos.
+const MAX_EXTRACTO = 140;
 const MAX_DESCRIPCION = 400 * 1024;
 const MAX_RESUMEN = 200;
 const MIN_CONTRASENA = 8;
@@ -24,6 +27,9 @@ const VENTANA_FALLOS_MS = 15 * 60 * 1000;
 // Una imagen que ya no aparece en la descripción se borra pasado este tiempo, para no
 // pisar una subida en curso cuyo bloque todavía no llegó a guardarse.
 const GRACIA_IMAGENES_MS = 60 * 60 * 1000;
+// La descripción se guarda sola mientras se escribe: si la misma persona sigue editando dentro de
+// este tiempo, el historial actualiza su última entrada en vez de sumar una nueva.
+const UNIR_DESCRIPCION_MS = 10 * 60 * 1000;
 const ESTADOS = ['pendiente', 'haciendo', 'hecho'];
 const COLORES = ['#2563EB', '#DB2777', '#059669', '#7C3AED', '#EA580C', '#0891B2', '#CA8A04', '#DC2626'];
 const PERFILES_INICIALES = ['Favio', 'Diego', 'Junior'];
@@ -34,6 +40,9 @@ const YO_PATH = '/api/pendientes/yo';
 const PERFILES_PATH = '/api/pendientes/perfiles';
 const ORGANIZACIONES_PATH = '/api/pendientes/organizaciones';
 const PROYECTOS_PATH = '/api/pendientes/proyectos';
+const ACTIVIDAD_PATH = '/api/pendientes/actividad';
+const NOTIFICACIONES_PATH = '/api/pendientes/notificaciones';
+const LEIDAS_PATH = '/api/pendientes/notificaciones/leidas';
 const ITEM_PATH = new RegExp(`^/api/pendientes/${UUID}$`);
 const PERFIL_PATH = new RegExp(`^/api/pendientes/perfiles/${UUID}$`);
 const CONTRASENA_PATH = new RegExp(`^/api/pendientes/perfiles/${UUID}/contrasena$`);
@@ -41,10 +50,15 @@ const ORGANIZACION_PATH = new RegExp(`^/api/pendientes/organizaciones/${UUID}$`)
 const PROYECTO_PATH = new RegExp(`^/api/pendientes/proyectos/${UUID}$`);
 const SUBIR_IMAGEN_PATH = new RegExp(`^/api/pendientes/${UUID}/imagenes$`);
 const IMAGEN_PATH = new RegExp(`^/api/pendientes/imagenes/${UUID}$`);
-const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH];
-const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH];
-const COLUMNAS_PENDIENTE = 'id, texto, proyecto_id, estado, perfil_id, resumen, num_imagenes, creado_en, actualizado_en';
-const SELECT_PERFIL = 'SELECT id, nombre, correo, color, password_hash IS NOT NULL AS tiene_contrasena, creado_en FROM perfiles';
+const ACTIVIDAD_ITEM_PATH = new RegExp(`^/api/pendientes/${UUID}/actividad$`);
+const COMENTARIOS_PATH = new RegExp(`^/api/pendientes/${UUID}/comentarios$`);
+const COMENTARIO_PATH = new RegExp(`^/api/pendientes/comentarios/${UUID}$`);
+const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH];
+const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
+  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH];
+const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en,
+  (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios`;
+const SELECT_PERFIL = 'SELECT id, nombre, correo, telefono, color, password_hash IS NOT NULL AS tiene_contrasena, creado_en FROM perfiles';
 const SELECT_ORGANIZACION = 'SELECT id, nombre, color, duenio_id, compartida, creado_en FROM organizaciones';
 const SELECT_PROYECTO = 'SELECT id, nombre, organizacion_id, creado_en FROM proyectos';
 
@@ -53,6 +67,13 @@ const SELECT_PROYECTO = 'SELECT id, nombre, organizacion_id, creado_en FROM proy
 const PROYECTOS_VISIBLES = `SELECT pr.id FROM proyectos pr LEFT JOIN organizaciones o ON o.id = pr.organizacion_id
   WHERE pr.organizacion_id IS NULL OR o.compartida = 1 OR o.duenio_id = ?`;
 const PENDIENTE_VISIBLE = `(proyecto_id IS NULL OR proyecto_id IN (${PROYECTOS_VISIBLES}))`;
+// El historial de un pendiente se ve si se ve el pendiente. El de uno ya borrado guarda en privado_de
+// al dueño de la organización privada en la que estaba (o NULL si lo veía todo el equipo).
+// Lleva dos parámetros, los dos el perfil que pregunta.
+const ACTIVIDAD_VISIBLE = `(a.pendiente_id IN (SELECT id FROM pendientes WHERE ${PENDIENTE_VISIBLE})
+  OR (a.pendiente_id IS NULL AND (a.privado_de IS NULL OR a.privado_de = ?)))`;
+const SELECT_ACTIVIDAD = 'SELECT a.id, a.pendiente_id, a.texto_pendiente, a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en FROM actividad a';
+const SELECT_COMENTARIO = 'SELECT id, pendiente_id, perfil_id, autor, texto, creado_en FROM comentarios';
 
 // Cada función lleva la base de una versión a la siguiente; la versión vive en PRAGMA user_version.
 const MIGRACIONES = [
@@ -132,6 +153,44 @@ const MIGRACIONES = [
       asignar.run(id, proyecto);
     }
     db.exec('ALTER TABLE pendientes DROP COLUMN proyecto');
+  },
+  // Historial de cambios, chat por pendiente, avisos para cada perfil y teléfono para avisar por WhatsApp.
+  (db) => {
+    db.exec(`
+      ALTER TABLE perfiles ADD COLUMN telefono TEXT;
+      ALTER TABLE pendientes ADD COLUMN creado_por TEXT REFERENCES perfiles(id) ON DELETE SET NULL;
+      CREATE TABLE actividad (
+        id TEXT PRIMARY KEY,
+        pendiente_id TEXT REFERENCES pendientes(id) ON DELETE SET NULL,
+        texto_pendiente TEXT NOT NULL,
+        perfil_id TEXT REFERENCES perfiles(id) ON DELETE SET NULL,
+        autor TEXT NOT NULL,
+        tipo TEXT NOT NULL,
+        datos TEXT,
+        privado_de TEXT,
+        creado_en TEXT NOT NULL
+      );
+      CREATE INDEX actividad_fecha ON actividad (creado_en);
+      CREATE INDEX actividad_pendiente ON actividad (pendiente_id, creado_en);
+      CREATE TABLE comentarios (
+        id TEXT PRIMARY KEY,
+        pendiente_id TEXT NOT NULL REFERENCES pendientes(id) ON DELETE CASCADE,
+        perfil_id TEXT REFERENCES perfiles(id) ON DELETE SET NULL,
+        autor TEXT NOT NULL,
+        texto TEXT NOT NULL,
+        creado_en TEXT NOT NULL
+      );
+      CREATE INDEX comentarios_pendiente ON comentarios (pendiente_id, creado_en);
+      CREATE TABLE notificaciones (
+        id TEXT PRIMARY KEY,
+        perfil_id TEXT NOT NULL REFERENCES perfiles(id) ON DELETE CASCADE,
+        actividad_id TEXT NOT NULL REFERENCES actividad(id) ON DELETE CASCADE,
+        leida_en TEXT,
+        creado_en TEXT NOT NULL
+      );
+      CREATE INDEX notificaciones_perfil ON notificaciones (perfil_id, creado_en);
+      CREATE INDEX notificaciones_actividad ON notificaciones (actividad_id);
+    `);
   },
 ];
 
@@ -280,7 +339,28 @@ export function parsePerfil(input, { partial = false } = {}) {
     if (correo && (correo.length > MAX_CORREO || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo))) throw httpError(422, 'correo_invalido');
     changes.correo = correo || null;
   }
+  // Con código de país, como lo pide wa.me: se guardan solo los dígitos.
+  if ('telefono' in input) {
+    if (input.telefono !== null && typeof input.telefono !== 'string') throw httpError(422, 'telefono_invalido');
+    const crudo = (input.telefono ?? '').trim();
+    const digitos = crudo.replace(/[\s().-]/g, '').replace(/^(\+|00)/, '');
+    if (crudo && !/^\d{10,15}$/.test(digitos)) throw httpError(422, 'telefono_invalido');
+    changes.telefono = crudo ? digitos : null;
+  }
   return changes;
+}
+
+export function parseComentario(input) {
+  const texto = typeof input.texto === 'string' ? input.texto.trim() : '';
+  if (!texto || texto.length > MAX_COMENTARIO) throw httpError(422, 'comentario_invalido');
+  return texto;
+}
+
+// Sin ids marca todos los avisos como leídos.
+export function parseLeidas(input) {
+  if (input.ids === undefined) return null;
+  if (!Array.isArray(input.ids) || input.ids.length > 500 || input.ids.some((id) => typeof id !== 'string')) throw httpError(422, 'ids_invalidos');
+  return input.ids;
 }
 
 export function parseContrasena(input) {
@@ -325,6 +405,7 @@ function transaction(db, work) {
 const fila = (row) => (row ? { ...row } : null);
 const perfilFila = (row) => (row ? { ...row, tiene_contrasena: Boolean(row.tiene_contrasena) } : null);
 const organizacionFila = (row) => (row ? { ...row, compartida: Boolean(row.compartida) } : null);
+const actividadFila = (row) => (row ? { ...row, datos: row.datos ? JSON.parse(row.datos) : null } : null);
 
 // Proyecto sin organización con ese nombre; se crea si no existe.
 function proyectoSuelto(db, nombre) {
@@ -372,6 +453,57 @@ function createRepo(db, dataDir, graciaImagenesMs) {
   const perfil = (id) => perfilFila(db.prepare(`${SELECT_PERFIL} WHERE id = ?`).get(id));
   const organizacion = (yo, id) => organizacionFila(db.prepare(`${SELECT_ORGANIZACION} WHERE id = ? AND (compartida = 1 OR duenio_id = ?)`).get(id, yo));
   const proyecto = (yo, id) => fila(db.prepare(`${SELECT_PROYECTO} WHERE id = ? AND id IN (${PROYECTOS_VISIBLES})`).get(id, yo));
+
+  // Si el pendiente está en una organización privada, el id de su dueño; si no, null.
+  const privadoDe = (pendienteId) => db.prepare(`SELECT o.duenio_id FROM pendientes p JOIN proyectos pr ON pr.id = p.proyecto_id
+    JOIN organizaciones o ON o.id = pr.organizacion_id WHERE p.id = ? AND o.compartida = 0`).get(pendienteId)?.duenio_id ?? null;
+
+  // El historial guarda nombres y no solo ids: así se sigue leyendo aunque el perfil o el proyecto ya no existan.
+  const nombreDePerfil = (id) => (id ? db.prepare('SELECT nombre FROM perfiles WHERE id = ?').get(id)?.nombre ?? null : null);
+  function etiquetaDeProyecto(id) {
+    const row = id && db.prepare('SELECT pr.nombre, o.nombre AS organizacion FROM proyectos pr LEFT JOIN organizaciones o ON o.id = pr.organizacion_id WHERE pr.id = ?').get(id);
+    return row ? (row.organizacion ? `${row.organizacion} › ${row.nombre}` : row.nombre) : null;
+  }
+
+  // Anota un cambio en el historial y avisa a los perfiles de `avisar`, salvo a quien lo hizo.
+  // De un pendiente privado solo se avisa a su dueño, que es el único que lo ve.
+  function registrar(quien, item, tipo, datos = null, avisar = []) {
+    const id = randomUUID();
+    const privado = privadoDe(item.id);
+    const ahora = new Date().toISOString();
+    db.prepare(`INSERT INTO actividad (id, pendiente_id, texto_pendiente, perfil_id, autor, tipo, datos, privado_de, creado_en)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, item.id, item.texto, quien.perfil_id, quien.nombre, tipo, datos && JSON.stringify(datos), privado, ahora);
+    const avisarA = db.prepare('INSERT INTO notificaciones (id, perfil_id, actividad_id, leida_en, creado_en) SELECT ?, id, ?, NULL, ? FROM perfiles WHERE id = ?');
+    for (const perfilId of new Set(avisar)) {
+      if (perfilId && perfilId !== quien.perfil_id && (!privado || perfilId === privado)) avisarA.run(randomUUID(), id, ahora, perfilId);
+    }
+  }
+
+  function anotarDescripcion(quien, item) {
+    const ultima = db.prepare('SELECT id, perfil_id, autor, tipo, creado_en FROM actividad WHERE pendiente_id = ? ORDER BY creado_en DESC, rowid DESC LIMIT 1')
+      .get(item.id);
+    if (ultima?.tipo === 'descripcion' && ultima.perfil_id === quien.perfil_id && ultima.autor === quien.nombre
+      && Date.now() - Date.parse(ultima.creado_en) < UNIR_DESCRIPCION_MS) {
+      db.prepare('UPDATE actividad SET creado_en = ?, texto_pendiente = ? WHERE id = ?').run(new Date().toISOString(), item.texto, ultima.id);
+    } else {
+      registrar(quien, item, 'descripcion');
+    }
+  }
+
+  // Avisa al responsable y a quien lo creó; al reasignar, a quien lo tenía y a quien lo recibe.
+  function anotarCambios(quien, antes, despues, changes) {
+    const interesados = [despues.perfil_id, despues.creado_por];
+    if (despues.texto !== antes.texto) registrar(quien, despues, 'texto', { de: antes.texto, a: despues.texto }, interesados);
+    if (despues.estado !== antes.estado) registrar(quien, despues, 'estado', { de: antes.estado, a: despues.estado }, interesados);
+    if (despues.perfil_id !== antes.perfil_id) {
+      registrar(quien, despues, 'asignado', { de: nombreDePerfil(antes.perfil_id), a: nombreDePerfil(despues.perfil_id), a_id: despues.perfil_id },
+        [antes.perfil_id, despues.perfil_id]);
+    }
+    if (despues.proyecto_id !== antes.proyecto_id) {
+      registrar(quien, despues, 'proyecto', { de: etiquetaDeProyecto(antes.proyecto_id), a: etiquetaDeProyecto(despues.proyecto_id) }, interesados);
+    }
+    if ('descripcion' in changes && changes.descripcion !== antes.descripcion) anotarDescripcion(quien, despues);
+  }
 
   function verificarPerfil(perfilId) {
     if (perfilId && !perfil(perfilId)) throw httpError(422, 'perfil_invalido');
@@ -428,21 +560,35 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
     detallePendiente: (yo, id) => fila(db.prepare(`SELECT ${COLUMNAS_PENDIENTE}, descripcion FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo)),
 
-    crearPendiente(yo, changes) {
+    // `quien` es { perfil_id, nombre } de quien hace el cambio, para el historial y los avisos.
+    crearPendiente(quien, changes) {
+      const yo = quien.perfil_id;
       verificarPerfil(changes.perfil_id);
       verificarProyecto(yo, changes.proyecto_id);
       const now = new Date().toISOString();
       const id = randomUUID();
-      // Lo nuevo va arriba de todo.
-      const { minimo } = db.prepare('SELECT COALESCE(MIN(posicion), 0) AS minimo FROM pendientes').get();
-      db.prepare(`INSERT INTO pendientes (id, texto, proyecto_id, estado, perfil_id, posicion, creado_en, actualizado_en)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(id, changes.texto, changes.proyecto_id ?? null, changes.estado ?? 'pendiente', changes.perfil_id ?? null, minimo - 1, now, now);
-      return pendiente(yo, id);
+      return transaction(db, () => {
+        // Lo nuevo va arriba de todo.
+        const { minimo } = db.prepare('SELECT COALESCE(MIN(posicion), 0) AS minimo FROM pendientes').get();
+        db.prepare(`INSERT INTO pendientes (id, texto, proyecto_id, estado, perfil_id, creado_por, posicion, creado_en, actualizado_en)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(id, changes.texto, changes.proyecto_id ?? null, changes.estado ?? 'pendiente', changes.perfil_id ?? null, yo, minimo - 1, now, now);
+        const creado = pendiente(yo, id);
+        registrar(quien, creado, 'creado', {
+          estado: creado.estado,
+          asignado: nombreDePerfil(creado.perfil_id),
+          asignado_id: creado.perfil_id,
+          proyecto: etiquetaDeProyecto(creado.proyecto_id),
+        }, [creado.perfil_id]);
+        return creado;
+      });
     },
 
-    async actualizarPendiente(yo, id, changes) {
-      if (!pendiente(yo, id)) return null;
+    async actualizarPendiente(quien, id, changes) {
+      const yo = quien.perfil_id;
+      const antes = fila(db.prepare(`SELECT texto, estado, perfil_id, proyecto_id, creado_por, descripcion FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`)
+        .get(id, yo));
+      if (!antes) return null;
       verificarPerfil(changes.perfil_id);
       verificarProyecto(yo, changes.proyecto_id);
       const columnas = { ...changes };
@@ -453,34 +599,128 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       }
       // Las columnas salen de parsePendiente y resumirDescripcion, que solo producen campos conocidos.
       const campos = Object.keys(columnas);
-      db.prepare(`UPDATE pendientes SET ${[...campos.map((campo) => `${campo} = ?`), 'actualizado_en = ?'].join(', ')} WHERE id = ?`)
-        .run(...campos.map((campo) => columnas[campo]), new Date().toISOString(), id);
+      const actualizado = transaction(db, () => {
+        db.prepare(`UPDATE pendientes SET ${[...campos.map((campo) => `${campo} = ?`), 'actualizado_en = ?'].join(', ')} WHERE id = ?`)
+          .run(...campos.map((campo) => columnas[campo]), new Date().toISOString(), id);
+        const despues = pendiente(yo, id);
+        anotarCambios(quien, antes, despues, changes);
+        return despues;
+      });
       if ('descripcion' in changes) await limpiarImagenes(id);
-      return pendiente(yo, id);
+      return actualizado;
     },
 
-    async borrarPendiente(yo, id) {
-      if (!pendiente(yo, id)) return false;
+    async borrarPendiente(quien, id) {
+      const actual = pendiente(quien.perfil_id, id);
+      if (!actual) return false;
       const imagenes = db.prepare('SELECT id FROM imagenes WHERE pendiente_id = ?').all(id).map((row) => row.id);
-      // ON DELETE CASCADE quita sus filas de imagenes; los archivos se borran aparte.
-      db.prepare('DELETE FROM pendientes WHERE id = ?').run(id);
+      transaction(db, () => {
+        // Su historial queda con la privacidad que tenía al borrarse (ON DELETE SET NULL suelta el pendiente_id).
+        db.prepare('UPDATE actividad SET privado_de = ? WHERE pendiente_id = ?').run(privadoDe(id), id);
+        registrar(quien, actual, 'borrado', null, [actual.perfil_id, actual.creado_por]);
+        // ON DELETE CASCADE quita sus filas de imagenes y comentarios; los archivos se borran aparte.
+        db.prepare('DELETE FROM pendientes WHERE id = ?').run(id);
+      });
       await borrarArchivos(imagenes);
       return true;
     },
 
-    ordenar(yo, orden) {
+    ordenar(quien, orden) {
+      const yo = quien.perfil_id;
       const now = new Date().toISOString();
       const update = db.prepare(`UPDATE pendientes
         SET posicion = ?, actualizado_en = CASE WHEN estado <> ? THEN ? ELSE actualizado_en END, estado = ?
         WHERE id = ? AND ${PENDIENTE_VISIBLE}`);
+      const antes = new Map(db.prepare(`SELECT id, texto, estado, perfil_id, creado_por FROM pendientes WHERE ${PENDIENTE_VISIBLE}`).all(yo)
+        .map((row) => [row.id, fila(row)]));
       transaction(db, () => {
         // Lo que el tablero no conocía (otro lo creó mientras tanto, o no lo puede ver) queda al final, en su mismo orden.
         db.exec('UPDATE pendientes SET posicion = posicion + 1000000');
         orden.forEach(({ id, estado }, i) => update.run(i, estado, now, estado, id, yo));
         db.exec(`WITH r AS (SELECT id, ROW_NUMBER() OVER (ORDER BY posicion) - 1 AS n FROM pendientes)
           UPDATE pendientes SET posicion = (SELECT n FROM r WHERE r.id = pendientes.id)`);
+        // Arrastrar a otra columna también es un cambio de estado.
+        for (const [id, estado] of new Map(orden.map((item) => [item.id, item.estado]))) {
+          const previo = antes.get(id);
+          if (previo && previo.estado !== estado) {
+            registrar(quien, previo, 'estado', { de: previo.estado, a: estado }, [previo.perfil_id, previo.creado_por]);
+          }
+        }
       });
       return this.listarPendientes(yo);
+    },
+
+    listarComentarios(yo, pendienteId) {
+      if (!pendiente(yo, pendienteId)) return null;
+      return db.prepare(`${SELECT_COMENTARIO} WHERE pendiente_id = ? ORDER BY creado_en, rowid`).all(pendienteId).map(fila);
+    },
+
+    // Avisa al responsable, a quien lo creó, a quienes ya escribieron y a los @mencionados.
+    crearComentario(quien, pendienteId, texto) {
+      const item = pendiente(quien.perfil_id, pendienteId);
+      if (!item) return null;
+      const id = randomUUID();
+      return transaction(db, () => {
+        db.prepare('INSERT INTO comentarios (id, pendiente_id, perfil_id, autor, texto, creado_en) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(id, pendienteId, quien.perfil_id, quien.nombre, texto, new Date().toISOString());
+        const participantes = db.prepare('SELECT DISTINCT perfil_id FROM comentarios WHERE pendiente_id = ? AND perfil_id IS NOT NULL').all(pendienteId)
+          .map((row) => row.perfil_id);
+        const minusculas = texto.toLowerCase();
+        const mencionados = db.prepare('SELECT id, nombre FROM perfiles').all().filter((p) => minusculas.includes(`@${p.nombre.toLowerCase()}`))
+          .map((p) => p.id);
+        registrar(quien, item, 'comentario', { comentario_id: id, extracto: texto.slice(0, MAX_EXTRACTO) },
+          [item.perfil_id, item.creado_por, ...participantes, ...mencionados]);
+        return fila(db.prepare(`${SELECT_COMENTARIO} WHERE id = ?`).get(id));
+      });
+    },
+
+    // Cada quien borra solo sus mensajes; con el mensaje se van su entrada del historial y sus avisos.
+    borrarComentario(quien, id) {
+      const comentario = db.prepare(`SELECT c.perfil_id, c.autor FROM comentarios c JOIN pendientes ON pendientes.id = c.pendiente_id
+        WHERE c.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, quien.perfil_id);
+      if (!comentario) return false;
+      const esSuyo = comentario.perfil_id ? comentario.perfil_id === quien.perfil_id : quien.perfil_id === null && comentario.autor === quien.nombre;
+      if (!esSuyo) throw httpError(403, 'solo_el_autor');
+      transaction(db, () => {
+        db.prepare("DELETE FROM actividad WHERE tipo = 'comentario' AND json_extract(datos, '$.comentario_id') = ?").run(id);
+        db.prepare('DELETE FROM comentarios WHERE id = ?').run(id);
+      });
+      return true;
+    },
+
+    listarActividad: (yo, { antes = null, limite = 50 } = {}) => db.prepare(`${SELECT_ACTIVIDAD}
+      WHERE ${ACTIVIDAD_VISIBLE} AND (? IS NULL OR a.creado_en < ?) ORDER BY a.creado_en DESC, a.rowid DESC LIMIT ?`)
+      .all(yo, yo, antes, antes, limite).map(actividadFila),
+
+    actividadDePendiente(yo, pendienteId) {
+      if (!pendiente(yo, pendienteId)) return null;
+      return db.prepare(`${SELECT_ACTIVIDAD} WHERE a.pendiente_id = ? ORDER BY a.creado_en DESC, a.rowid DESC LIMIT 200`).all(pendienteId).map(actividadFila);
+    },
+
+    // La cuenta del equipo no es un perfil: no recibe avisos.
+    listarNotificaciones(yo) {
+      if (!yo) return { notificaciones: [], no_leidas: 0 };
+      const notificaciones = db.prepare(`SELECT n.id AS notificacion_id, n.leida_en, a.id, a.pendiente_id, a.texto_pendiente, a.perfil_id, a.autor,
+          a.tipo, a.datos, a.creado_en
+        FROM notificaciones n JOIN actividad a ON a.id = n.actividad_id
+        WHERE n.perfil_id = ? AND ${ACTIVIDAD_VISIBLE} ORDER BY n.creado_en DESC, n.rowid DESC LIMIT 50`).all(yo, yo, yo)
+        .map(({ notificacion_id: id, leida_en: leidaEn, ...actividad }) => ({ id, leida: leidaEn !== null, actividad: actividadFila(actividad) }));
+      return { notificaciones, no_leidas: this.noLeidas(yo) };
+    },
+
+    noLeidas: (yo) => db.prepare(`SELECT COUNT(*) AS total FROM notificaciones n JOIN actividad a ON a.id = n.actividad_id
+      WHERE n.perfil_id = ? AND n.leida_en IS NULL AND ${ACTIVIDAD_VISIBLE}`).get(yo, yo, yo).total,
+
+    marcarLeidas(yo, ids) {
+      if (!yo) return 0;
+      const ahora = new Date().toISOString();
+      if (ids === null) {
+        db.prepare('UPDATE notificaciones SET leida_en = ? WHERE perfil_id = ? AND leida_en IS NULL').run(ahora, yo);
+      } else {
+        const marcar = db.prepare('UPDATE notificaciones SET leida_en = ? WHERE id = ? AND perfil_id = ? AND leida_en IS NULL');
+        transaction(db, () => ids.forEach((id) => marcar.run(ahora, id, yo)));
+      }
+      return this.noLeidas(yo);
     },
 
     async guardarImagen(yo, pendienteId, contenido) {
@@ -514,12 +754,12 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
     listarPerfiles: () => db.prepare(`${SELECT_PERFIL} ORDER BY creado_en, rowid`).all().map(perfilFila),
 
-    crearPerfil({ nombre, color, correo = null }) {
+    crearPerfil({ nombre, color, correo = null, telefono = null }) {
       if (db.prepare('SELECT 1 FROM perfiles WHERE nombre = ?').get(nombre)) throw httpError(409, 'perfil_duplicado');
       const { total } = db.prepare('SELECT COUNT(*) AS total FROM perfiles').get();
       const id = randomUUID();
-      sinDuplicados('correo_duplicado', () => db.prepare('INSERT INTO perfiles (id, nombre, correo, color, creado_en) VALUES (?, ?, ?, ?, ?)')
-        .run(id, nombre, correo, color ?? COLORES[total % COLORES.length], new Date().toISOString()));
+      sinDuplicados('correo_duplicado', () => db.prepare('INSERT INTO perfiles (id, nombre, correo, telefono, color, creado_en) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, nombre, correo, telefono, color ?? COLORES[total % COLORES.length], new Date().toISOString()));
       return perfil(id);
     },
 
@@ -687,11 +927,31 @@ export function createApp(options = {}) {
 
       if (url.pathname === API_PATH && req.method === 'GET') return json(res, 200, { pendientes: repo.listarPendientes(yo) });
       if (url.pathname === API_PATH && req.method === 'POST') {
-        return json(res, 201, { pendiente: repo.crearPendiente(yo, parsePendiente(await readJson(req))) });
+        return json(res, 201, { pendiente: repo.crearPendiente(usuario, parsePendiente(await readJson(req))) });
       }
       if (url.pathname === ORDER_PATH && req.method === 'PUT') {
-        return json(res, 200, { pendientes: repo.ordenar(yo, parseOrden(await readJson(req))) });
+        return json(res, 200, { pendientes: repo.ordenar(usuario, parseOrden(await readJson(req))) });
       }
+
+      if (url.pathname === ACTIVIDAD_PATH && req.method === 'GET') {
+        const antes = url.searchParams.get('antes');
+        if (antes !== null && !/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(antes)) throw httpError(422, 'antes_invalido');
+        const limite = Math.min(Math.max(Number(url.searchParams.get('limite')) || 50, 1), 100);
+        return json(res, 200, { actividad: repo.listarActividad(yo, { antes, limite }) });
+      }
+      if (url.pathname === NOTIFICACIONES_PATH && req.method === 'GET') return json(res, 200, repo.listarNotificaciones(yo));
+      if (url.pathname === LEIDAS_PATH && req.method === 'POST') {
+        return json(res, 200, { no_leidas: repo.marcarLeidas(yo, parseLeidas(await readJson(req))) });
+      }
+      const pendienteDeActividad = url.pathname.match(ACTIVIDAD_ITEM_PATH)?.[1];
+      if (pendienteDeActividad && req.method === 'GET') return enviar(200, 'actividad', repo.actividadDePendiente(yo, pendienteDeActividad));
+      const pendienteDeComentarios = url.pathname.match(COMENTARIOS_PATH)?.[1];
+      if (pendienteDeComentarios && req.method === 'GET') return enviar(200, 'comentarios', repo.listarComentarios(yo, pendienteDeComentarios));
+      if (pendienteDeComentarios && req.method === 'POST') {
+        return enviar(201, 'comentario', repo.crearComentario(usuario, pendienteDeComentarios, parseComentario(await readJson(req))));
+      }
+      const comentarioId = url.pathname.match(COMENTARIO_PATH)?.[1];
+      if (comentarioId && req.method === 'DELETE') return listo(repo.borrarComentario(usuario, comentarioId));
 
       if (url.pathname === PERFILES_PATH && req.method === 'GET') return json(res, 200, { perfiles: repo.listarPerfiles() });
       // El nombre de la cuenta del equipo no puede ser un perfil: al entrar no se sabría cuál es.
@@ -755,9 +1015,9 @@ export function createApp(options = {}) {
       const id = url.pathname.match(ITEM_PATH)?.[1];
       if (id && req.method === 'GET') return enviar(200, 'pendiente', repo.detallePendiente(yo, id));
       if (id && req.method === 'PATCH') {
-        return enviar(200, 'pendiente', await repo.actualizarPendiente(yo, id, parsePendiente(await readJson(req), { partial: true })));
+        return enviar(200, 'pendiente', await repo.actualizarPendiente(usuario, id, parsePendiente(await readJson(req), { partial: true })));
       }
-      if (id && req.method === 'DELETE') return listo(await repo.borrarPendiente(yo, id));
+      if (id && req.method === 'DELETE') return listo(await repo.borrarPendiente(usuario, id));
 
       return json(res, 405, { error: 'method_not_allowed' });
     } catch (error) {

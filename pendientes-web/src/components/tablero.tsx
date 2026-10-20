@@ -16,7 +16,9 @@ import {
   CircleDashed,
   ClipboardList,
   Folder,
+  FolderKanban,
   FolderOpen,
+  History,
   ImageIcon,
   Inbox,
   Info,
@@ -24,17 +26,21 @@ import {
   Layers,
   Lock,
   LogOut,
+  MessageSquare,
   MoreVertical,
   Plus,
   RotateCw,
   Search,
   Timer,
   Trash2,
+  Users,
   UsersRound,
   X,
 } from "lucide-react"
 import { cn } from "cn"
+import { toast } from "sonner"
 
+import { ActividadSheet } from "@/components/actividad-sheet"
 import { DetallePendiente } from "@/components/detalle-pendiente"
 import { IlustracionColumna } from "@/components/ilustraciones"
 import {
@@ -44,6 +50,7 @@ import {
   KanbanHeader,
   KanbanProvider,
 } from "@/components/kibo-ui/kanban"
+import { Notificaciones } from "@/components/notificaciones"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { PerfilesDialog, type CambiosPerfil } from "@/components/perfiles-dialog"
 import { ProyectoCombobox } from "@/components/proyecto-combobox"
@@ -73,6 +80,7 @@ import {
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "@/components/ui/input-group"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Toaster } from "@/components/ui/sonner"
 import {
   api,
   crearCredenciales,
@@ -85,6 +93,7 @@ import {
   type Perfil,
   type Usuario,
 } from "@/lib/api"
+import { enlaceWhatsApp } from "@/lib/actividad"
 import { agrupar, conProyecto, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
@@ -131,6 +140,36 @@ function avisoEquipoCerrado() {
   }
 }
 
+// Filtros y campos del formulario de la última visita, para encontrarlos igual al volver.
+const SELECCIONES = "pendientes.selecciones"
+
+type Selecciones = {
+  organizacion: string | null
+  proyecto: string | null
+  perfil: string | null
+  proyectoNuevo: string | null
+  responsableNuevo: string
+}
+
+function leerSelecciones(): Selecciones {
+  let guardadas: Record<string, unknown> = {}
+  try {
+    guardadas = JSON.parse(localStorage.getItem(SELECCIONES) ?? "{}") ?? {}
+  } catch {
+    // Sin almacenamiento o con algo ilegible se empieza sin filtros.
+  }
+  const texto = (valor: unknown) => (typeof valor === "string" ? valor : null)
+  return {
+    organizacion: texto(guardadas.organizacion),
+    proyecto: texto(guardadas.proyecto),
+    perfil: texto(guardadas.perfil),
+    proyectoNuevo: texto(guardadas.proyectoNuevo),
+    responsableNuevo: texto(guardadas.responsableNuevo) ?? NADIE,
+  }
+}
+
+type Ventana = "proyectos" | "perfiles" | "actividad"
+
 // Tocar un botón dentro de la tarjeta no debe empezar a arrastrarla.
 const detener = (event: SyntheticEvent) => event.stopPropagation()
 const noArrastrar = { onMouseDown: detener, onTouchStart: detener, onKeyDown: detener }
@@ -174,15 +213,18 @@ export function Tablero({
   const [usuario, setUsuario] = useState<Usuario | null>(null)
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState("")
-  const [filtroOrganizacion, setFiltroOrganizacion] = useState<string | null>(null)
-  const [filtroProyecto, setFiltroProyecto] = useState<string | null>(null)
-  const [filtroPerfil, setFiltroPerfil] = useState<string | null>(null)
+  const [guardadas] = useState(leerSelecciones)
+  const [filtroOrganizacion, setFiltroOrganizacion] = useState(guardadas.organizacion)
+  const [filtroProyecto, setFiltroProyecto] = useState(guardadas.proyecto)
+  const [filtroPerfil, setFiltroPerfil] = useState(guardadas.perfil)
   const [texto, setTexto] = useState("")
-  const [proyectoId, setProyectoId] = useState<string | null>(null)
-  const [responsable, setResponsable] = useState(NADIE)
+  const [proyectoId, setProyectoId] = useState(guardadas.proyectoNuevo)
+  const [responsable, setResponsable] = useState(guardadas.responsableNuevo)
   // Columna donde cae lo que se agrega; se elige desde el menú de cada columna.
   const [destino, setDestino] = useState<Estado>("pendiente")
-  const [abierto, setAbierto] = useState<string | null>(null)
+  // Un enlace con ?p=<id> (el de WhatsApp, por ejemplo) abre ese pendiente.
+  const [abierto, setAbierto] = useState(() => new URLSearchParams(window.location.search).get("p"))
+  const [ventana, setVentana] = useState<Ventana | null>(null)
   const [confirmarLimpieza, setConfirmarLimpieza] = useState(false)
   const [sinAvisoEquipo, setSinAvisoEquipo] = useState(avisoEquipoCerrado)
   const ultimas = useRef<Tarjeta[]>([])
@@ -195,6 +237,29 @@ export function Tablero({
   useEffect(() => {
     ultimas.current = tarjetas
   }, [tarjetas])
+
+  useEffect(() => {
+    const selecciones: Selecciones = {
+      organizacion: filtroOrganizacion,
+      proyecto: filtroProyecto,
+      perfil: filtroPerfil,
+      proyectoNuevo: proyectoId,
+      responsableNuevo: responsable,
+    }
+    try {
+      localStorage.setItem(SELECCIONES, JSON.stringify(selecciones))
+    } catch {
+      // Sin almacenamiento las selecciones duran lo que dure la pestaña.
+    }
+  }, [filtroOrganizacion, filtroProyecto, filtroPerfil, proyectoId, responsable])
+
+  // La dirección lleva el pendiente abierto, para poder compartirla o recargar sin perderlo.
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    if (abierto) url.searchParams.set("p", abierto)
+    else url.searchParams.delete("p")
+    window.history.replaceState(null, "", url)
+  }, [abierto])
 
   const fallar = useCallback(
     (err: unknown) => {
@@ -217,6 +282,8 @@ export function Tablero({
       setPerfiles(nuevosPerfiles)
       setCatalogo({ organizaciones, proyectos })
       setUsuario(yo)
+      // Un pendiente que ya no existe (o que no se puede ver) no queda abierto.
+      setAbierto((actual) => (actual && pendientes.some((p) => p.id === actual) ? actual : null))
       setError("")
     } catch (err) {
       fallar(err)
@@ -279,6 +346,42 @@ export function Tablero({
 
   const miPerfil = usuario?.perfil_id ? perfilesPorId.get(usuario.perfil_id) : null
 
+  const abribles = useMemo(() => new Set(tarjetas.map((tarjeta) => tarjeta.id)), [tarjetas])
+
+  // Lo guardado puede apuntar a algo borrado o que esta cuenta no ve: entonces el campo queda vacío.
+  const proyectoDelFormulario = proyectoId && proyectosPorId.has(proyectoId) ? proyectoId : null
+  const responsableDelFormulario = perfilesPorId.has(responsable) ? responsable : NADIE
+
+  function etiquetaDeProyecto(id: string | null) {
+    const proyecto = id ? proyectosPorId.get(id) : undefined
+    const organizacion = proyecto?.organizacion_id ? organizacionesPorId.get(proyecto.organizacion_id) : undefined
+    return proyecto ? (organizacion ? `${organizacion.nombre} › ${proyecto.nombre}` : proyecto.nombre) : null
+  }
+
+  // El formulario toma lo que marcan los filtros, para que lo nuevo quede donde se está mirando.
+  // Al quitar un filtro, el campo se vacía solo si todavía tenía lo que el filtro le había puesto.
+  function filtrarPorPerfil(clave: string | null) {
+    setFiltroPerfil(clave)
+    if (clave !== null) setResponsable(clave)
+    else if (responsable === filtroPerfil) setResponsable(NADIE)
+  }
+
+  function filtrarPorOrganizacion(clave: string | null) {
+    setFiltroOrganizacion(clave)
+    setFiltroProyecto(null)
+    const delFormulario = proyectoDelFormulario ? proyectosPorId.get(proyectoDelFormulario) : undefined
+    const deOtraOrganizacion = delFormulario && clave !== null && (delFormulario.organizacion_id ?? SIN_ORGANIZACION) !== clave
+    if (deOtraOrganizacion || (clave === null && proyectoId === proyectoFiltrado)) setProyectoId(null)
+  }
+
+  function filtrarPorProyecto(id: string | null) {
+    setFiltroProyecto(id)
+    if (id !== null) setProyectoId(id)
+    else if (proyectoId === proyectoFiltrado) setProyectoId(null)
+  }
+
+  const abrirPendiente = useCallback((id: string) => setAbierto(id), [])
+
   const abiertos = tarjetas.filter((tarjeta) => tarjeta.column !== "hecho").length
 
   const hechosVisibles = visibles.filter((tarjeta) => tarjeta.column === "hecho")
@@ -296,18 +399,46 @@ export function Tablero({
     try {
       const nuevo = await api.crear(credenciales, {
         texto,
-        proyecto_id: proyectoId,
+        proyecto_id: proyectoDelFormulario,
         estado: destino,
-        perfil_id: responsable === NADIE ? null : responsable,
+        perfil_id: responsableDelFormulario === NADIE ? null : responsableDelFormulario,
       })
       setTarjetas((actuales) => [aTarjeta(nuevo), ...actuales])
       setTexto("")
       setDestino("pendiente")
       setError("")
+      avisarPorWhatsApp(nuevo)
     } catch (err) {
       fallar(err)
     }
   }
+
+  // Al crear un pendiente para otra persona, ofrece avisarle por WhatsApp con el enlace al pendiente.
+  function avisarPorWhatsApp(nuevo: Pendiente) {
+    const asignado = nuevo.perfil_id ? perfilesPorId.get(nuevo.perfil_id) : undefined
+    if (!asignado || asignado.id === usuario?.perfil_id) return
+    const enlace = enlaceWhatsApp({
+      perfil: asignado,
+      pendiente: nuevo,
+      proyecto: etiquetaDeProyecto(nuevo.proyecto_id),
+      quien: usuario?.perfil_id ? usuario.nombre : null,
+    })
+    toast.success(`Pendiente asignado a ${asignado.nombre}`, {
+      description: asignado.telefono
+        ? "¿Le avisas por WhatsApp?"
+        : `¿Le avisas por WhatsApp? No tiene número guardado: elegirás el chat.`,
+      action: { label: "WhatsApp", onClick: () => window.open(enlace, "_blank", "noopener,noreferrer") },
+      duration: 15000,
+    })
+  }
+
+  const cambiarCantidadComentarios = useCallback((id: string, cantidad: number) => {
+    setTarjetas((actuales) =>
+      actuales.some((t) => t.id === id && t.num_comentarios !== cantidad)
+        ? actuales.map((t) => (t.id === id ? { ...t, num_comentarios: cantidad } : t))
+        : actuales
+    )
+  }, [])
 
   // El cambio se ve al instante; la respuesta trae además el resumen de la descripción para la tarjeta.
   const cambiarPendiente = useCallback(
@@ -368,7 +499,7 @@ export function Tablero({
     [credenciales, fallar]
   )
 
-  async function crearPerfil(datos: { nombre: string; color: string; correo: string | null }) {
+  async function crearPerfil(datos: { nombre: string; color: string; correo: string | null; telefono: string | null }) {
     try {
       const nuevo = await api.perfiles.crear(credenciales, datos)
       setPerfiles((actuales) => [...actuales, nuevo])
@@ -386,8 +517,13 @@ export function Tablero({
     let actuales = credenciales
     try {
       let actualizado = perfil
+      // El teléfono se compara por sus dígitos, que es como lo guarda el servidor.
+      const comparable = (campo: string, valor: string | null) =>
+        campo === "color" ? valor?.toUpperCase() : campo === "telefono" ? (valor ?? "").replace(/\D/g, "").replace(/^00/, "") || null : valor
       const cambios = Object.fromEntries(
-        Object.entries(datos).filter(([campo, valor]) => (campo === "color" ? valor !== perfil.color.toUpperCase() : valor !== perfil[campo as keyof Perfil]))
+        Object.entries(datos).filter(
+          ([campo, valor]) => comparable(campo, valor) !== comparable(campo, perfil[campo as keyof Perfil] as string | null)
+        )
       )
       const guardarDatos = async () => {
         if (Object.keys(cambios).length) actualizado = await api.perfiles.actualizar(actuales, perfil.id, cambios)
@@ -466,29 +602,35 @@ export function Tablero({
               {abiertos} {abiertos === 1 ? "abierto" : "abiertos"}
             </span>
           )}
+          {/* En pantallas angostas solo quedan la campana y la cuenta; lo demás va en el menú de la cuenta. */}
           <div className="ml-auto flex items-center gap-1">
-            <ProyectosDialog
-              credenciales={credenciales}
-              catalogo={catalogo}
-              onCatalogo={setCatalogo}
-              perfiles={perfiles}
-              usuario={usuario}
-              pendientesPorProyecto={porProyecto}
-              onSalir={onSalir}
-            />
-            <PerfilesDialog
-              perfiles={perfiles}
-              asignados={asignados}
-              usuario={usuario}
-              onCrear={crearPerfil}
-              onActualizar={actualizarPerfil}
-              onBorrar={borrarPerfil}
-            />
-            <Button asChild variant="ghost">
-              <a href="/" aria-label="Timer">
-                <Timer /> <span className="hidden lg:inline">Timer</span>
-              </a>
-            </Button>
+            <div className="hidden items-center gap-1 md:flex">
+              <Button variant="ghost" onClick={() => setVentana("proyectos")}>
+                <FolderKanban /> Proyectos
+              </Button>
+              <Button variant="ghost" onClick={() => setVentana("perfiles")}>
+                <Users /> Perfiles
+              </Button>
+              <Button variant="ghost" onClick={() => setVentana("actividad")}>
+                <History /> Actividad
+              </Button>
+              <Button asChild variant="ghost">
+                <a href="/" aria-label="Timer">
+                  <Timer /> <span className="hidden lg:inline">Timer</span>
+                </a>
+              </Button>
+            </div>
+            {usuario?.perfil_id && (
+              <Notificaciones
+                credenciales={credenciales}
+                yo={usuario.perfil_id}
+                perfilesPorId={perfilesPorId}
+                abribles={abribles}
+                onAbrir={abrirPendiente}
+                onNovedades={recargar}
+                onSalir={onSalir}
+              />
+            )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" className="gap-2 px-2" aria-label={`Cuenta: ${usuario?.nombre ?? ""}`}>
@@ -501,6 +643,21 @@ export function Tablero({
                   {usuario?.perfil_id ? `Entraste como ${usuario.nombre}` : "Entraste con la cuenta del equipo"}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem className="md:hidden" onSelect={() => setVentana("proyectos")}>
+                  <FolderKanban /> Proyectos
+                </DropdownMenuItem>
+                <DropdownMenuItem className="md:hidden" onSelect={() => setVentana("perfiles")}>
+                  <Users /> Perfiles
+                </DropdownMenuItem>
+                <DropdownMenuItem className="md:hidden" onSelect={() => setVentana("actividad")}>
+                  <History /> Actividad
+                </DropdownMenuItem>
+                <DropdownMenuItem className="md:hidden" asChild>
+                  <a href="/">
+                    <Timer /> Timer
+                  </a>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator className="md:hidden" />
                 <DropdownMenuItem onSelect={onSalir}>
                   <LogOut /> Salir
                 </DropdownMenuItem>
@@ -537,13 +694,13 @@ export function Tablero({
             )}
           </InputGroup>
           <ProyectoCombobox
-            valor={proyectoId}
+            valor={proyectoDelFormulario}
             onCambiar={setProyectoId}
             catalogo={catalogo}
             onCrear={crearProyecto}
             className="h-11 w-full sm:w-60"
           />
-          <Select value={responsable} onValueChange={setResponsable}>
+          <Select value={responsableDelFormulario} onValueChange={setResponsable}>
             <SelectTrigger aria-label="Responsable" className="w-full px-3 data-[size=default]:h-11 sm:w-48">
               <SelectValue />
             </SelectTrigger>
@@ -592,7 +749,7 @@ export function Tablero({
           <div className="flex flex-col gap-2.5">
             {perfiles.length > 0 && (
               <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por persona">
-                <Filtro activo={filtroPerfil === null} onClick={() => setFiltroPerfil(null)}>
+                <Filtro activo={filtroPerfil === null} onClick={() => filtrarPorPerfil(null)}>
                   <Layers /> Todos
                 </Filtro>
                 {[...perfiles, null].map((perfil) => {
@@ -601,7 +758,7 @@ export function Tablero({
                     <Filtro
                       key={clave}
                       activo={filtroPerfil === clave}
-                      onClick={() => setFiltroPerfil(filtroPerfil === clave ? null : clave)}
+                      onClick={() => filtrarPorPerfil(filtroPerfil === clave ? null : clave)}
                     >
                       {perfil ? (
                         <span className="size-2.5 rounded-full" style={{ backgroundColor: perfil.color }} />
@@ -618,10 +775,7 @@ export function Tablero({
               <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por organización">
                 <Filtro
                   activo={organizacionFiltrada === null}
-                  onClick={() => {
-                    setFiltroOrganizacion(null)
-                    setFiltroProyecto(null)
-                  }}
+                  onClick={() => filtrarPorOrganizacion(null)}
                 >
                   <Building2 /> Todas
                 </Filtro>
@@ -634,10 +788,7 @@ export function Tablero({
                     <Filtro
                       key={clave}
                       activo={organizacionFiltrada === clave}
-                      onClick={() => {
-                        setFiltroOrganizacion(organizacionFiltrada === clave ? null : clave)
-                        setFiltroProyecto(null)
-                      }}
+                      onClick={() => filtrarPorOrganizacion(organizacionFiltrada === clave ? null : clave)}
                     >
                       {organizacion ? (
                         <span className="size-2.5 rounded-full" style={{ backgroundColor: organizacion.color }} />
@@ -654,14 +805,14 @@ export function Tablero({
             )}
             {proyectosDelFiltro.length > 0 && (
               <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por proyecto">
-                <Filtro activo={proyectoFiltrado === null} onClick={() => setFiltroProyecto(null)}>
+                <Filtro activo={proyectoFiltrado === null} onClick={() => filtrarPorProyecto(null)}>
                   <FolderOpen /> Todos los proyectos
                 </Filtro>
                 {proyectosDelFiltro.map((proyecto) => (
                   <Filtro
                     key={proyecto.id}
                     activo={proyectoFiltrado === proyecto.id}
-                    onClick={() => setFiltroProyecto(proyectoFiltrado === proyecto.id ? null : proyecto.id)}
+                    onClick={() => filtrarPorProyecto(proyectoFiltrado === proyecto.id ? null : proyecto.id)}
                   >
                     <Folder className="text-muted-foreground" /> {proyecto.nombre} <Contador valor={porProyecto.get(proyecto.id) ?? 0} />
                   </Filtro>
@@ -810,6 +961,14 @@ export function Tablero({
                                     {organizacion && !organizacion.compartida && <Lock aria-label="Privado" />}
                                   </Badge>
                                 )}
+                                {tarjeta.num_comentarios > 0 && (
+                                  <span
+                                    className="flex items-center gap-1 text-xs text-muted-foreground"
+                                    title={tarjeta.num_comentarios === 1 ? "1 mensaje" : `${tarjeta.num_comentarios} mensajes`}
+                                  >
+                                    <MessageSquare className="size-3.5" /> {tarjeta.num_comentarios}
+                                  </span>
+                                )}
                                 {tarjeta.num_imagenes > 0 && (
                                   <span
                                     className="flex items-center gap-1 text-xs text-muted-foreground"
@@ -897,13 +1056,47 @@ export function Tablero({
         </AlertDialogContent>
       </AlertDialog>
 
+      <ProyectosDialog
+        abierto={ventana === "proyectos"}
+        onAbiertoChange={(siguiente) => setVentana(siguiente ? "proyectos" : null)}
+        credenciales={credenciales}
+        catalogo={catalogo}
+        onCatalogo={setCatalogo}
+        perfiles={perfiles}
+        usuario={usuario}
+        pendientesPorProyecto={porProyecto}
+        onSalir={onSalir}
+      />
+      <PerfilesDialog
+        abierto={ventana === "perfiles"}
+        onAbiertoChange={(siguiente) => setVentana(siguiente ? "perfiles" : null)}
+        perfiles={perfiles}
+        asignados={asignados}
+        usuario={usuario}
+        onCrear={crearPerfil}
+        onActualizar={actualizarPerfil}
+        onBorrar={borrarPerfil}
+      />
+      <ActividadSheet
+        credenciales={credenciales}
+        abierto={ventana === "actividad"}
+        onAbiertoChange={(siguiente) => setVentana(siguiente ? "actividad" : null)}
+        yo={usuario?.perfil_id ?? null}
+        abribles={abribles}
+        onAbrir={abrirPendiente}
+        onSalir={onSalir}
+      />
+      <Toaster position="bottom-right" />
+
       <DetallePendiente
         credenciales={credenciales}
         pendiente={pendienteAbierto}
+        usuario={usuario}
         perfiles={perfiles}
         catalogo={catalogo}
         onCrearProyecto={crearProyecto}
         onCambiar={cambiarPendiente}
+        onCantidadComentarios={cambiarCantidadComentarios}
         onBorrar={borrar}
         onCerrar={cerrarDetalle}
         onSalir={onSalir}

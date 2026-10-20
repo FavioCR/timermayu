@@ -1,0 +1,201 @@
+import { useCallback, useEffect, useRef, useState } from "react"
+import { Bell, BellRing, CheckCheck, UsersRound } from "lucide-react"
+import { cn } from "cn"
+
+import { PerfilAvatar } from "@/components/perfil-avatar"
+import { Button } from "@/components/ui/button"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { api, esNoAutorizado, type Notificacion, type Perfil } from "@/lib/api"
+import { describir, haceCuanto } from "@/lib/actividad"
+
+// Cada cuánto se buscan avisos nuevos (también al volver a la pestaña).
+const CADA_MS = 30_000
+const TITULO = "Pendientes"
+
+type Permiso = NotificationPermission | "sin_soporte"
+
+const permisoActual = (): Permiso => ("Notification" in window ? Notification.permission : "sin_soporte")
+
+// La campana de quien entró con su perfil: lo que le asignaron y los cambios o mensajes en sus pendientes.
+// Con la pestaña en segundo plano y permiso del navegador, también avisa con una notificación del sistema.
+export function Notificaciones({
+  credenciales,
+  yo,
+  perfilesPorId,
+  abribles,
+  onAbrir,
+  onNovedades,
+  onSalir,
+}: {
+  credenciales: string
+  yo: string
+  perfilesPorId: Map<string, Perfil>
+  abribles: Set<string>
+  onAbrir: (pendienteId: string) => void
+  onNovedades: () => void
+  onSalir: () => void
+}) {
+  const [abierto, setAbierto] = useState(false)
+  const [lista, setLista] = useState<Notificacion[]>([])
+  const [noLeidas, setNoLeidas] = useState(0)
+  const [permiso, setPermiso] = useState(permisoActual)
+  // Ids ya vistos, para saber cuáles son nuevos. Null hasta la primera carga.
+  const vistas = useRef<Set<string> | null>(null)
+  // Lo que cambia en cada render se lee por ref para no reiniciar el intervalo.
+  const actuales = useRef({ abribles, onAbrir, onNovedades })
+  useEffect(() => {
+    actuales.current = { abribles, onAbrir, onNovedades }
+  })
+
+  const abrir = useCallback(
+    (notificacion: Notificacion) => {
+      setAbierto(false)
+      if (!notificacion.leida) {
+        setLista((actual) => actual.map((n) => (n.id === notificacion.id ? { ...n, leida: true } : n)))
+        setNoLeidas((cantidad) => Math.max(cantidad - 1, 0))
+        api.notificaciones.marcarLeidas(credenciales, [notificacion.id]).then(setNoLeidas).catch(() => {})
+      }
+      const id = notificacion.actividad.pendiente_id
+      if (id && actuales.current.abribles.has(id)) actuales.current.onAbrir(id)
+    },
+    [credenciales]
+  )
+
+  const cargar = useCallback(async () => {
+    try {
+      const datos = await api.notificaciones.listar(credenciales)
+      setLista(datos.notificaciones)
+      setNoLeidas(datos.no_leidas)
+      const nuevas = vistas.current ? datos.notificaciones.filter((n) => !n.leida && !vistas.current!.has(n.id)) : []
+      vistas.current = new Set(datos.notificaciones.map((n) => n.id))
+      if (nuevas.length === 0) return
+      // Si alguien cambió algo de uno, el tablero se pone al día.
+      actuales.current.onNovedades()
+      if (document.hidden && permisoActual() === "granted") {
+        for (const notificacion of nuevas.slice(0, 3)) {
+          const aviso = new Notification(`${notificacion.actividad.autor} ${describir(notificacion.actividad, { yo })}`, {
+            body: notificacion.actividad.datos?.extracto ?? "",
+            tag: notificacion.id,
+          })
+          aviso.onclick = () => {
+            window.focus()
+            abrir(notificacion)
+            aviso.close()
+          }
+        }
+      }
+    } catch (err) {
+      if (esNoAutorizado(err)) onSalir()
+    }
+  }, [credenciales, yo, abrir, onSalir])
+
+  useEffect(() => {
+    cargar()
+    const intervalo = window.setInterval(cargar, CADA_MS)
+    const alVolver = () => document.visibilityState === "visible" && cargar()
+    document.addEventListener("visibilitychange", alVolver)
+    return () => {
+      window.clearInterval(intervalo)
+      document.removeEventListener("visibilitychange", alVolver)
+    }
+  }, [cargar])
+
+  useEffect(() => {
+    document.title = noLeidas ? `(${noLeidas}) ${TITULO}` : TITULO
+    return () => {
+      document.title = TITULO
+    }
+  }, [noLeidas])
+
+  async function marcarTodas() {
+    setLista((actual) => actual.map((n) => ({ ...n, leida: true })))
+    setNoLeidas(0)
+    try {
+      setNoLeidas(await api.notificaciones.marcarLeidas(credenciales))
+    } catch (err) {
+      if (esNoAutorizado(err)) onSalir()
+    }
+  }
+
+  async function pedirPermiso() {
+    setPermiso(await Notification.requestPermission())
+  }
+
+  return (
+    <Popover open={abierto} onOpenChange={setAbierto}>
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="icon" className="relative" aria-label={noLeidas ? `Avisos: ${noLeidas} sin leer` : "Avisos"}>
+          <Bell />
+          {noLeidas > 0 && (
+            <span className="absolute top-1 right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] leading-none font-semibold text-white tabular-nums">
+              {noLeidas > 9 ? "9+" : noLeidas}
+            </span>
+          )}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-[min(24rem,calc(100vw-2rem))] gap-0 p-0">
+        <div className="flex min-h-12 items-center justify-between gap-2 border-b px-4 py-2">
+          <p className="m-0 font-medium">Avisos</p>
+          {noLeidas > 0 && (
+            <Button variant="ghost" size="xs" onClick={marcarTodas}>
+              <CheckCheck /> Marcar todo como leído
+            </Button>
+          )}
+        </div>
+        <ul className="m-0 max-h-[min(28rem,60svh)] list-none overflow-y-auto p-0">
+          {lista.length === 0 && (
+            <li className="px-6 py-8 text-center text-sm text-muted-foreground">
+              Sin avisos por ahora. Aquí verás lo que te asignen y los cambios o mensajes en tus pendientes.
+            </li>
+          )}
+          {lista.map((notificacion) => {
+            const { actividad } = notificacion
+            const autor = actividad.perfil_id ? perfilesPorId.get(actividad.perfil_id) : null
+            return (
+              <li key={notificacion.id} className="border-b last:border-b-0">
+                <button
+                  type="button"
+                  onClick={() => abrir(notificacion)}
+                  className={cn(
+                    "flex w-full gap-3 px-4 py-3 text-left outline-none hover:bg-accent focus-visible:bg-accent",
+                    !notificacion.leida && "bg-primary/8"
+                  )}
+                >
+                  {autor ? (
+                    <PerfilAvatar perfil={autor} size="sm" />
+                  ) : (
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                      <UsersRound className="size-3.5" />
+                    </span>
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm">
+                      <span className="font-medium">{actividad.autor}</span> {describir(actividad, { yo })}
+                    </span>
+                    {actividad.datos?.extracto && (
+                      <span className="mt-1 line-clamp-2 block text-xs text-muted-foreground">{actividad.datos.extracto}</span>
+                    )}
+                    <span className="mt-1 block text-xs text-muted-foreground/80">{haceCuanto(actividad.creado_en)}</span>
+                  </span>
+                  {!notificacion.leida && <span className="mt-1.5 size-2 shrink-0 rounded-full bg-primary" aria-label="Sin leer" />}
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+        {permiso === "default" && (
+          <div className="border-t p-3">
+            <Button variant="outline" size="sm" className="w-full" onClick={pedirPermiso}>
+              <BellRing /> Avisarme también con el navegador
+            </Button>
+          </div>
+        )}
+        {permiso === "denied" && (
+          <p className="m-0 border-t px-4 py-3 text-xs text-muted-foreground">
+            El navegador tiene bloqueados los avisos de esta página; actívalos en la configuración del sitio.
+          </p>
+        )}
+      </PopoverContent>
+    </Popover>
+  )
+}

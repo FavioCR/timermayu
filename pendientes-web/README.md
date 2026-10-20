@@ -7,6 +7,10 @@ Tablero de pendientes del equipo en `https://timer.practi.dev/pendientes/`. App 
 - Del tablero: campo con ícono (`InputGroup`), selector de proyecto que también crea (`Combobox` = `Popover` + `Command`), columnas vacías con `Empty` y dibujos propios (`ilustraciones.tsx`), menú de columna con "Agregar pendiente aquí" y "Borrar los hechos" (`AlertDialog`).
 - Al tocar una tarjeta se abre su detalle (`detalle-pendiente.tsx`) con la descripción en [BlockNote](https://www.blocknotejs.org) (MPL-2.0, variante shadcn): bloques con `/`, imágenes pegadas, arrastradas o subidas. El editor se carga aparte para que el tablero no lo espere.
 - Proyectos dentro de organizaciones (`proyectos-dialog.tsx`): el selector los agrupa por organización y crea nuevos dentro de la que se elija; los filtros van por organización y luego por proyecto.
+- Al marcar filtros, el formulario de "Agregar" toma ese proyecto y esa persona. Filtros y campos se guardan en `localStorage` (`pendientes.selecciones`) y siguen marcados al volver.
+- Cada pendiente tiene al costado de su detalle un chat (`chat-pendiente.tsx`, con `@nombre` para avisar a alguien) y su historial (`historial.tsx`). "Actividad" (`actividad-sheet.tsx`) muestra todo lo que pasó en el tablero.
+- La campana (`notificaciones.tsx`, solo al entrar con un perfil) avisa lo que te asignan, los cambios en lo que tienes asignado o creaste, y los mensajes en los pendientes donde participas o te mencionan con @nombre. Se consulta cada 30 s; con la pestaña en segundo plano y permiso, avisa también con una notificación del navegador. Con la página cerrada no hay avisos (no hay service worker).
+- Al crear un pendiente para otra persona sale un aviso (`sonner`) con un botón de WhatsApp, y el detalle tiene "Avisar por WhatsApp": abren `wa.me` con el mensaje y el enlace `?p=<id>` al pendiente. Con el teléfono guardado en Perfiles va directo a su chat; sin él, WhatsApp deja elegir a quién.
 - Los datos viven en `../pendientes-api`: SQLite en `DATA_DIR/pendientes.db` y las imágenes en `DATA_DIR/imagenes/` (solo PNG, JPG, GIF y WebP, hasta 10 MB; se leen con la misma contraseña).
 
 ## Desarrollo
