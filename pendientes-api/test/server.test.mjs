@@ -850,6 +850,11 @@ test('valida etiquetas, ajustes de IA y textos para la IA', () => {
   assert.throws(() => parseAjustesIA({ modelos: { openai: '' } }), { message: 'modelo_invalido' });
   assert.throws(() => parseAjustesIA({ instrucciones: 'x'.repeat(2001) }), { message: 'instrucciones_invalidas' });
   assert.deepEqual(parseAjustesIA({ tipo_automatico: false }), { tipo_automatico: false });
+  assert.deepEqual(parseAjustesIA({ redaccion: { proveedor: 'openai', modelo: ' gpt-6-chispa ' } }), { redaccion: { proveedor: 'openai', modelo: 'gpt-6-chispa' } });
+  assert.deepEqual(parseAjustesIA({ redaccion: null }), { redaccion: null });
+  assert.throws(() => parseAjustesIA({ redaccion: { proveedor: 'anthropic', modelo: 'x' } }), { message: 'proveedor_invalido' });
+  assert.throws(() => parseAjustesIA({ redaccion: { proveedor: 'openai' } }), { message: 'modelo_invalido' });
+  assert.throws(() => parseAjustesIA({ redaccion: 'openai' }), { message: 'proveedor_invalido' });
   assert.throws(() => parseAjustesIA({ tipo_automatico: 'no' }), { message: 'tipo_automatico_invalido' });
   assert.deepEqual(parsePedidoModelos({ proveedor: 'gemini', clave: ' AIza-1 ' }), { proveedor: 'gemini', clave: 'AIza-1' });
   assert.deepEqual(parsePedidoModelos({ proveedor: 'openrouter' }), { proveedor: 'openrouter', clave: null });
@@ -1217,6 +1222,42 @@ test('IA: redacta mejor un borrador del chat o de la descripción, con el pendie
   assert.equal((await redactar(diego, { texto: 'hola', donde: 'chat', pendiente_id: ajeno.id })).status, 404);
   // (El pendiente privado se creó sin tipo y la IA eligió uno: ese pedido no es de redactar.)
   assert.equal(pedidos.filter((p) => p.response_format.schema.required.join() === 'texto').length, 4);
+});
+
+test('IA: "Escribir con IA" puede usar otro proveedor y modelo que el resto', async (t) => {
+  const proveedor = await startProveedor(t, (ruta) => {
+    if (ruta === '/v1/responses') return { json: { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ texto: 'Desde OpenAI' }) }] }] } };
+    const texto = JSON.stringify({ texto: 'Desde Gemini', pendientes: [] });
+    return { json: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: texto }] }] } };
+  });
+  const { data, entrarComo } = await startServer(t, { basesIA: { gemini: proveedor.url, openai: proveedor.url } });
+  const diego = await entrarComo('Diego');
+  const { pendiente } = await diego.data('POST', '', { texto: 'Algo', tipo: 'chore' });
+  const redactar = async () => (await diego.data('POST', '/ia/redactar', { texto: 'hola', donde: 'chat', pendiente_id: pendiente.id }));
+
+  // Solo para redactar: no hace falta haber elegido la IA del equipo.
+  const { ia } = await data('PUT', '/ia', { claves: { openai: 'sk-falsa-redactar' }, redaccion: { proveedor: 'openai', modelo: 'gpt-6-chispa' } });
+  assert.deepEqual([ia.lista, ia.redaccion], [false, { proveedor: 'openai', modelo: 'gpt-6-chispa', lista: true }]);
+  assert.equal((await redactar()).redaccion.texto, 'Desde OpenAI');
+  const alOpenAI = proveedor.pedidos.at(-1);
+  assert.deepEqual([alOpenAI.ruta, alOpenAI.cuerpo.model, alOpenAI.headers.authorization], ['/v1/responses', 'gpt-6-chispa', 'Bearer sk-falsa-redactar']);
+
+  // Lo demás sigue con la del equipo; cambiarla no toca la de redactar.
+  await data('PUT', '/ia', { proveedor: 'gemini', claves: { gemini: 'AIza-falsa-equipo' }, modelos: { openai: 'gpt-6-astra' } });
+  await diego.data('POST', '/ia/sugerir', { texto: 'algo' });
+  assert.equal(proveedor.pedidos.at(-1).ruta, '/v1beta/interactions');
+  assert.equal((await redactar()).redaccion.texto, 'Desde OpenAI');
+  assert.equal(proveedor.pedidos.at(-1).cuerpo.model, 'gpt-6-chispa');
+
+  // Sin la clave de su proveedor no redacta (aunque la del equipo sí tenga), y lo dice.
+  const { ia: sinClave } = await data('PUT', '/ia', { claves: { openai: null } });
+  assert.equal(sinClave.redaccion.lista, false);
+  assert.equal((await redactar()).error, 'ia_sin_clave');
+
+  // null: vuelve a usar la del equipo.
+  assert.equal((await data('PUT', '/ia', { redaccion: null })).ia.redaccion, null);
+  assert.equal((await redactar()).redaccion.texto, 'Desde Gemini');
+  assert.equal(proveedor.pedidos.at(-1).cuerpo.model, 'gemini-3.5-flash-lite');
 });
 
 test('IA: los errores del proveedor se traducen y no repiten la clave', async (t) => {

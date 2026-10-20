@@ -616,6 +616,16 @@ export function parseAjustesIA(input) {
     if (typeof input.tipo_automatico !== 'boolean') throw httpError(422, 'tipo_automatico_invalido');
     changes.tipo_automatico = input.tipo_automatico;
   }
+  // La IA de "Escribir con IA" (/ia): un proveedor y un modelo propios, o null para usar la del equipo.
+  if ('redaccion' in input) {
+    const { redaccion } = input;
+    if (redaccion !== null) {
+      if (typeof redaccion !== 'object' || !Object.hasOwn(PROVEEDORES_IA, redaccion?.proveedor)) throw httpError(422, 'proveedor_invalido');
+      const { modelo } = redaccion;
+      if (typeof modelo !== 'string' || !/^\S+$/.test(modelo.trim()) || modelo.trim().length > MAX_MODELO_IA) throw httpError(422, 'modelo_invalido');
+    }
+    changes.redaccion = redaccion && { proveedor: redaccion.proveedor, modelo: redaccion.modelo.trim() };
+  }
   for (const [campo, maximo, error] of [['modelos', MAX_MODELO_IA, 'modelo_invalido'], ['claves', MAX_CLAVE_IA, 'clave_invalida']]) {
     if (!(campo in input)) continue;
     const valores = input[campo];
@@ -669,12 +679,13 @@ export function parsePedidoModelos(input) {
 }
 
 // Lo que se muestra de la IA: de cada clave, solo si hay una y sus últimos 4 caracteres.
-export function iaPublica({ proveedor, instrucciones, tipo_automatico: tipoAutomatico, modelos, claves }) {
+export function iaPublica({ proveedor, instrucciones, tipo_automatico: tipoAutomatico, redaccion, modelos, claves }) {
   return {
     proveedor,
     instrucciones,
     tipo_automatico: tipoAutomatico,
     lista: Boolean(proveedor && claves[proveedor]),
+    redaccion: redaccion && { ...redaccion, lista: Boolean(claves[redaccion.proveedor]) },
     proveedores: Object.entries(PROVEEDORES_IA).map(([id, { nombre, modelo }]) => ({
       id,
       nombre,
@@ -958,6 +969,8 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         instrucciones: ajustes.instrucciones ?? null,
         // Si un pendiente se crea sin tipo, la IA se lo pone (salvo que el equipo lo apague).
         tipo_automatico: ajustes.tipo_automatico ?? true,
+        // "Escribir con IA" puede usar otra IA (por ejemplo, un modelo más rápido); null = la de arriba.
+        redaccion: ajustes.redaccion ?? null,
         modelos: ajustes.modelos ?? {},
         claves: ajustes.claves ?? {},
       };
@@ -975,6 +988,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         proveedor: 'proveedor' in changes ? changes.proveedor : actual.proveedor,
         instrucciones: 'instrucciones' in changes ? changes.instrucciones : actual.instrucciones,
         tipo_automatico: 'tipo_automatico' in changes ? changes.tipo_automatico : actual.tipo_automatico,
+        redaccion: 'redaccion' in changes ? changes.redaccion : actual.redaccion,
         modelos: juntar(actual.modelos, changes.modelos),
         claves: juntar(actual.claves, changes.claves),
       };
@@ -1046,7 +1060,8 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     async redactar(yo, { texto, donde, pendiente_id: pendienteId }, bases) {
       const item = pendiente(yo, pendienteId);
       if (!item) return null;
-      const { proveedor, modelos, claves } = this.ajustesIA();
+      const { redaccion, modelos, claves, ...equipo } = this.ajustesIA();
+      const proveedor = redaccion?.proveedor ?? equipo.proveedor;
       if (!proveedor) throw httpError(422, 'ia_no_configurada');
       if (!claves[proveedor]) throw httpError(422, 'ia_sin_clave');
       const personas = db.prepare('SELECT id, nombre FROM perfiles ORDER BY creado_en, rowid').all();
@@ -1070,7 +1085,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       });
       const redactado = await pedirRedaccion({
         proveedor,
-        modelo: modelos[proveedor] ?? PROVEEDORES_IA[proveedor].modelo,
+        modelo: redaccion?.modelo ?? modelos[proveedor] ?? PROVEEDORES_IA[proveedor].modelo,
         clave: claves[proveedor],
         base: bases[proveedor],
         sistema,

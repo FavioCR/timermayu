@@ -5,7 +5,7 @@ import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Field, FieldContent, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field"
+import { Field, FieldContent, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSeparator, FieldSet } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Switch } from "@/components/ui/switch"
@@ -38,7 +38,8 @@ type ListaModelos =
 
 // Los modelos disponibles se buscan solos: con la clave guardada al elegir el proveedor, o con la que se pega o escribe
 // apenas se deja de escribir (así también se sabe si la clave sirve). OpenRouter los lista sin clave.
-function useModelos(credenciales: string, proveedor: ProveedorIA, escrita: string, hayGuardada: boolean): ListaModelos {
+// Con `activo` en false no se busca nada (la sección que la usa está cerrada).
+function useModelos(credenciales: string, proveedor: ProveedorIA, escrita: string, hayGuardada: boolean, activo = true): ListaModelos {
   const nueva = escrita.trim()
   const [quieta, setQuieta] = useState(nueva)
   useEffect(() => {
@@ -47,7 +48,9 @@ function useModelos(credenciales: string, proveedor: ProveedorIA, escrita: strin
   }, [nueva])
 
   // Qué se pide: proveedor y clave nueva (vacía = la guardada). null = nada que pedir todavía.
-  const pedido = nueva
+  const pedido = !activo
+    ? null
+    : nueva
     ? nueva === quieta && nueva.length >= MIN_CLAVE
       ? `${proveedor}|${nueva}`
       : null
@@ -111,13 +114,113 @@ function EstadoModelos({ lista, nombre }: { lista: ListaModelos; nombre: string 
   )
 }
 
+// Si el modelo elegido no está entre los que da la clave y el recomendado sí, queda el recomendado.
+function modeloValido(lista: ListaModelos, elegido: string, porDefecto: string) {
+  const disponibles = lista.estado === "lista" ? lista.modelos : []
+  return disponibles.length && !disponibles.some((m) => m.id === elegido) && disponibles.some((m) => m.id === porDefecto) ? porDefecto : elegido
+}
+
+type DatosProveedor = AjustesIA["proveedores"][number]
+
+// Gemini, OpenAI u OpenRouter, con el estado de su clave.
+function ElegirProveedor({
+  nombre,
+  proveedores,
+  valor,
+  onCambiar,
+  estadoClave,
+}: {
+  nombre: string
+  proveedores: DatosProveedor[]
+  valor: ProveedorIA
+  onCambiar: (proveedor: ProveedorIA) => void
+  estadoClave: (proveedor: DatosProveedor) => string
+}) {
+  return (
+    <div role="radiogroup" aria-label={nombre} className="grid gap-2 sm:grid-cols-3">
+      {proveedores.map((p) => (
+        <button
+          key={p.id}
+          type="button"
+          role="radio"
+          aria-checked={valor === p.id}
+          onClick={() => onCambiar(p.id)}
+          className={cn(
+            "flex flex-col items-start gap-1 border bg-card px-3 py-2.5 text-left text-sm outline-none transition-colors hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50",
+            valor === p.id && "border-primary bg-primary/15 ring-3 ring-primary/25 hover:bg-primary/20"
+          )}
+        >
+          <span className="font-medium">{p.nombre}</span>
+          <span className="flex items-center gap-1 text-xs text-muted-foreground">
+            <KeyRound className="size-3" />
+            {estadoClave(p)}
+          </span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// La clave de un proveedor. La guardada se ve como puntitos; al entrar al campo quedan seleccionados y lo que se pegue
+// la reemplaza.
+function CampoClave({
+  id,
+  datos,
+  escrita,
+  quitada,
+  onEscribir,
+  onQuitar,
+}: {
+  id: string
+  datos: DatosProveedor
+  escrita: string | undefined
+  quitada: boolean
+  onEscribir: (valor: string | undefined) => void
+  onQuitar: () => void
+}) {
+  const ayuda = AYUDA[datos.id]
+  const enPuntitos = datos.tiene_clave && !quitada && escrita === undefined
+  return (
+    <Field>
+      <FieldLabel htmlFor={id}>Clave de {datos.nombre}</FieldLabel>
+      <Input
+        id={id}
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={ayuda.ejemplo}
+        value={enPuntitos ? GUARDADA : (escrita ?? "")}
+        onFocus={(event) => enPuntitos && event.currentTarget.select()}
+        onChange={(event) => onEscribir(event.target.value.replaceAll("•", ""))}
+        onBlur={() => !escrita?.trim() && onEscribir(undefined)}
+        maxLength={500}
+      />
+      <FieldDescription className="flex flex-wrap items-center gap-x-1">
+        {enPuntitos && <>Guardada, termina en {datos.clave_final}; pega otra para cambiarla. </>}
+        Créala en{" "}
+        <a href={ayuda.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-0.5">
+          {ayuda.sitio} <ExternalLink className="size-3" />
+        </a>
+        . {ayuda.nota}
+        {datos.tiene_clave && (
+          <Button type="button" variant="link" size="sm" className="h-auto p-0 text-destructive" onClick={onQuitar}>
+            {quitada ? "No quitar la clave" : "Quitar la clave guardada"}
+          </Button>
+        )}
+      </FieldDescription>
+    </Field>
+  )
+}
+
 // Combobox de shadcn para el modelo: la lista viene del proveedor, y también se puede escribir cualquier nombre.
 function ModeloCombobox({
+  id,
   lista,
   valor,
   porDefecto,
   onCambiar,
 }: {
+  id: string
   lista: ListaModelos
   valor: string
   porDefecto: string
@@ -139,7 +242,7 @@ function ModeloCombobox({
   return (
     <Popover open={abierto} onOpenChange={setAbierto} modal>
       <PopoverTrigger asChild>
-        <Button id="ia-modelo" variant="outline" role="combobox" aria-expanded={abierto} className="w-full justify-between font-normal">
+        <Button id={id} variant="outline" role="combobox" aria-expanded={abierto} className="w-full justify-between font-normal">
           <span className="truncate font-mono text-sm">{valor}</span>
           <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
             {valor === porDefecto && "recomendado"}
@@ -213,36 +316,61 @@ function Formulario({
   const [quitar, setQuitar] = useState<Partial<Record<ProveedorIA, boolean>>>({})
   const [instrucciones, setInstrucciones] = useState(ajustes.instrucciones ?? "")
   const [tipoAutomatico, setTipoAutomatico] = useState(ajustes.tipo_automatico)
+  // "Escribir con IA" (/ia) puede usar otra IA, por ejemplo un modelo más rápido. Empieza con lo guardado o, si no hay,
+  // con el modelo de cada proveedor.
+  const [otraRedaccion, setOtraRedaccion] = useState(ajustes.redaccion !== null)
+  const [proveedorRedaccion, setProveedorRedaccion] = useState<ProveedorIA>(ajustes.redaccion?.proveedor ?? ajustes.proveedor ?? "gemini")
+  const [modelosRedaccion, setModelosRedaccion] = useState(
+    () =>
+      Object.fromEntries(
+        ajustes.proveedores.map((p) => [p.id, ajustes.redaccion?.proveedor === p.id ? ajustes.redaccion.modelo : p.modelo])
+      ) as Record<ProveedorIA, string>
+  )
   const [guardando, setGuardando] = useState(false)
   const [error, setError] = useState("")
 
-  const datos = ajustes.proveedores.find((p) => p.id === proveedor)!
-  const ayuda = AYUDA[proveedor]
-  const conClave = (id: ProveedorIA) => Boolean(claves[id]?.trim()) || (ajustes.proveedores.find((p) => p.id === id)!.tiene_clave && !quitar[id])
-  const hayGuardada = datos.tiene_clave && !quitar[proveedor]
-  // Con una clave guardada y sin tocar, el campo muestra puntitos.
-  const enPuntitos = hayGuardada && claves[proveedor] === undefined
-  const lista = useModelos(credenciales, proveedor, claves[proveedor] ?? "", hayGuardada)
+  const datosDe = (id: ProveedorIA) => ajustes.proveedores.find((p) => p.id === id)!
+  const datos = datosDe(proveedor)
+  const conClave = (id: ProveedorIA) => Boolean(claves[id]?.trim()) || (datosDe(id).tiene_clave && !quitar[id])
+  const estadoClave = (p: DatosProveedor) => (conClave(p.id) ? (claves[p.id]?.trim() ? "Clave nueva" : `Clave ••••${p.clave_final}`) : "Sin clave")
+  const lista = useModelos(credenciales, proveedor, claves[proveedor] ?? "", datos.tiene_clave && !quitar[proveedor])
+  const modelo = modeloValido(lista, modelos[proveedor], datos.modelo_por_defecto)
 
-  // Si el modelo elegido no está entre los que da la clave y el recomendado sí, queda el recomendado.
-  const disponibles = lista.estado === "lista" ? lista.modelos : []
-  const modelo =
-    disponibles.length && !disponibles.some((m) => m.id === modelos[proveedor]) && disponibles.some((m) => m.id === datos.modelo_por_defecto)
-      ? datos.modelo_por_defecto
-      : modelos[proveedor]
+  // Con el mismo proveedor de arriba, la lista de modelos es la misma.
+  const datosRedaccion = datosDe(proveedorRedaccion)
+  const mismoProveedor = proveedorRedaccion === proveedor
+  const listaAparte = useModelos(
+    credenciales,
+    proveedorRedaccion,
+    claves[proveedorRedaccion] ?? "",
+    datosRedaccion.tiene_clave && !quitar[proveedorRedaccion],
+    otraRedaccion && !mismoProveedor
+  )
+  const listaRedaccion = mismoProveedor ? lista : listaAparte
+  const modeloRedaccion = modeloValido(listaRedaccion, modelosRedaccion[proveedorRedaccion], datosRedaccion.modelo_por_defecto)
+  const redactaCon = otraRedaccion ? datosRedaccion : datos
 
-  function escribirClave(valor: string | undefined) {
+  function escribirClave(id: ProveedorIA, valor: string | undefined) {
     setClaves((actuales) => {
       const nuevas = { ...actuales }
-      if (valor === undefined) delete nuevas[proveedor]
-      else nuevas[proveedor] = valor
+      if (valor === undefined) delete nuevas[id]
+      else nuevas[id] = valor
       return nuevas
     })
   }
 
+  const alternarQuitar = (id: ProveedorIA) => setQuitar((actuales) => ({ ...actuales, [id]: !actuales[id] }))
+
   async function guardar(event: FormEvent) {
     event.preventDefault()
-    const cambios: CambiosIA = { proveedor, instrucciones: instrucciones.trim() || null, tipo_automatico: tipoAutomatico, modelos: {}, claves: {} }
+    const cambios: CambiosIA = {
+      proveedor,
+      instrucciones: instrucciones.trim() || null,
+      tipo_automatico: tipoAutomatico,
+      redaccion: otraRedaccion ? { proveedor: proveedorRedaccion, modelo: modeloRedaccion.trim() } : null,
+      modelos: {},
+      claves: {},
+    }
     const elegidos = { ...modelos, [proveedor]: modelo }
     for (const p of ajustes.proveedores) {
       if (elegidos[p.id] !== p.modelo) cambios.modelos![p.id] = elegidos[p.id] === p.modelo_por_defecto ? null : elegidos[p.id]
@@ -265,69 +393,23 @@ function Formulario({
       <FieldGroup>
         <FieldSet>
           <FieldLegend variant="label">Proveedor</FieldLegend>
-          <div role="radiogroup" aria-label="Proveedor" className="grid gap-2 sm:grid-cols-3">
-            {ajustes.proveedores.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                role="radio"
-                aria-checked={proveedor === p.id}
-                onClick={() => setProveedor(p.id)}
-                className={cn(
-                  "flex flex-col items-start gap-1 border bg-card px-3 py-2.5 text-left text-sm outline-none transition-colors hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50",
-                  proveedor === p.id && "border-primary bg-primary/15 ring-3 ring-primary/25 hover:bg-primary/20"
-                )}
-              >
-                <span className="font-medium">{p.nombre}</span>
-                <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                  <KeyRound className="size-3" />
-                  {conClave(p.id) ? (claves[p.id]?.trim() ? "Clave nueva" : `Clave ••••${p.clave_final}`) : "Sin clave"}
-                </span>
-              </button>
-            ))}
-          </div>
+          <ElegirProveedor nombre="Proveedor" proveedores={ajustes.proveedores} valor={proveedor} onCambiar={setProveedor} estadoClave={estadoClave} />
         </FieldSet>
 
-        <Field>
-          <FieldLabel htmlFor="ia-clave">Clave de {datos.nombre}</FieldLabel>
-          <Input
-            id="ia-clave"
-            type="password"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder={ayuda.ejemplo}
-            // La guardada se ve como puntitos; al entrar al campo quedan seleccionados y lo que se pegue la reemplaza.
-            value={enPuntitos ? GUARDADA : (claves[proveedor] ?? "")}
-            onFocus={(event) => enPuntitos && event.currentTarget.select()}
-            onChange={(event) => escribirClave(event.target.value.replaceAll("•", ""))}
-            onBlur={() => !claves[proveedor]?.trim() && escribirClave(undefined)}
-            maxLength={500}
-          />
-          <FieldDescription className="flex flex-wrap items-center gap-x-1">
-            {enPuntitos && <>Guardada, termina en {datos.clave_final}; pega otra para cambiarla. </>}
-            Créala en{" "}
-            <a href={ayuda.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-0.5">
-              {ayuda.sitio} <ExternalLink className="size-3" />
-            </a>
-            . {ayuda.nota}
-            {datos.tiene_clave && (
-              <Button
-                type="button"
-                variant="link"
-                size="sm"
-                className="h-auto p-0 text-destructive"
-                onClick={() => setQuitar((actuales) => ({ ...actuales, [proveedor]: !actuales[proveedor] }))}
-              >
-                {quitar[proveedor] ? "No quitar la clave" : "Quitar la clave guardada"}
-              </Button>
-            )}
-          </FieldDescription>
-        </Field>
+        <CampoClave
+          id="ia-clave"
+          datos={datos}
+          escrita={claves[proveedor]}
+          quitada={Boolean(quitar[proveedor])}
+          onEscribir={(valor) => escribirClave(proveedor, valor)}
+          onQuitar={() => alternarQuitar(proveedor)}
+        />
 
         <Field>
           <FieldLabel htmlFor="ia-modelo">Modelo</FieldLabel>
           <ModeloCombobox
             key={proveedor}
+            id="ia-modelo"
             lista={lista}
             valor={modelo}
             porDefecto={datos.modelo_por_defecto}
@@ -358,14 +440,68 @@ function Formulario({
             value={instrucciones}
             onChange={(event) => setInstrucciones(event.target.value)}
           />
-          <FieldDescription>Valen para todos los proveedores.</FieldDescription>
+          <FieldDescription>Valen para todos los proveedores al crear pendientes.</FieldDescription>
         </Field>
+
+        <FieldSeparator />
+
+        <FieldSet>
+          <FieldLegend variant="label">Escribir con IA (/ia en el chat y la descripción)</FieldLegend>
+          <Field orientation="horizontal">
+            <Switch id="ia-otra-redaccion" checked={otraRedaccion} onCheckedChange={setOtraRedaccion} />
+            <FieldContent>
+              <FieldLabel htmlFor="ia-otra-redaccion">Usar otra IA para redactar</FieldLabel>
+              <FieldDescription>
+                {otraRedaccion
+                  ? "Conviene un modelo rápido: si tarda más de 11 segundos, se corta."
+                  : `Ahora usa la de arriba (${datos.nombre}, ${modelo}).`}
+              </FieldDescription>
+            </FieldContent>
+          </Field>
+          {otraRedaccion && (
+            <>
+              <ElegirProveedor
+                nombre="Proveedor para redactar"
+                proveedores={ajustes.proveedores}
+                valor={proveedorRedaccion}
+                onCambiar={setProveedorRedaccion}
+                estadoClave={estadoClave}
+              />
+              {/* La clave es la misma del proveedor: aquí solo se pide si es otro que el de arriba. */}
+              {!mismoProveedor && (
+                <CampoClave
+                  id="ia-clave-redaccion"
+                  datos={datosRedaccion}
+                  escrita={claves[proveedorRedaccion]}
+                  quitada={Boolean(quitar[proveedorRedaccion])}
+                  onEscribir={(valor) => escribirClave(proveedorRedaccion, valor)}
+                  onQuitar={() => alternarQuitar(proveedorRedaccion)}
+                />
+              )}
+              <Field>
+                <FieldLabel htmlFor="ia-modelo-redaccion">Modelo para redactar</FieldLabel>
+                <ModeloCombobox
+                  key={proveedorRedaccion}
+                  id="ia-modelo-redaccion"
+                  lista={listaRedaccion}
+                  valor={modeloRedaccion}
+                  porDefecto={datosRedaccion.modelo_por_defecto}
+                  onCambiar={(modelo) => setModelosRedaccion((actuales) => ({ ...actuales, [proveedorRedaccion]: modelo }))}
+                />
+                <FieldDescription>
+                  <EstadoModelos lista={listaRedaccion} nombre={datosRedaccion.nombre} />
+                </FieldDescription>
+              </Field>
+            </>
+          )}
+        </FieldSet>
       </FieldGroup>
 
       <p className="m-0 border-l-2 border-primary/50 pl-3 text-xs text-muted-foreground">
         El texto y las imágenes que pegues, con los nombres de las personas, proyectos y etiquetas, se envían a {datos.nombre} para proponer los
-        pendientes{tipoAutomatico ? "; para elegir el tipo, el título y el proyecto de lo que se cree sin tipo" : ""}. Las claves quedan en el
-        servidor del tablero y nunca se vuelven a mostrar.
+        pendientes{tipoAutomatico ? "; para elegir el tipo, el título y el proyecto de lo que se cree sin tipo" : ""}. Lo que escribas con /ia, con el
+        título, la descripción y los últimos mensajes del pendiente, va a {redactaCon.nombre}. Las claves quedan en el servidor del tablero y nunca
+        se vuelven a mostrar.
       </p>
 
       {error && (
@@ -378,7 +514,7 @@ function Formulario({
         <Button type="button" variant="outline" onClick={onCancelar}>
           Cancelar
         </Button>
-        <Button type="submit" disabled={guardando || !modelo?.trim()}>
+        <Button type="submit" disabled={guardando || !modelo?.trim() || (otraRedaccion && !modeloRedaccion?.trim())}>
           {guardando ? <LoaderCircle className="animate-spin" /> : <Sparkles />} {guardando ? "Guardando…" : "Guardar"}
         </Button>
       </DialogFooter>
@@ -386,7 +522,8 @@ function Formulario({
   )
 }
 
-// Qué IA usa "Crear con IA": Gemini, OpenAI u OpenRouter, con su clave y su modelo. Es del equipo: vale para todos.
+// Qué IA usa "Crear con IA" (y, si no se elige otra, "Escribir con IA"): Gemini, OpenAI u OpenRouter, con su clave y su
+// modelo. Es del equipo: vale para todos.
 export function IaDialog({
   abierto,
   onAbiertoChange,
@@ -431,7 +568,8 @@ export function IaDialog({
             <Sparkles className="size-5 text-primary" /> Inteligencia artificial
           </DialogTitle>
           <DialogDescription>
-            La que usa «Crear con IA» para proponer pendientes a partir de un texto y la que le pone tipo a lo nuevo. Vale para todo el equipo.
+            La que usa «Crear con IA» para proponer pendientes a partir de un texto, la que le pone tipo a lo nuevo y la que redacta con /ia. Vale
+            para todo el equipo.
           </DialogDescription>
         </DialogHeader>
         {ajustes ? (

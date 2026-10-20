@@ -45,6 +45,8 @@ export type AjustesIA = {
   tipo_automatico: boolean
   // Hay proveedor elegido y tiene clave.
   lista: boolean
+  // La IA de "Escribir con IA" (/ia) si es otra que la de arriba; `lista` dice si su proveedor tiene clave.
+  redaccion: { proveedor: ProveedorIA; modelo: string; lista: boolean } | null
   proveedores: {
     id: ProveedorIA
     nombre: string
@@ -60,6 +62,7 @@ export type CambiosIA = {
   proveedor?: ProveedorIA | null
   instrucciones?: string | null
   tipo_automatico?: boolean
+  redaccion?: { proveedor: ProveedorIA; modelo: string } | null
   modelos?: Partial<Record<ProveedorIA, string | null>>
   claves?: Partial<Record<ProveedorIA, string | null>>
 }

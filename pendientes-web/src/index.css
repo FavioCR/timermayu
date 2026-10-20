@@ -135,6 +135,13 @@
   html {
     @apply font-sans;
     }
+  /* En computadoras (pantallas HD y Full HD) todo un poco más chico, como alejar un paso en el navegador (90 %): las
+     medidas de Tailwind van en rem, así que bajan juntas las letras y los espacios. Celulares y tablets quedan igual. */
+  @media (min-width: 1024px) {
+    html {
+      font-size: 90%;
+      }
+    }
   /* Barras de desplazamiento con los colores del tema (finas, del color del borde), también en los paneles. */
   :root {
     color-scheme: light;
@@ -163,6 +170,10 @@
   ::-webkit-scrollbar-thumb:hover {
     background-color: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
     }
+}
+/* BlockNote fija la letra en 16px: que siga la del resto (y se achique con ella en computadoras). */
+.bn-container .bn-default-styles {
+  font-size: 1rem;
 }
 /* El editor de la descripción toma los colores del panel en vez de su propio fondo gris. */
 .bn-root.bn-container[data-color-scheme] {
