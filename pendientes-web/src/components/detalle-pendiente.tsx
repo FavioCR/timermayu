@@ -21,6 +21,7 @@ import {
   type CambiosPendiente,
   type Estado,
   type Etiqueta,
+  type OpcionesRedaccion,
   type Pendiente,
   type Perfil,
   type Proyecto,
@@ -222,9 +223,9 @@ function Contenido({
   }
 
   // Lo que pide /ia en la descripción.
-  async function redactarDescripcion(borrador: string) {
+  async function redactarDescripcion(borrador: string, opciones?: OpcionesRedaccion) {
     try {
-      return await api.ia.redactar(credenciales, id, "descripcion", borrador)
+      return await api.ia.redactar(credenciales, id, "descripcion", borrador, opciones)
     } catch (err) {
       if (esNoAutorizado(err)) onSalir()
       throw err

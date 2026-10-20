@@ -139,6 +139,16 @@ export function instruccionesApuntes({ curso, titulo, contexto }) {
   ].join('\n');
 }
 
+// Al reescribir lo que se seleccionó en el editor: solo el reemplazo de ese fragmento y, si viene, cómo reescribirlo.
+export function indicacionesDeSeleccion({ seleccion, indicacion }) {
+  return [
+    ...(seleccion
+      ? ['- El borrador es un fragmento que la persona seleccionó en su texto: devuelve solo lo que lo reemplaza, en la misma forma (si es parte de una frase o de un párrafo, sin saltos de línea ni Markdown; si son varias líneas o una lista, conserva esa forma).']
+      : []),
+    ...(indicacion ? [`- Reescríbelo siguiendo esta indicación de la persona: «${indicacion}».`] : []),
+  ];
+}
+
 // Cada imagen va después de su rótulo («Imagen 1:»…), para que la IA diga cuáles son de cada pendiente.
 const conRotulos = (imagenes, rotulo, parte) => imagenes.flatMap((imagen, i) => [rotulo(`Imagen ${i + 1}:`), parte(imagen)]);
 

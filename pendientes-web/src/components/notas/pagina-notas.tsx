@@ -69,6 +69,7 @@ import {
 import { useSubidas } from "@/hooks/use-subidas"
 import { api, esNoAutorizado, mensajeDeError, type Usuario } from "@/lib/api"
 import { haceCuanto } from "@/lib/actividad"
+import { APARIENCIA_NORMAL, aplicarApariencia } from "@/lib/apariencia"
 import {
   direccionDe,
   lugarDeLaDireccion,
@@ -131,6 +132,8 @@ export default function PaginaNotas({ credenciales, onSalir }: { credenciales: s
       .then(async (yo) => {
         if (!vigente) return
         setUsuario(yo)
+        // La fuente y el tamaño que eligió en el tablero (por si los cambió en otro dispositivo).
+        aplicarApariencia(yo.apariencia ?? APARIENCIA_NORMAL)
         if (!yo.notas) return
         const datos = await notasApi.arbol(credenciales)
         if (vigente) setArbol(datos)

@@ -9,7 +9,8 @@
 
 @theme inline {
     --font-heading: var(--font-sans);
-    --font-sans: 'Geist Variable', sans-serif;
+    /* --fuente y --escala-letra las pone la apariencia que elige cada persona (lib/apariencia.ts). */
+    --font-sans: var(--fuente, 'Geist Variable', sans-serif);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -132,14 +133,16 @@
   button:not(:disabled), [role="button"]:not(:disabled) {
     cursor: pointer;
     }
+  /* Las medidas de Tailwind van en rem: cambiar la letra base agranda o achica juntas las letras y los espacios. */
   html {
     @apply font-sans;
+    font-size: calc(100% * var(--escala-letra, 1));
     }
-  /* En computadoras (pantallas HD y Full HD) todo un poco más chico, como alejar un paso en el navegador (90 %): las
-     medidas de Tailwind van en rem, así que bajan juntas las letras y los espacios. Celulares y tablets quedan igual. */
+  /* En computadoras (pantallas HD y Full HD) todo un poco más chico, como alejar un paso en el navegador (90 %).
+     Celulares y tablets quedan igual. */
   @media (min-width: 1024px) {
     html {
-      font-size: 90%;
+      font-size: calc(90% * var(--escala-letra, 1));
       }
     }
   /* Barras de desplazamiento con los colores del tema (finas, del color del borde), también en los paneles. */
@@ -171,9 +174,14 @@
     background-color: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
     }
 }
-/* BlockNote fija la letra en 16px: que siga la del resto (y se achique con ella en computadoras). */
+/* BlockNote fija su letra (16px, Inter): que siga la del resto, con la fuente y el tamaño que elija cada persona. */
+/* Con dos clases, para ganarle a sus reglas aunque su CSS se cargue después (el editor se carga aparte). */
+.bn-root.bn-container {
+  --bn-font-family: var(--fuente, 'Geist Variable', sans-serif);
+}
 .bn-container .bn-default-styles {
   font-size: 1rem;
+  font-family: var(--bn-font-family);
 }
 /* El editor de la descripción toma los colores del panel en vez de su propio fondo gris. */
 .bn-root.bn-container[data-color-scheme] {

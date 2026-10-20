@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  indicacionesDeSeleccion,
   instruccionesApuntes,
   instruccionesIA,
   instruccionesRedaccion,
@@ -52,6 +53,12 @@ const MAX_TEXTO_IA = 20000;
 // Lo que se manda a redactar, lo que vuelve para la descripción y cuánto de ella va de contexto.
 const MAX_REDACCION = 4000;
 const MAX_CONTEXTO_REDACCION = 1500;
+// Cómo reescribir lo seleccionado ("más corto", "en inglés"…).
+const MAX_INDICACION = 300;
+// La fuente y el tamaño de letra de cada perfil: las fuentes que ofrece el tablero y el tamaño en % del normal.
+const FUENTES = ['geist', 'sistema', 'inter', 'roboto', 'nunito', 'atkinson', 'lexend', 'serif'];
+const TAMANO_MIN = 75;
+const TAMANO_MAX = 150;
 const MAX_INSTRUCCIONES_IA = 2000;
 const MAX_CLAVE_IA = 500;
 const MAX_MODELO_IA = 200;
@@ -93,6 +100,7 @@ const UUID = '([0-9a-f-]{36})';
 const API_PATH = '/api/pendientes';
 const ORDER_PATH = '/api/pendientes/orden';
 const YO_PATH = '/api/pendientes/yo';
+const APARIENCIA_PATH = '/api/pendientes/yo/apariencia';
 const PERFILES_PATH = '/api/pendientes/perfiles';
 const ORGANIZACIONES_PATH = '/api/pendientes/organizaciones';
 const PROYECTOS_PATH = '/api/pendientes/proyectos';
@@ -130,7 +138,7 @@ const IMAGENES_DE_NOTA_PATH = new RegExp(`^/api/pendientes/notas/${UUID}/imagene
 const IMAGEN_DE_NOTA_PATH = new RegExp(`^/api/pendientes/notas/imagenes/${UUID}$`);
 const RECURSO_PATH = new RegExp(`^/api/pendientes/notas/recursos/${UUID}$`);
 const PARTES_DE_RECURSO_PATH = new RegExp(`^/api/pendientes/notas/recursos/${UUID}/partes$`);
-const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
+const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
   ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, ETIQUETA_PATH,
@@ -735,17 +743,31 @@ export function parseSugerencia(input) {
   return { texto, imagenes, proyecto_id: 'proyecto_id' in input ? idOpcional(input, 'proyecto_id', 'proyecto_invalido') : null };
 }
 
-// En el chat o la descripción de un pendiente (pendiente_id), o en una nota (nota_id).
+// En el chat o la descripción de un pendiente (pendiente_id), o en una nota (nota_id). Con `seleccion`, el texto es lo
+// que se seleccionó en el editor y vuelve solo su reemplazo; `indicacion` dice cómo reescribirlo.
 export function parseRedaccion(input) {
   const texto = typeof input.texto === 'string' ? input.texto.trim() : '';
   if (!texto || texto.length > MAX_REDACCION) throw httpError(422, 'texto_ia_invalido');
   if (!['chat', 'descripcion', 'nota'].includes(input.donde)) throw httpError(422, 'donde_invalido');
+  if ('seleccion' in input && typeof input.seleccion !== 'boolean') throw httpError(422, 'seleccion_invalida');
+  const indicacion = typeof input.indicacion === 'string' ? input.indicacion.trim() : '';
+  if (input.indicacion != null && (typeof input.indicacion !== 'string' || indicacion.length > MAX_INDICACION)) {
+    throw httpError(422, 'indicacion_invalida');
+  }
+  const extra = { seleccion: input.seleccion === true, indicacion: indicacion || null };
   if (input.donde === 'nota') {
     if (typeof input.nota_id !== 'string' || !input.nota_id) throw httpError(422, 'nota_id_invalido');
-    return { texto, donde: input.donde, nota_id: input.nota_id };
+    return { texto, donde: input.donde, nota_id: input.nota_id, ...extra };
   }
   if (typeof input.pendiente_id !== 'string' || !input.pendiente_id) throw httpError(422, 'pendiente_invalido');
-  return { texto, donde: input.donde, pendiente_id: input.pendiente_id };
+  return { texto, donde: input.donde, pendiente_id: input.pendiente_id, ...extra };
+}
+
+// La fuente y el tamaño de letra que elige cada persona para sí.
+export function parseApariencia(input) {
+  if (!FUENTES.includes(input.fuente)) throw httpError(422, 'apariencia_invalida');
+  if (!Number.isInteger(input.tamano) || input.tamano < TAMANO_MIN || input.tamano > TAMANO_MAX) throw httpError(422, 'apariencia_invalida');
+  return { fuente: input.fuente, tamano: input.tamano };
 }
 
 // El ícono de un curso es un emoji (o unas pocas letras): se muestra como texto.
@@ -1098,6 +1120,9 @@ function createRepo(db, dataDir, graciaImagenesMs) {
   }
 
   // La IA que redacta: la de "Escribir con IA" si el equipo eligió otra, o la del equipo.
+  // Lo que se agrega a las instrucciones al reescribir una selección.
+  const conIndicaciones = (extra) => indicacionesDeSeleccion(extra).map((linea) => `\n${linea}`).join('');
+
   function iaDeRedaccion(ajustes) {
     const { redaccion, modelos, claves, proveedor: delEquipo } = ajustes;
     const proveedor = redaccion?.proveedor ?? delEquipo;
@@ -1137,6 +1162,18 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     pendienteDeArchivo: (id) => db.prepare('SELECT pendiente_id FROM archivos WHERE id = ?').get(id)?.pendiente_id ?? null,
     puedeVerPendiente: (yo, id) => !db.prepare('SELECT 1 FROM pendientes WHERE id = ?').get(id)
       || Boolean(db.prepare(`SELECT 1 FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo)),
+
+    // La fuente y el tamaño de letra de cada persona (la cuenta del equipo tiene los suyos), o null si no eligió.
+    apariencia(yo) {
+      const guardada = db.prepare('SELECT valor FROM ajustes WHERE clave = ?').get(`apariencia:${yo ?? 'equipo'}`);
+      return guardada ? JSON.parse(guardada.valor) : null;
+    },
+
+    guardarApariencia(yo, apariencia) {
+      db.prepare('INSERT INTO ajustes (clave, valor) VALUES (?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor')
+        .run(`apariencia:${yo ?? 'equipo'}`, JSON.stringify(apariencia));
+      return apariencia;
+    },
 
     // La IA del equipo. Las claves solo salen de aquí hacia el proveedor elegido.
     ajustesIA() {
@@ -1235,7 +1272,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     // Redacta mejor un borrador para el chat o la descripción de un pendiente que ve quien pregunta. Viajan el borrador,
     // el título, el proyecto, el responsable, el principio de la descripción y, en el chat, los últimos mensajes; de las
     // personas solo sus nombres (para escribir bien las @menciones), nunca correos ni teléfonos.
-    async redactar(yo, { texto, donde, pendiente_id: pendienteId }, bases) {
+    async redactar(yo, { texto, donde, pendiente_id: pendienteId, ...extra }, bases) {
       const item = pendiente(yo, pendienteId);
       if (!item) return null;
       const ia = iaDeRedaccion(this.ajustesIA());
@@ -1257,7 +1294,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
           ...(resumen ? [`Descripción (el principio): ${resumen}`] : []),
           ...(mensajes.length ? ['Últimos mensajes del chat:', ...mensajes.map((m) => `${m.autor}: ${m.texto.slice(0, 300)}`)] : []),
         ],
-      });
+      }) + conIndicaciones(extra);
       const redactado = await pedirRedaccion({
         ...ia,
         base: bases[ia.proveedor],
@@ -1269,12 +1306,13 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     },
 
     // Lo mismo en una nota propia: viajan el borrador, el curso, el título y el principio de la nota.
-    async redactarEnNota(yo, { texto, nota_id: notaId }, bases) {
+    async redactarEnNota(yo, { texto, nota_id: notaId, ...extra }, bases) {
       const datos = db.prepare('SELECT n.titulo, n.texto, c.nombre AS curso FROM notas n JOIN cursos c ON c.id = n.curso_id WHERE n.id = ? AND c.perfil_id = ?')
         .get(notaId, yo);
       if (!datos) return null;
       const ia = iaDeRedaccion(this.ajustesIA());
-      const sistema = instruccionesApuntes({ curso: datos.curso, titulo: datos.titulo, contexto: datos.texto.slice(0, MAX_CONTEXTO_REDACCION) });
+      const sistema = instruccionesApuntes({ curso: datos.curso, titulo: datos.titulo, contexto: datos.texto.slice(0, MAX_CONTEXTO_REDACCION) })
+        + conIndicaciones(extra);
       return { texto: await pedirRedaccion({ ...ia, base: bases[ia.proveedor], sistema, texto, maximo: MAX_REDACCION_NOTA }) };
     },
 
@@ -2133,7 +2171,12 @@ export function createApp(options = {}) {
       const enviar = (status, clave, valor) => (valor ? json(res, status, { [clave]: valor }) : json(res, 404, { error: 'not_found' }));
       const listo = (hecho) => (hecho ? json(res, 200, { ok: true }) : json(res, 404, { error: 'not_found' }));
 
-      if (url.pathname === YO_PATH && req.method === 'GET') return json(res, 200, { usuario: { ...usuario, notas: puedeNotas(usuario) } });
+      if (url.pathname === YO_PATH && req.method === 'GET') {
+        return json(res, 200, { usuario: { ...usuario, notas: puedeNotas(usuario), apariencia: repo.apariencia(yo) } });
+      }
+      if (url.pathname === APARIENCIA_PATH && req.method === 'PUT') {
+        return json(res, 200, { apariencia: repo.guardarApariencia(yo, parseApariencia(await readJson(req))) });
+      }
 
       if (url.pathname === NOTAS_PATH || url.pathname.startsWith(`${NOTAS_PATH}/`)) {
         if (!puedeNotas(usuario)) return json(res, 404, { error: 'not_found' });

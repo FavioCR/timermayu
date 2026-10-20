@@ -1,4 +1,4 @@
-import { ApiError, CLIENTE, pedir } from "@/lib/api"
+import { ApiError, CLIENTE, pedir, type OpcionesRedaccion } from "@/lib/api"
 
 // Notas privadas: cursos con sus notas (como en Notion) y sus recursos (PDF y otros archivos).
 export type Curso = { id: string; nombre: string; icono: string; creado_en: string; actualizado_en: string }
@@ -158,8 +158,8 @@ export const notasApi = {
       pedir<{ nota: Nota }>(credenciales, "PATCH", `/notas/${id}`, cambios).then((data) => data.nota),
     borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/notas/${id}`),
     subirImagen,
-    redactar: (credenciales: string, notaId: string, texto: string) =>
-      pedir<{ redaccion: { texto: string } }>(credenciales, "POST", "/ia/redactar", { texto, donde: "nota", nota_id: notaId }).then(
+    redactar: (credenciales: string, notaId: string, texto: string, opciones: OpcionesRedaccion = {}) =>
+      pedir<{ redaccion: { texto: string } }>(credenciales, "POST", "/ia/redactar", { texto, donde: "nota", nota_id: notaId, ...opciones }).then(
         (data) => data.redaccion.texto
       ),
   },

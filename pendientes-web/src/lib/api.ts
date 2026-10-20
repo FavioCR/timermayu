@@ -1,3 +1,5 @@
+import type { Apariencia } from "@/lib/apariencia"
+
 export type Estado = "pendiente" | "haciendo" | "hecho"
 
 export type TipoTrabajo = "feat" | "fix" | "refactor" | "perf" | "docs" | "test" | "style" | "chore" | "ci"
@@ -95,7 +97,11 @@ export type Perfil = {
 
 // Quien entró: un perfil, o la cuenta del equipo (perfil_id null), que solo ve lo compartido.
 // notas: si tiene las notas privadas (apuntes de cursos).
-export type Usuario = { perfil_id: string | null; nombre: string; notas: boolean }
+// `apariencia`: la fuente y el tamaño de letra que eligió (null: la de siempre).
+export type Usuario = { perfil_id: string | null; nombre: string; notas: boolean; apariencia: Apariencia | null }
+
+// Al reescribir lo seleccionado en el editor: que vuelva solo su reemplazo y, si se dice, cómo reescribirlo.
+export type OpcionesRedaccion = { seleccion?: boolean; indicacion?: string }
 
 // Sin dueño es del equipo. Las privadas solo las ve su dueño, igual que sus proyectos y pendientes.
 export type Organizacion = {
@@ -278,6 +284,8 @@ const MENSAJES: Record<string, string> = {
   recurso_muy_grande: "El archivo pesa más de 300 MB.",
   parte_invalida: "El archivo no se pudo subir. Vuelve a intentar.",
   parte_fuera_de_orden: "El archivo no se pudo subir. Vuelve a intentar.",
+  apariencia_invalida: "Esa fuente o ese tamaño no se pueden usar.",
+  indicacion_invalida: "La indicación puede tener hasta 300 caracteres.",
 }
 
 // Cada pestaña se identifica para que los cambios en tiempo real no le avisen de lo que ella misma hizo.
@@ -435,6 +443,8 @@ function urlDeImagen(credenciales: string, url: string) {
 
 export const api = {
   yo: (credenciales: string) => pedir<{ usuario: Usuario }>(credenciales, "GET", "/yo").then((data) => data.usuario),
+  guardarApariencia: (credenciales: string, apariencia: Apariencia) =>
+    pedir<{ apariencia: Apariencia }>(credenciales, "PUT", "/yo/apariencia", apariencia).then((data) => data.apariencia),
   listar: (credenciales: string) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "GET").then((data) => data.pendientes),
   crear: (
@@ -544,10 +554,13 @@ export const api = {
         imagenes: imagenes.map((datos) => ({ datos })),
       }).then((data) => data.sugerencias),
     // Un borrador (o lo que ya está escrito) bien redactado para el chat o la descripción de un pendiente.
-    redactar: (credenciales: string, pendienteId: string, donde: "chat" | "descripcion", texto: string) =>
-      pedir<{ redaccion: { texto: string } }>(credenciales, "POST", "/ia/redactar", { texto, donde, pendiente_id: pendienteId }).then(
-        (data) => data.redaccion.texto
-      ),
+    redactar: (credenciales: string, pendienteId: string, donde: "chat" | "descripcion", texto: string, opciones: OpcionesRedaccion = {}) =>
+      pedir<{ redaccion: { texto: string } }>(credenciales, "POST", "/ia/redactar", {
+        texto,
+        donde,
+        pendiente_id: pendienteId,
+        ...opciones,
+      }).then((data) => data.redaccion.texto),
   },
   proyectos: {
     listar: (credenciales: string) =>

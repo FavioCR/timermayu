@@ -196,10 +196,10 @@ test('la base nueva trae a Favio, Diego y Junior una sola vez', async () => {
 
 test('cada perfil entra con su contraseña, por nombre o por correo', async (t) => {
   const { call, data, entrarComo } = await startServer(t);
-  assert.deepEqual((await data('GET', '/yo')).usuario, { perfil_id: null, nombre: 'Equipo', notas: false });
+  assert.deepEqual((await data('GET', '/yo')).usuario, { perfil_id: null, nombre: 'Equipo', notas: false, apariencia: null });
 
   const diego = await entrarComo('Diego');
-  assert.deepEqual((await diego.data('GET', '/yo')).usuario, { perfil_id: diego.perfil.id, nombre: 'Diego', notas: false });
+  assert.deepEqual((await diego.data('GET', '/yo')).usuario, { perfil_id: diego.perfil.id, nombre: 'Diego', notas: false, apariencia: null });
   assert.equal((await call('GET', '/yo', undefined, { Authorization: basic('diego', diego.contrasena) })).status, 200);
   assert.equal((await call('GET', '/yo', undefined, { Authorization: basic('Diego', 'otra-clave') })).status, 401);
   assert.equal((await call('GET', '/yo', undefined, { Authorization: basic('Favio', '') })).status, 401);
@@ -1275,6 +1275,53 @@ test('IA: "Escribir con IA" puede usar otro proveedor y modelo que el resto', as
   assert.equal((await data('PUT', '/ia', { redaccion: null })).ia.redaccion, null);
   assert.equal((await redactar()).redaccion.texto, 'Desde Gemini');
   assert.equal(proveedor.pedidos.at(-1).cuerpo.model, 'gemini-3.5-flash-lite');
+});
+
+test('cada persona elige su fuente y su tamaño de letra, y le llegan con /yo', async (t) => {
+  const { data, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+
+  assert.deepEqual(await diego.data('PUT', '/yo/apariencia', { fuente: 'atkinson', tamano: 112 }), { apariencia: { fuente: 'atkinson', tamano: 112 } });
+  assert.deepEqual((await diego.data('GET', '/yo')).usuario.apariencia, { fuente: 'atkinson', tamano: 112 });
+  // Es de cada uno: Favio sigue con la de siempre, y la cuenta del equipo tiene la suya.
+  assert.equal((await favio.data('GET', '/yo')).usuario.apariencia, null);
+  await data('PUT', '/yo/apariencia', { fuente: 'serif', tamano: 90 });
+  assert.deepEqual((await data('GET', '/yo')).usuario.apariencia, { fuente: 'serif', tamano: 90 });
+  assert.deepEqual((await diego.data('GET', '/yo')).usuario.apariencia, { fuente: 'atkinson', tamano: 112 });
+
+  for (const malo of [{ fuente: 'comic-sans', tamano: 100 }, { fuente: 'inter', tamano: 200 }, { fuente: 'inter', tamano: 99.5 }, { fuente: 'inter' }, {}]) {
+    assert.equal((await diego.data('PUT', '/yo/apariencia', malo)).error, 'apariencia_invalida', JSON.stringify(malo));
+  }
+  assert.equal((await diego.call('GET', '/yo/apariencia')).status, 405);
+});
+
+test('IA: reescribe lo seleccionado, con una indicación si viene', async (t) => {
+  const pedidos = [];
+  const proveedor = await startProveedor(t, async (ruta, cuerpo) => {
+    pedidos.push(cuerpo);
+    return { json: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: JSON.stringify({ texto: 'Más corto' }) }] }] } };
+  });
+  const { data, entrarComo } = await startServer(t, { basesIA: { gemini: proveedor.url } });
+  const diego = await entrarComo('Diego');
+  await data('PUT', '/ia', { proveedor: 'gemini', claves: { gemini: 'AIza-falsa-seleccion' } });
+  const { pendiente } = await diego.data('POST', '', { texto: 'Algo', tipo: 'chore' });
+  const redactar = (extra) => diego.data('POST', '/ia/redactar', { texto: 'el texto que se seleccionó', donde: 'descripcion', pendiente_id: pendiente.id, ...extra });
+
+  assert.equal((await redactar({ seleccion: true, indicacion: '  más corto  ' })).redaccion.texto, 'Más corto');
+  const [conIndicacion] = pedidos;
+  assert.equal(conIndicacion.input, 'el texto que se seleccionó');
+  assert.match(conIndicacion.system_instruction, /fragmento que la persona seleccionó/);
+  assert.match(conIndicacion.system_instruction, /siguiendo esta indicación de la persona: «más corto»/);
+  // Sin indicación: solo mejorarlo. Y lo de siempre no lleva nada de esto.
+  await redactar({ seleccion: true });
+  assert.ok(pedidos[1].system_instruction.includes('fragmento') && !pedidos[1].system_instruction.includes('indicación de la persona'));
+  await redactar({});
+  assert.ok(!pedidos[2].system_instruction.includes('fragmento'));
+
+  assert.equal((await redactar({ seleccion: 'sí' })).error, 'seleccion_invalida');
+  assert.equal((await redactar({ indicacion: 'x'.repeat(301) })).error, 'indicacion_invalida');
+  assert.equal((await redactar({ indicacion: 5 })).error, 'indicacion_invalida');
 });
 
 test('IA: los errores del proveedor se traducen y no repiten la clave', async (t) => {

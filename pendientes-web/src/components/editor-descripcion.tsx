@@ -14,9 +14,14 @@ import {
   createReactBlockSpec,
   createReactInlineContentSpec,
   FileBlockWrapper,
+  FormattingToolbar,
+  FormattingToolbarController,
   getDefaultReactSlashMenuItems,
+  getFormattingToolbarItems,
   SuggestionMenuController,
+  useComponentsContext,
   useCreateBlockNote,
+  useEditorState,
   type DefaultReactSuggestionItem,
 } from "@blocknote/react"
 import { BlockNoteView } from "@blocknote/shadcn"
@@ -27,7 +32,7 @@ import { ChipArchivo } from "@/components/archivos"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { RedactarIA } from "@/components/redactar-ia"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
-import type { Perfil } from "@/lib/api"
+import type { OpcionesRedaccion, Perfil } from "@/lib/api"
 import { tipoPorNombre } from "@/lib/archivos"
 
 // Tocar un archivo de la descripción lo abre con la contraseña (un enlace directo no la lleva).
@@ -100,6 +105,19 @@ function textoDeBloque(bloque: Bloque) {
     .join("")
 }
 
+// Al revés, para mandarle a la IA lo seleccionado: las menciones van como @Nombre.
+function conArrobas(bloques: Bloque[]): Bloque[] {
+  const visitar = (bloque: Bloque): Bloque =>
+    ({
+      ...bloque,
+      content: Array.isArray(bloque.content)
+        ? bloque.content.map((item) => (item.type === "mencion" ? { type: "text", text: `@${item.props.nombre}`, styles: {} } : item))
+        : bloque.content,
+      children: bloque.children.map(visitar),
+    }) as Bloque
+  return bloques.map(visitar)
+}
+
 const escapar = (texto: string) => texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 // Las @Nombre que escribe la IA pasan a ser menciones de verdad (como elegirlas con @: avisan a esa persona).
@@ -130,6 +148,37 @@ function conMenciones(bloques: Bloque[], perfiles: Perfil[]): Bloque[] {
   return bloques.map(visitar)
 }
 
+// La barra que sale al seleccionar texto, con «Reescribir con IA» primero cuando hay IA.
+const Reescribir = createContext<(() => void) | null>(null)
+
+function BotonReescribir() {
+  const reescribir = useContext(Reescribir)
+  const Components = useComponentsContext()
+  // En el celular la barra está siempre sobre el teclado: el botón sale solo con algo seleccionado.
+  const vacia = useEditorState({ on: "selection", selector: ({ editor }) => editor?.prosemirrorState.selection.empty ?? true })
+  if (!reescribir || !Components || vacia) return null
+  return (
+    <Components.FormattingToolbar.Button
+      label="Reescribir con IA"
+      mainTooltip="Reescribir con IA"
+      secondaryTooltip="Mejorarlo, acortarlo, cambiar el tono…"
+      icon={<Sparkles className="text-primary" />}
+      onClick={reescribir}
+    >
+      Reescribir
+    </Components.FormattingToolbar.Button>
+  )
+}
+
+function BarraDeFormato() {
+  return (
+    <FormattingToolbar>
+      <BotonReescribir key="reescribir" />
+      {getFormattingToolbarItems()}
+    </FormattingToolbar>
+  )
+}
+
 const PISTA_DESCRIPCION =
   "Escribe una descripción: / para más bloques (/ia para escribir con IA), @ para mencionar, o pega una imagen o un archivo"
 
@@ -156,8 +205,8 @@ export default function EditorDescripcion({
   // Sin perfiles no hay @menciones.
   perfiles?: Perfil[]
   yo?: string | null
-  // Sin IA (o sin quien pregunte) no sale «Escribir con IA» en el menú de /.
-  redactar?: (texto: string) => Promise<string>
+  // Sin IA (o sin quien pregunte) no sale «Escribir con IA» en el menú de / ni «Reescribir con IA» al seleccionar.
+  redactar?: (texto: string, opciones?: OpcionesRedaccion) => Promise<string>
   // Lo que se lee en una línea vacía.
   pista?: string
 }) {
@@ -171,12 +220,21 @@ export default function EditorDescripcion({
 
   const personas = useMemo(() => ({ porId: new Map(perfiles.map((perfil) => [perfil.id, perfil])), yo }), [perfiles, yo])
 
-  // /ia: el campo de la IA sale debajo de la línea donde se escribió, y lo redactado va ahí.
-  const [ia, setIa] = useState<{ bloqueId: string; previo: string } | null>(null)
+  // /ia: el campo de la IA sale debajo de la línea donde se escribió, y lo redactado va ahí. «Reescribir con IA» (al
+  // seleccionar texto): sale debajo de lo seleccionado y lo reemplaza.
+  // `enteras`: las líneas seleccionadas, si se seleccionaron completas (y sin líneas anidadas): esas se reemplazan enteras.
+  const [ia, setIa] = useState<
+    { bloqueId: string; previo: string } | { seleccion: true; previo: string; enteras: { id: string; type: string }[] | null } | null
+  >(null)
   const bloqueIA = useRef<string | null>(null)
   const anclaIA = useRef({
-    getBoundingClientRect: () =>
-      editor.domElement?.querySelector(`[data-id="${bloqueIA.current}"] .bn-block-content`)?.getBoundingClientRect() ?? new DOMRect(),
+    getBoundingClientRect: () => {
+      if (bloqueIA.current) {
+        return editor.domElement?.querySelector(`[data-id="${bloqueIA.current}"] .bn-block-content`)?.getBoundingClientRect() ?? new DOMRect()
+      }
+      const caja = editor.getSelectionBoundingBox()
+      return caja ? DOMRect.fromRect(caja) : new DOMRect()
+    },
   })
 
   function abrirIA() {
@@ -185,12 +243,44 @@ export default function EditorDescripcion({
     setIa({ bloqueId: bloque.id, previo: textoDeBloque(bloque) })
   }
 
+  // Lo seleccionado viaja como Markdown, para que vuelva con la misma forma (negritas, listas).
+  function abrirReescribir() {
+    const { blocks } = editor.getSelectionCutBlocks()
+    const previo = editor.blocksToMarkdownLossy(conArrobas(blocks as Bloque[])).trim()
+    if (!previo) return
+    // Completas: del principio de la primera línea al final de la última, y líneas del editor (no celdas de una tabla).
+    const { $from, $to } = editor.prosemirrorState.selection
+    const deLinea = (lado: typeof $from) => lado.depth > 0 && lado.node(lado.depth - 1).type.name === "blockContainer"
+    const completas = deLinea($from) && deLinea($to) && $from.parentOffset === 0 && $to.parentOffset === $to.parent.content.size
+    const lineas = editor.getSelection()?.blocks ?? []
+    const enteras = completas && lineas.length > 0 && lineas.every((linea) => linea.children.length === 0) ? lineas : null
+    bloqueIA.current = null
+    setIa({ seleccion: true, previo, enteras: enteras && enteras.map(({ id, type }) => ({ id, type })) })
+  }
+
   // En una línea vacía (o al mejorar lo que tenía) la reemplaza; si no, va debajo. Admite Markdown sencillo.
   function usarRedaccion(texto: string, reemplaza: boolean) {
     const nuevos = conMenciones(editor.tryParseMarkdownToBlocks(texto), perfiles)
-    const bloque = ia ? editor.getBlock(ia.bloqueId) : undefined
+    const bloque = ia && "bloqueId" in ia ? editor.getBlock(ia.bloqueId) : undefined
+    const seleccion = ia && "seleccion" in ia ? ia : null
     setIa(null)
     if (nuevos.length === 0) return
+    if (seleccion) {
+      editor.focus()
+      const { enteras } = seleccion
+      // Una línea completa que vuelve como una línea del mismo tipo se pega encima: conserva lo suyo (nivel del título,
+      // color, si está marcada).
+      const mismaLinea = enteras?.length === 1 && nuevos.length === 1 && nuevos[0].type === enteras[0].type
+      if (enteras && !mismaLinea && enteras.every((linea) => editor.getBlock(linea.id))) {
+        const final = editor.replaceBlocks(enteras.map((linea) => linea.id), nuevos).insertedBlocks.at(-1)
+        if (final) editor.setTextCursorPosition(final, "end")
+        return
+      }
+      // Lo seleccionado sigue seleccionado (el editor no la pierde mientras se usa el panel): se pega encima, como al
+      // pegar, así un trozo de una frase queda dentro de su frase.
+      editor.pasteHTML(editor.blocksToFullHTML(nuevos), true)
+      return
+    }
     const ultimo = editor.document[editor.document.length - 1]
     const insertados = !bloque
       ? editor.insertBlocks(nuevos, ultimo, "after")
@@ -233,10 +323,19 @@ export default function EditorDescripcion({
   return (
     <AbrirArchivo.Provider value={abrirArchivo}>
       <Personas.Provider value={personas}>
-        <BlockNoteView editor={editor} theme={oscuro ? "dark" : "light"} slashMenu={false} onChange={() => onCambio(editor.document)}>
-          <SuggestionMenuController triggerCharacter="/" getItems={itemsDeBarra} />
-          {perfiles.length > 0 && <SuggestionMenuController triggerCharacter="@" getItems={sugerencias} />}
-        </BlockNoteView>
+        <Reescribir.Provider value={redactar ? abrirReescribir : null}>
+          <BlockNoteView
+            editor={editor}
+            theme={oscuro ? "dark" : "light"}
+            slashMenu={false}
+            formattingToolbar={false}
+            onChange={() => onCambio(editor.document)}
+          >
+            <SuggestionMenuController triggerCharacter="/" getItems={itemsDeBarra} />
+            {perfiles.length > 0 && <SuggestionMenuController triggerCharacter="@" getItems={sugerencias} />}
+            <FormattingToolbarController formattingToolbar={BarraDeFormato} />
+          </BlockNoteView>
+        </Reescribir.Provider>
         <Popover open={ia !== null} onOpenChange={(abierto) => !abierto && setIa(null)}>
           <PopoverAnchor virtualRef={anclaIA} />
           <PopoverContent
@@ -249,7 +348,7 @@ export default function EditorDescripcion({
               editor.focus()
             }}
           >
-            {ia && redactar && <RedactarIA previo={ia.previo} redactar={redactar} onUsar={usarRedaccion} />}
+            {ia && redactar && <RedactarIA previo={ia.previo} seleccion={"seleccion" in ia} redactar={redactar} onUsar={usarRedaccion} />}
           </PopoverContent>
         </Popover>
       </Personas.Provider>

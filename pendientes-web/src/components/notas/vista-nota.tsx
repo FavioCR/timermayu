@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react"
 import { Check, CloudOff, LoaderCircle } from "lucide-react"
 
 import { Skeleton } from "@/components/ui/skeleton"
-import { api, ApiError, esNoAutorizado, mensajeDeError } from "@/lib/api"
+import { api, ApiError, esNoAutorizado, mensajeDeError, type OpcionesRedaccion } from "@/lib/api"
 import { haceCuanto } from "@/lib/actividad"
 import { tipoPorNombre } from "@/lib/archivos"
 import { comprimirImagen } from "@/lib/comprimir-imagen"
@@ -194,9 +194,9 @@ export function VistaNota({
     else if (/^https?:\/\//.test(url)) window.open(url, "_blank", "noopener,noreferrer")
   }
 
-  async function redactar(borrador: string) {
+  async function redactar(borrador: string, opciones?: OpcionesRedaccion) {
     try {
-      return await notasApi.notas.redactar(credenciales, id, borrador)
+      return await notasApi.notas.redactar(credenciales, id, borrador, opciones)
     } catch (err) {
       if (esNoAutorizado(err)) onNoAutorizado()
       throw err

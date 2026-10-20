@@ -49,6 +49,7 @@ import {
   Tag,
   Timer,
   Trash2,
+  Type,
   UserPlus,
   Users,
   UsersRound,
@@ -58,6 +59,7 @@ import { cn } from "cn"
 import { toast } from "sonner"
 
 import { ActividadSheet } from "@/components/actividad-sheet"
+import { AparienciaDialog } from "@/components/apariencia-dialog"
 import { DetallePendiente } from "@/components/detalle-pendiente"
 import { EstadoConexion } from "@/components/estado-conexion"
 import { porNombre, PuntoEtiqueta } from "@/components/etiquetas-selector"
@@ -125,6 +127,7 @@ import {
   type Usuario,
 } from "@/lib/api"
 import { enlaceWhatsApp } from "@/lib/actividad"
+import { APARIENCIA_NORMAL, aplicarApariencia } from "@/lib/apariencia"
 import { coincide } from "@/lib/buscar"
 import { agrupar, conOrganizacion, conProyecto, involucrados, organizacionDe, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
 import { conectarCambios, revisarConexion, useCambios } from "@/lib/cambios"
@@ -218,7 +221,7 @@ function leerSelecciones(): Selecciones {
   }
 }
 
-type Ventana = "proyectos" | "perfiles" | "actividad" | "ia" | "crear-ia" | "instalar"
+type Ventana = "proyectos" | "perfiles" | "actividad" | "ia" | "crear-ia" | "instalar" | "apariencia"
 
 // Tocar un botón dentro de la tarjeta no debe empezar a arrastrarla.
 const detener = (event: SyntheticEvent) => event.stopPropagation()
@@ -642,6 +645,15 @@ export function Tablero({
   const hayCatalogo = catalogo.organizaciones.length > 0 || catalogo.proyectos.length > 0
 
   const miPerfil = usuario?.perfil_id ? perfilesPorId.get(usuario.perfil_id) : null
+
+  // La fuente y el tamaño del perfil. Mientras se eligen en Apariencia, manda lo que se está probando ahí; al cerrar sin
+  // guardar, vuelve la guardada.
+  const apariencia = usuario?.apariencia ?? APARIENCIA_NORMAL
+  const conUsuario = usuario !== null
+  const eligiendoApariencia = ventana === "apariencia"
+  useEffect(() => {
+    if (conUsuario && !eligiendoApariencia) aplicarApariencia({ fuente: apariencia.fuente, tamano: apariencia.tamano })
+  }, [conUsuario, eligiendoApariencia, apariencia.fuente, apariencia.tamano])
 
   const abribles = useMemo(() => new Set(tarjetas.map((tarjeta) => tarjeta.id)), [tarjetas])
 
@@ -1116,6 +1128,9 @@ export function Tablero({
                 <DropdownMenuSeparator className="md:hidden" />
                 <DropdownMenuItem onSelect={() => setVentana("ia")}>
                   <Sparkles /> Inteligencia artificial
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setVentana("apariencia")}>
+                  <Type /> Apariencia
                 </DropdownMenuItem>
                 {!instalacion.instalada && (
                   <DropdownMenuItem onSelect={instalarApp}>
@@ -1736,6 +1751,18 @@ export function Tablero({
         </Suspense>
       )}
       <InstalarDialog abierto={ventana === "instalar"} onAbiertoChange={(siguiente) => setVentana(siguiente ? "instalar" : null)} />
+      <AparienciaDialog
+        abierto={ventana === "apariencia"}
+        onAbiertoChange={(siguiente) => setVentana(siguiente ? "apariencia" : null)}
+        credenciales={credenciales}
+        actual={apariencia}
+        esEquipo={!usuario?.perfil_id}
+        onGuardado={(guardada) => {
+          setUsuario((antes) => antes && { ...antes, apariencia: guardada })
+          toast.success("Apariencia guardada")
+        }}
+        onSalir={onSalir}
+      />
       {iaAbierta && (
         <Suspense fallback={null}>
           <IaDialog

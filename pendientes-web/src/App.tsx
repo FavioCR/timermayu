@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useState } from "react"
 
 import { LoginForm } from "@/components/login-form"
 import { Tablero } from "@/components/tablero"
+import { APARIENCIA_NORMAL, aplicarApariencia } from "@/lib/apariencia"
 import { guardarCredenciales, leerCredenciales } from "@/lib/api"
 import { esNotas } from "@/lib/notas"
 
@@ -20,6 +21,8 @@ export default function App() {
   const salir = useCallback(() => {
     guardarCredenciales(null)
     setCredenciales(null)
+    // La fuente y el tamaño eran de esa persona: quien entre después empieza con los de siempre.
+    aplicarApariencia(APARIENCIA_NORMAL)
   }, [])
 
   if (!credenciales) {
