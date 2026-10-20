@@ -24,6 +24,7 @@ import {
   type Usuario,
 } from "@/lib/api"
 import { enlaceWhatsApp } from "@/lib/actividad"
+import { comprimirImagen } from "@/lib/comprimir-imagen"
 import { involucrados, organizacionDe, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
@@ -148,7 +149,7 @@ function Contenido({
 
   async function subirImagen(archivo: File) {
     try {
-      const imagen = await api.subirImagen(credenciales, id, archivo)
+      const imagen = await api.subirImagen(credenciales, id, await comprimirImagen(archivo))
       setAviso("")
       return imagen.url
     } catch (err) {

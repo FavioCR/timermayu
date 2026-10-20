@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { api, esNoAutorizado, MAX_IMAGEN_BYTES, mensajeDeError, type Archivo, type Comentario, type Perfil, type Usuario } from "@/lib/api"
 import { fechaCompleta, haceCuanto } from "@/lib/actividad"
 import { abrirArchivo, traeArchivos } from "@/lib/archivos"
+import { comprimirImagen } from "@/lib/comprimir-imagen"
 
 // Mientras el chat está abierto se buscan mensajes nuevos cada tanto (y al volver a la pestaña).
 const CADA_MS = 10_000
@@ -25,7 +26,7 @@ const MENCION_EN_CURSO = /(?:^|\s)@([^\s@]{0,30})$/u
 const escapar = (texto: string) => texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 const sinTildes = (texto: string) => texto.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase()
 
-// Los enlaces del mensaje se pueden abrir y las @menciones de perfiles se resaltan (más si son para quien lee).
+// Los enlaces del mensaje se pueden abrir y las @menciones de perfiles salen con su imagen (resaltadas si son para quien lee).
 function formatear(texto: string, perfiles: Perfil[], yo: string | null, mio: boolean) {
   const nombres = perfiles.map((perfil) => escapar(perfil.nombre)).sort((a, b) => b.length - a.length)
   const patron = new RegExp(`(https?:\\/\\/[^\\s]+)${nombres.length ? `|@(${nombres.join("|")})(?![\\p{L}\\p{N}_])` : ""}`, "giu")
@@ -45,8 +46,13 @@ function formatear(texto: string, perfiles: Perfil[], yo: string | null, mio: bo
       partes.push(
         <span
           key={encontrado.index}
-          className={cn("font-semibold", !mio && "text-primary", perfil && perfil.id === yo && !mio && "rounded bg-primary/15 px-0.5")}
+          className={cn(
+            "rounded-full py-px pr-1.5 pl-0.5 font-semibold whitespace-nowrap",
+            mio ? "bg-primary-foreground/20" : "bg-primary/10 text-primary",
+            perfil && perfil.id === yo && !mio && "bg-primary/20 ring-1 ring-primary/40"
+          )}
         >
+          <PerfilAvatar perfil={perfil} size="xs" className="mr-1" />
           {completo}
         </span>
       )
@@ -173,18 +179,22 @@ export function ChatPendiente({
   async function adjuntar(lista: FileList | File[]) {
     const archivos = [...lista].slice(0, Math.max(MAX_ADJUNTOS - adjuntos.length, 0))
     if (archivos.length < lista.length) setError(`Un mensaje lleva hasta ${MAX_ADJUNTOS} archivos.`)
-    for (const archivo of archivos) {
+    for (const original of archivos) {
+      const clave = crypto.randomUUID()
+      const quitar = () => setAdjuntos((actuales) => actuales.filter((a) => a.clave !== clave))
+      setAdjuntos((actuales) => [...actuales, { clave, nombre: original.name, tipo: original.type, tamano: original.size }])
+      // Las fotos y capturas se achican a WebP antes de subir; los 10 MB cuentan después de eso.
+      const archivo = await comprimirImagen(original)
       if (archivo.size > MAX_IMAGEN_BYTES) {
-        setError(`«${archivo.name}» pesa más de 10 MB.`)
+        quitar()
+        setError(`«${original.name}» pesa más de 10 MB.`)
         continue
       }
-      const clave = crypto.randomUUID()
-      setAdjuntos((actuales) => [...actuales, { clave, nombre: archivo.name, tipo: archivo.type, tamano: archivo.size }])
       try {
         const subido = await api.archivos.subir(credenciales, pendienteId, archivo, true)
         setAdjuntos((actuales) => actuales.map((a) => (a.clave === clave ? { ...a, archivo: subido } : a)))
       } catch (err) {
-        setAdjuntos((actuales) => actuales.filter((a) => a.clave !== clave))
+        quitar()
         fallar(err)
       }
     }
@@ -249,7 +259,7 @@ export function ChatPendiente({
             const perfil = comentario.perfil_id ? perfilesPorId.get(comentario.perfil_id) : null
             return (
               <div key={comentario.id} className={cn("group flex gap-2", mio && "flex-row-reverse")}>
-                {!mio && <PerfilAvatar perfil={perfil} size="sm" />}
+                <PerfilAvatar perfil={perfil} size="sm" />
                 <div className={cn("flex max-w-[85%] min-w-0 flex-col gap-1", mio && "items-end")}>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     {!mio && <span className="font-medium text-foreground">{comentario.autor}</span>}
@@ -329,7 +339,7 @@ export function ChatPendiente({
                 {adjuntos.map((adjunto) => (
                   <ChipArchivo
                     key={adjunto.clave}
-                    archivo={adjunto}
+                    archivo={adjunto.archivo ?? adjunto}
                     subiendo={!adjunto.archivo}
                     onQuitar={() => setAdjuntos((actuales) => actuales.filter((a) => a.clave !== adjunto.clave))}
                   />
