@@ -1212,7 +1212,7 @@ export function Tablero({
                     <span className="flex min-w-0 flex-col">
                       Avisos por correo
                       <span className="truncate text-xs text-muted-foreground">
-                        {usuario.avisos_por_correo.correo ? "Lo que no viste en una hora" : "Pon tu correo en Perfiles"}
+                        {usuario.avisos_por_correo.correo ? "Lo que no viste, a las 9 a. m. cada 2 días" : "Pon tu correo en Perfiles"}
                       </span>
                     </span>
                   </DropdownMenuCheckboxItem>

@@ -79,7 +79,7 @@ export function armarResumen({ perfil, avisos, urlTablero, ahora = Date.now() })
   const mostrados = avisos.slice(-MAX_EN_CORREO).reverse();
   const resto = avisos.length - mostrados.length;
   const asunto = avisos.length === 1 ? frase(avisos[0]) : `Tienes ${avisos.length} avisos sin ver en Pendientes`;
-  const pie = 'Te escribimos porque estos avisos llevaban más de una hora sin verse. Para no recibir estos correos, apágalos en el menú de tu cuenta, en «Avisos por correo».';
+  const pie = 'Este resumen llega a las 9 de la mañana, como mucho cada 2 días, con los avisos que no viste. Para no recibir estos correos, apágalos en el menú de tu cuenta, en «Avisos por correo».';
 
   const texto = [
     `Hola, ${perfil.nombre}:`,

@@ -83,12 +83,12 @@ const MAX_REDACCION_NOTA = 8000;
 // Cambios en tiempo real: nginx corta una respuesta que pasa 12 s sin datos, así que el flujo manda un latido antes.
 const LATIDO_MS = 9000;
 const MAX_CONEXIONES = 500;
-// Avisos por correo: a quien lleva una hora sin ver un aviso le llega un resumen de lo que no vio (como mucho uno cada
-// 2 días, pedido por el usuario). Lo de más de 3 días ya no se manda: al encenderlo no le llega a nadie todo lo atrasado.
-const ESPERA_CORREO_MS = 60 * 60_000;
-const ENTRE_CORREOS_MS = 2 * 24 * 60 * 60_000;
-const ANTIGUEDAD_CORREO_MS = 3 * 24 * 60 * 60_000;
+// Avisos por correo, como pidió el usuario: a las 9 de la mañana (hora de Lima, la del equipo) le llega un resumen de lo
+// que no vio a quien tenga avisos de hace más de una hora sin ver, como mucho uno cada 2 días por persona. Lo de más de
+// 3 días ya no se manda: al encenderlo no le llega a nadie todo lo atrasado.
+const REGLAS_CORREO = { hora: 9, zona: 'America/Lima', dias: 2, esperaMs: 60 * 60_000, antiguedadMs: 3 * 24 * 60 * 60_000 };
 const REVISAR_CORREOS_MS = 5 * 60_000;
+const DIA_MS = 24 * 60 * 60_000;
 const URL_TABLERO = 'https://timer.practi.dev/pendientes/';
 // Al tercer pendiente seguido que alguien termina sin dejar un mensaje en su chat, el tablero le recuerda dejar la
 // evidencia (las pruebas y los resultados).
@@ -948,6 +948,15 @@ export function openDb(dataDir) {
   return db;
 }
 
+// La hora de `ms` en `zona` y el instante en que empezó ese día allí (a medianoche).
+function enZona(ms, zona) {
+  const partes = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: zona, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+  }).formatToParts(ms).map(({ type, value }) => [type, Number(value)]));
+  const desfase = Date.UTC(partes.year, partes.month - 1, partes.day, partes.hour, partes.minute, partes.second) - Math.floor(ms / 1000) * 1000;
+  return { hora: partes.hour, medianoche: Date.UTC(partes.year, partes.month - 1, partes.day) - desfase };
+}
+
 function hashDeArchivoSync(ruta) {
   const hash = createHash('sha256');
   const trozo = Buffer.alloc(1024 * 1024);
@@ -1325,14 +1334,14 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       return activo;
     },
 
-    // A quién le toca un correo y con qué: a quien tiene correo y no lo apagó, si su aviso sin ver más viejo lleva más
-    // de `esperaMs`. Van todos los que no vio ni le llegaron ya por correo (de los últimos `antiguedadMs`), del más viejo
-    // al más nuevo, y como mucho un correo cada `entreCorreosMs`. Solo lo que puede ver, como en la campana.
-    avisosParaCorreo({ ahora, esperaMs, entreCorreosMs, antiguedadMs }) {
+    // A quién le toca un correo y con qué: a quien tiene correo, no lo apagó y no recibió ninguno desde `desde`, si su
+    // aviso sin ver más viejo lleva más de `esperaMs`. Van todos los que no vio ni le llegaron ya por correo (de los últimos
+    // `antiguedadMs`), del más viejo al más nuevo. Solo lo que puede ver, como en la campana.
+    avisosParaCorreo({ ahora, desde, esperaMs, antiguedadMs }) {
       const hace = (ms) => new Date(ahora - ms).toISOString();
       const perfiles = db.prepare(`SELECT id, nombre, correo FROM perfiles p WHERE coalesce(correo, '') != ''
         AND NOT EXISTS (SELECT 1 FROM ajustes WHERE clave = 'avisos_por_correo:' || p.id AND valor = 'no')
-        AND NOT EXISTS (SELECT 1 FROM notificaciones WHERE perfil_id = p.id AND correo_en > ?)`).all(hace(entreCorreosMs));
+        AND NOT EXISTS (SELECT 1 FROM notificaciones WHERE perfil_id = p.id AND correo_en >= ?)`).all(new Date(desde).toISOString());
       const sinVer = db.prepare(`SELECT n.id AS notificacion_id, n.creado_en AS avisado_en, a.id, a.pendiente_id, a.texto_pendiente,
           a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en
         FROM notificaciones n JOIN actividad a ON a.id = n.actividad_id
@@ -2207,13 +2216,17 @@ export function createApp(options = {}) {
   // Avisos por correo: solo con AVISOS_POR_CORREO=si y el SMTP configurado (ver crearCorreo). Las pruebas pasan el suyo.
   const correo = 'correo' in options ? options.correo : process.env.AVISOS_POR_CORREO === 'si' ? crearCorreo() : null;
   const urlTablero = options.urlTablero ?? process.env.URL_TABLERO ?? URL_TABLERO;
+  const reglasCorreo = { ...REGLAS_CORREO, ...options.reglasCorreo };
   let mandandoCorreos = false;
+  // Cada 5 minutos, pero solo manda durante la hora de envío (de 9:00 a 9:59): a cada uno, si en los últimos días (los de
+  // hoy y ayer, con 2) no le llegó ninguno.
   async function mandarAvisosPorCorreo(ahora = Date.now()) {
-    if (!correo || mandandoCorreos) return;
+    const { hora, medianoche } = enZona(ahora, reglasCorreo.zona);
+    if (!correo || mandandoCorreos || hora !== reglasCorreo.hora) return;
     mandandoCorreos = true;
     try {
       const pendientes = repo.avisosParaCorreo({
-        ahora, esperaMs: ESPERA_CORREO_MS, entreCorreosMs: ENTRE_CORREOS_MS, antiguedadMs: ANTIGUEDAD_CORREO_MS,
+        ahora, desde: medianoche - (reglasCorreo.dias - 1) * DIA_MS, esperaMs: reglasCorreo.esperaMs, antiguedadMs: reglasCorreo.antiguedadMs,
       });
       for (const { perfil, ids, avisos } of pendientes) {
         try {

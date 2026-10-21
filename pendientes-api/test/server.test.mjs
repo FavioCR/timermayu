@@ -1871,20 +1871,24 @@ test('evidencia: al tercer pendiente seguido que alguien termina sin escribir en
   assert.equal((await diego.call('GET', `/${crypto.randomUUID()}/evidencia`)).status, 404);
 });
 
-test('avisos por correo: a quien no ve sus avisos le llega un resumen de esa actividad, una vez, y lo puede apagar', async (t) => {
+// Momentos de prueba para los avisos por correo (en UTC): `dias` después de hoy, a la hora dada.
+const HOY = new Date();
+const enDias = (dias, hora = 9, minuto = 10) => Date.UTC(HOY.getUTCFullYear(), HOY.getUTCMonth(), HOY.getUTCDate() + dias, hora, minuto);
+
+test('avisos por correo: a las 9 le llega a quien no vio sus avisos un resumen, como mucho cada 2 días, y lo puede apagar', async (t) => {
   const enviados = [];
   let fallar = false;
   const correo = { enviar: async (mensaje) => {
     if (fallar) throw new Error('SMTP caído');
     enviados.push(mensaje);
   } };
-  const { server, call, entrarComo } = await startServer(t, { correo, urlTablero: 'https://tablero.ejemplo/pendientes/' });
+  // En UTC y sin límite de antigüedad, para que la prueba no dependa de la hora en que corre.
+  const reglasCorreo = { zona: 'UTC', antiguedadMs: 30 * 24 * 60 * 60_000 };
+  const { server, call, entrarComo } = await startServer(t, { correo, reglasCorreo, urlTablero: 'https://tablero.ejemplo/pendientes/' });
   const diego = await entrarComo('Diego');
   const favio = await entrarComo('Favio');
   assert.equal((await favio.call('PATCH', `/perfiles/${favio.perfil.id}`, { correo: 'favio@ejemplo.com' })).status, 200);
-  const MIN = 60_000;
-  const inicio = Date.now();
-  const vuelta = (minutos) => server.mandarAvisosPorCorreo(inicio + minutos * MIN);
+  const vuelta = (momento) => server.mandarAvisosPorCorreo(momento);
 
   const yo = async (quien) => (await (await call('GET', '/yo', undefined, quien.headers)).json()).usuario.avisos_por_correo;
   assert.deepEqual(await yo(favio), { activo: true, correo: 'favio@ejemplo.com' });
@@ -1894,10 +1898,11 @@ test('avisos por correo: a quien no ve sus avisos le llega un resumen de esa act
   const { pendiente } = await diego.data('POST', '', { texto: 'Facturación <octubre>', perfil_id: favio.perfil.id });
   await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: '@Favio revisa el total & avísame' });
 
-  // Antes de una hora no se manda nada; después, un solo correo con los dos avisos (lo más nuevo primero).
-  await vuelta(30);
+  // Fuera de la hora de envío no se manda nada; a las 9, un solo correo con los dos avisos (lo más nuevo primero).
+  await vuelta(enDias(1, 8, 59));
+  await vuelta(enDias(1, 10, 0));
   assert.equal(enviados.length, 0);
-  await vuelta(61);
+  await vuelta(enDias(1));
   assert.equal(enviados.length, 1);
   const [primero] = enviados;
   assert.equal(primero.to, 'favio@ejemplo.com');
@@ -1911,14 +1916,13 @@ test('avisos por correo: a quien no ve sus avisos le llega un resumen de esa act
   assert.ok(primero.html.includes('Facturación &lt;octubre&gt;') && !primero.html.includes('<octubre>'));
   assert.ok(primero.html.includes(`href="${enlace}"`));
   // Lo que ya llegó por correo no se repite.
-  await vuelta(70);
+  await vuelta(enDias(1, 9, 40));
   assert.equal(enviados.length, 1);
-  const DIAS = 24 * 60;
 
-  // Lo que ya vio no se manda, aunque hayan pasado los 2 días desde el último correo.
+  // Lo que ya vio no se manda, aunque ya pasaron los 2 días.
   await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: 'Otra cosa, @Favio' });
   await favio.call('POST', '/notificaciones/leidas', {});
-  await vuelta(61 + 2 * DIAS + 10);
+  await vuelta(enDias(3));
   assert.equal(enviados.length, 1);
 
   // Apagado no le llega nada; tampoco a la cuenta del equipo, que no es un perfil.
@@ -1927,26 +1931,51 @@ test('avisos por correo: a quien no ve sus avisos le llega un resumen de esa act
   assert.equal((await call('PUT', '/yo/avisos-por-correo', { activo: false })).status, 404);
   assert.deepEqual(await yo(favio), { activo: false, correo: 'favio@ejemplo.com' });
   await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: '¿Lo viste, @Favio?' });
-  await vuelta(61 + 2 * DIAS + 15);
+  await vuelta(enDias(3, 9, 15));
   assert.equal(enviados.length, 1);
 
-  // Encendido otra vez: pasados los 2 días le llega lo nuevo; si falla el envío, se reintenta en la vuelta siguiente.
+  // Encendido otra vez le llega lo nuevo; si falla el envío, se reintenta en la vuelta siguiente.
   await favio.data('PUT', '/yo/avisos-por-correo', { activo: true });
   fallar = true;
-  await vuelta(61 + 2 * DIAS + 20);
+  await vuelta(enDias(3, 9, 20));
   assert.equal(enviados.length, 1);
   fallar = false;
-  await vuelta(61 + 2 * DIAS + 25);
+  await vuelta(enDias(3, 9, 25));
   assert.equal(enviados.length, 2);
   assert.equal(enviados[1].subject, 'Diego te mencionó en «Facturación <octubre>»');
   assert.ok(!enviados[1].text.includes('te lo asignó'));
 
-  // Lo nuevo espera 2 días desde el último correo, y lo de más de 3 días ya no se manda.
+  // Si le llegó un día, al siguiente no: recién al otro, a las 9.
   await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: 'Y otra, @Favio' });
-  await vuelta(61 + 2 * DIAS + 90);
+  await vuelta(enDias(4));
   assert.equal(enviados.length, 2);
-  await vuelta(61 + 4 * DIAS + 30);
-  assert.equal(enviados.length, 2);
+  await vuelta(enDias(5, 9, 0));
+  assert.equal(enviados.length, 3);
+  assert.ok(enviados[2].text.includes('Y otra'));
+});
+
+test('avisos por correo: esperan una hora sin verse y lo de más de 3 días ya no se manda', async (t) => {
+  const enviados = [];
+  const correo = { enviar: async (mensaje) => enviados.push(mensaje) };
+  // La hora de envío es la de ahora mismo, para probar la espera de una hora.
+  const ahora = Date.now() + 1000;
+  const { server, entrarComo } = await startServer(t, { correo, reglasCorreo: { zona: 'UTC', hora: new Date(ahora).getUTCHours() } });
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  await favio.call('PATCH', `/perfiles/${favio.perfil.id}`, { correo: 'favio@ejemplo.com' });
+  await diego.data('POST', '', { texto: 'Contrato', perfil_id: favio.perfil.id });
+  await server.mandarAvisosPorCorreo(ahora);
+  assert.equal(enviados.length, 0);
+
+  const otro = await startServer(t, { correo, reglasCorreo: { zona: 'UTC' } });
+  const diego2 = await otro.entrarComo('Diego');
+  const favio2 = await otro.entrarComo('Favio');
+  await favio2.call('PATCH', `/perfiles/${favio2.perfil.id}`, { correo: 'favio@ejemplo.com' });
+  await diego2.data('POST', '', { texto: 'Contrato', perfil_id: favio2.perfil.id });
+  await otro.server.mandarAvisosPorCorreo(enDias(4));
+  assert.equal(enviados.length, 0);
+  await otro.server.mandarAvisosPorCorreo(enDias(1));
+  assert.equal(enviados.length, 1);
 });
 
 test('avisos por correo: sin configurar no se mandan ni aparecen', async (t) => {
