@@ -132,7 +132,8 @@ export function crearCorreo(env = process.env) {
   const transporte = nodemailer.createTransport({
     host: env.SMTP_HOST,
     port,
-    secure: env.SMTP_SECURE ? env.SMTP_SECURE === 'true' : port === 465,
+    // SMTP_SECURE acepta true/1; sin ponerlo, el 465 va cifrado desde el principio y los demás con STARTTLS.
+    secure: env.SMTP_SECURE ? ['true', '1'].includes(env.SMTP_SECURE.toLowerCase()) : port === 465,
     auth: env.SMTP_USER ? { user: env.SMTP_USER, pass: env.SMTP_PASSWORD ?? '' } : undefined,
   });
   return { enviar: (mensaje) => transporte.sendMail({ from: env.MAIL_FROM, ...mensaje }) };
