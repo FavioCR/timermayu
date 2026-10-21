@@ -1798,6 +1798,79 @@ test('lo guardado antes (un archivo por fila) pasa a guardarse por contenido al 
   assert.deepEqual(blobs(dataDir), [sha(PDF)]);
 });
 
+test('evidencia: al tercer pendiente seguido que alguien termina sin escribir en su chat, se le recuerda', async (t) => {
+  const { call, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  // Cada paso en su propio milisegundo, para que el orden de hecho_en y del chat sea claro.
+  const pausa = () => new Promise((listo) => setTimeout(listo, 5));
+  const nuevo = async (texto) => (await diego.data('POST', '', { texto, perfil_id: diego.perfil.id })).pendiente;
+  const terminar = async (quien, item) => {
+    await pausa();
+    await quien.data('PATCH', `/${item.id}`, { estado: 'hecho' });
+  };
+  const comentar = async (item, texto = 'Probé los tres casos; en la captura se ve el resultado.') => {
+    await pausa();
+    await diego.data('POST', `/${item.id}/comentarios`, { texto });
+  };
+  const evidencia = async (item, quien = diego) => (await quien.data('GET', `/${item.id}/evidencia`)).evidencia;
+  const sinEvidencia = async (item) => (await evidencia(item)).sin_evidencia.map((p) => p.texto);
+
+  // Con un mensaje suyo en el chat, tiene evidencia.
+  const a = await nuevo('A');
+  await comentar(a);
+  await terminar(diego, a);
+  assert.deepEqual(await evidencia(a), { recordar: false, seguidos: 0, sin_evidencia: [] });
+
+  // Dos seguidos sin mensaje todavía no; al tercero, sí (y al cuarto también).
+  const b = await nuevo('B');
+  await terminar(diego, b);
+  const c = await nuevo('C');
+  await terminar(diego, c);
+  assert.deepEqual(await evidencia(c), { recordar: false, seguidos: 2, sin_evidencia: [
+    { id: c.id, texto: 'C', hecho_en: (await diego.data('GET', `/${c.id}`)).pendiente.hecho_en },
+    { id: b.id, texto: 'B', hecho_en: (await diego.data('GET', `/${b.id}`)).pendiente.hecho_en },
+  ] });
+  const d = await nuevo('D');
+  await terminar(diego, d);
+  assert.equal((await evidencia(d)).recordar, true);
+  assert.deepEqual(await sinEvidencia(d), ['D', 'C', 'B']);
+  // Arrastrarlo a Hecho cuenta igual.
+  const e = await nuevo('E');
+  await pausa();
+  assert.equal((await diego.call('PUT', '/orden', { items: [{ id: e.id, estado: 'hecho' }] })).status, 200);
+  assert.equal((await evidencia(e)).recordar, true);
+  assert.deepEqual(await sinEvidencia(e), ['E', 'D', 'C', 'B']);
+  // Solo lo dice del recién terminado: preguntar por uno anterior no lo recuerda otra vez.
+  assert.equal((await evidencia(d)).recordar, false);
+
+  // Lo que otro pasó a Hecho no cuenta (ni corta la racha); a ese otro tampoco se le recuerda lo ajeno.
+  const f = await nuevo('F');
+  await terminar(favio, f);
+  assert.deepEqual(await sinEvidencia(f), ['E', 'D', 'C', 'B']);
+  assert.equal((await evidencia(f)).recordar, false);
+  assert.equal((await evidencia(f, favio)).recordar, false);
+  assert.deepEqual(await (await call('GET', `/${f.id}/evidencia`)).json(), { evidencia: { recordar: false, seguidos: 0, sin_evidencia: [] } });
+
+  // Un mensaje de antes de empezarlo no vale como evidencia: tiene que ser desde que pasó a Haciendo.
+  const g = await nuevo('G');
+  await comentar(g, 'Voy con esto mañana.');
+  await pausa();
+  await diego.data('PATCH', `/${g.id}`, { estado: 'haciendo' });
+  await terminar(diego, g);
+  assert.equal((await evidencia(g)).recordar, true);
+  assert.deepEqual((await sinEvidencia(g))[0], 'G');
+
+  // Si después deja la evidencia, la racha se corta.
+  await comentar(g);
+  assert.deepEqual(await evidencia(g), { recordar: false, seguidos: 0, sin_evidencia: [] });
+  const h = await nuevo('H');
+  await terminar(diego, h);
+  assert.deepEqual(await evidencia(h), { recordar: false, seguidos: 1, sin_evidencia: [{ id: h.id, texto: 'H', hecho_en: (await diego.data('GET', `/${h.id}`)).pendiente.hecho_en }] });
+
+  assert.equal((await diego.call('GET', `/${crypto.randomUUID()}/evidencia`)).status, 404);
+});
+
 test('avisos por correo: a quien no ve sus avisos le llega un resumen de esa actividad, una vez, y lo puede apagar', async (t) => {
   const enviados = [];
   let fallar = false;

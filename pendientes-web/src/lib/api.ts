@@ -476,12 +476,17 @@ function urlDeImagen(credenciales: string, url: string) {
   return promesa
 }
 
+// Después de pasar algo a Hecho: si hay que recordarle dejar la evidencia, cuántos van seguidos sin ella y cuáles.
+export type Evidencia = { recordar: boolean; seguidos: number; sin_evidencia: { id: string; texto: string; hecho_en: string }[] }
+
 export const api = {
   yo: (credenciales: string) => pedir<{ usuario: Usuario }>(credenciales, "GET", "/yo").then((data) => data.usuario),
   guardarApariencia: (credenciales: string, apariencia: Apariencia) =>
     pedir<{ apariencia: Apariencia }>(credenciales, "PUT", "/yo/apariencia", apariencia).then((data) => data.apariencia),
   guardarAvisosPorCorreo: (credenciales: string, activo: boolean) =>
     pedir<{ activo: boolean }>(credenciales, "PUT", "/yo/avisos-por-correo", { activo }).then((data) => data.activo),
+  evidencia: (credenciales: string, id: string) =>
+    pedir<{ evidencia: Evidencia }>(credenciales, "GET", `/${id}/evidencia`).then((data) => data.evidencia),
   listar: (credenciales: string) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "GET").then((data) => data.pendientes),
   crear: (

@@ -130,6 +130,7 @@ export function ChatPendiente({
   perfilesPorId,
   onCantidad,
   onSalir,
+  enfocar = 0,
 }: {
   credenciales: string
   pendienteId: string
@@ -137,6 +138,8 @@ export function ChatPendiente({
   perfilesPorId: Map<string, Perfil>
   onCantidad: (cantidad: number) => void
   onSalir: () => void
+  // Cambia (>0) cuando hay que dejar el campo listo para escribir.
+  enfocar?: number
 }) {
   const [comentarios, setComentarios] = useState<Comentario[] | null>(null)
   const [texto, setTexto] = useState("")
@@ -164,6 +167,15 @@ export function ChatPendiente({
   const lista = useRef<HTMLDivElement>(null)
   const formulario = useRef<HTMLFormElement>(null)
   const campo = useRef<HTMLTextAreaElement>(null)
+  // Desde el recordatorio de evidencia: el campo queda listo para escribir, una vez que el panel terminó de abrirse.
+  useEffect(() => {
+    if (!enfocar) return
+    const espera = window.setTimeout(() => {
+      campo.current?.focus()
+      campo.current?.scrollIntoView({ block: "nearest" })
+    }, 150)
+    return () => window.clearTimeout(espera)
+  }, [enfocar])
   const anclaMensaje = useRef({ getBoundingClientRect: () => campo.current?.getBoundingClientRect() ?? new DOMRect() })
   // Dónde queda el cursor del mensaje al cerrar el campo de /ia: donde estaba el /ia, o al final de lo redactado.
   const cursorTrasIA = useRef(0)

@@ -78,6 +78,7 @@ import {
 import { Notificaciones } from "@/components/notificaciones"
 import { PasarDialog } from "@/components/pasar-dialog"
 import { PerfilAvatar } from "@/components/perfil-avatar"
+import { RecordatorioEvidencia, type Recordatorio } from "@/components/recordatorio-evidencia"
 import type { CambiosPerfil } from "@/components/perfiles-dialog"
 import { ProyectoCombobox } from "@/components/proyecto-combobox"
 import { ProyectosDialog } from "@/components/proyectos-dialog"
@@ -158,6 +159,9 @@ const fecha = new Intl.DateTimeFormat("es", { day: "numeric", month: "short" })
 
 // Kibo UI necesita name y column en cada tarjeta.
 type Tarjeta = Pendiente & { name: string; column: string }
+
+// Cuánto después de pasar algo a Hecho se revisa si dejó la evidencia en el chat.
+const ESPERA_EVIDENCIA_MS = 2000
 
 const aTarjeta = (pendiente: Pendiente): Tarjeta => ({ ...pendiente, name: pendiente.texto, column: pendiente.estado })
 
@@ -418,10 +422,15 @@ export function Tablero({
   const [sinLeer, setSinLeer] = useState<Map<string, SinLeer>>(() => new Map())
   // El pendiente hecho que se está pasando a otra persona.
   const [pasando, setPasando] = useState<Pendiente | null>(null)
+  const [recordatorio, setRecordatorio] = useState<Recordatorio | null>(null)
+  // Abrir un pendiente con el campo del chat listo para escribir (`vez` cambia con cada pedido).
+  const [chatEnfocado, setChatEnfocado] = useState<{ id: string; vez: number } | null>(null)
+  const esperasEvidencia = useRef(new Set<number>())
   const [confirmarLimpieza, setConfirmarLimpieza] = useState(false)
   const [sinAvisoEquipo, setSinAvisoEquipo] = useState(avisoEquipoCerrado)
   const ultimas = useRef<Tarjeta[]>([])
   const ordenAlEmpezar = useRef("")
+  const columnasAlEmpezar = useRef(new Map<string, string>())
   const arrastrando = useRef(false)
   // Llegó un cambio de otra persona mientras se arrastraba: se recarga al soltar.
   const recargarAlSoltar = useRef(false)
@@ -433,6 +442,11 @@ export function Tablero({
   useEffect(() => {
     ultimas.current = tarjetas
   }, [tarjetas])
+
+  useEffect(() => {
+    const esperas = esperasEvidencia.current
+    return () => esperas.forEach((espera) => window.clearTimeout(espera))
+  }, [])
 
   useEffect(() => {
     const selecciones: Selecciones = {
@@ -661,6 +675,12 @@ export function Tablero({
   const hayCatalogo = catalogo.organizaciones.length > 0 || catalogo.proyectos.length > 0
 
   const miPerfil = usuario?.perfil_id ? perfilesPorId.get(usuario.perfil_id) : null
+  // Para el ejemplo del recordatorio de evidencia: quien creó el pendiente, o si fue uno mismo, otra persona del equipo.
+  const creadorDelRecordado = recordatorio ? tarjetas.find((t) => t.id === recordatorio.pendiente.id)?.creado_por : null
+  const otroDelEquipo =
+    (creadorDelRecordado && creadorDelRecordado !== usuario?.perfil_id ? perfilesPorId.get(creadorDelRecordado) : undefined) ??
+    perfiles.find((perfil) => perfil.id !== usuario?.perfil_id) ??
+    null
 
   // La fuente y el tamaño del perfil. Mientras se eligen en Apariencia, manda lo que se está probando ahí; al cerrar sin
   // guardar, vuelve la guardada.
@@ -821,6 +841,31 @@ export function Tablero({
     }
   }
 
+  // Al pasar a Hecho algo a su cargo, dos segundos después pregunta si ya van tres seguidos sin un mensaje final en el chat
+  // (lo decide el servidor): entonces le recuerda dejar la evidencia.
+  const revisarEvidencia = useCallback(
+    (tarjeta: Pendiente) => {
+      if (!usuario?.perfil_id || tarjeta.perfil_id !== usuario.perfil_id) return
+      const espera = window.setTimeout(async () => {
+        esperasEvidencia.current.delete(espera)
+        try {
+          const evidencia = await api.evidencia(credenciales, tarjeta.id)
+          if (evidencia.recordar) setRecordatorio({ pendiente: { id: tarjeta.id, texto: tarjeta.texto }, evidencia })
+        } catch {
+          // Es solo un recordatorio: si no se pudo preguntar, no se interrumpe a nadie.
+        }
+      }, ESPERA_EVIDENCIA_MS)
+      esperasEvidencia.current.add(espera)
+    },
+    [credenciales, usuario?.perfil_id]
+  )
+
+  function escribirEvidencia(id: string) {
+    setRecordatorio(null)
+    setChatEnfocado((antes) => ({ id, vez: (antes?.vez ?? 0) + 1 }))
+    setAbierto(id)
+  }
+
   // El cambio se ve al instante; la respuesta trae además el resumen de la descripción para la tarjeta.
   // Al dárselo a otra persona va al final de la cola de su columna, igual que en el servidor.
   const cambiarPendiente = useCallback(
@@ -835,9 +880,11 @@ export function Tablero({
         const asignado = Boolean(cambios.perfil_id) && cambios.perfil_id !== antes.perfil_id
         return asignado ? [...actuales.filter((t) => t.id !== id), despues] : actuales.map((t) => (t.id === id ? despues : t))
       })
+      const terminado = cambios.estado === "hecho" && ultimas.current.find((t) => t.id === id)?.estado !== "hecho"
       try {
         const actualizado = await api.actualizar(credenciales, id, cambios)
         setTarjetas((actuales) => actuales.map((t) => (t.id === id ? aTarjeta(actualizado) : t)))
+        if (terminado) revisarEvidencia(actualizado)
         return actualizado
       } catch (err) {
         fallar(err)
@@ -845,10 +892,13 @@ export function Tablero({
         return null
       }
     },
-    [credenciales, fallar, recargar]
+    [credenciales, fallar, recargar, revisarEvidencia]
   )
 
-  const cerrarDetalle = useCallback(() => setAbierto(null), [])
+  const cerrarDetalle = useCallback(() => {
+    setAbierto(null)
+    setChatEnfocado(null)
+  }, [])
 
   async function borrar(tarjeta: Pendiente) {
     if (abierto === tarjeta.id) setAbierto(null)
@@ -1026,6 +1076,7 @@ export function Tablero({
     setArrastrada(String(event.active.id))
     arrastrando.current = true
     ordenAlEmpezar.current = firmaDelOrden(ultimas.current)
+    columnasAlEmpezar.current = new Map(ultimas.current.map((tarjeta) => [tarjeta.id, tarjeta.column]))
   }
 
   function alSoltar() {
@@ -1043,6 +1094,9 @@ export function Tablero({
       try {
         await api.ordenar(credenciales, finales.map((tarjeta) => ({ id: tarjeta.id, estado: tarjeta.column as Estado })))
         if (pendienteDeRecarga) recargar()
+        for (const tarjeta of finales) {
+          if (tarjeta.column === "hecho" && columnasAlEmpezar.current.get(tarjeta.id) !== "hecho") revisarEvidencia(tarjeta)
+        }
       } catch (err) {
         fallar(err)
         recargar()
@@ -1872,6 +1926,14 @@ export function Tablero({
         onBorrar={borrar}
         onCerrar={cerrarDetalle}
         onSalir={onSalir}
+        enfocarChat={chatEnfocado && chatEnfocado.id === abierto ? chatEnfocado.vez : 0}
+      />
+      <RecordatorioEvidencia
+        recordatorio={recordatorio}
+        yo={miPerfil ?? null}
+        otro={otroDelEquipo}
+        onEscribir={escribirEvidencia}
+        onCerrar={() => setRecordatorio(null)}
       />
     </div>
   )

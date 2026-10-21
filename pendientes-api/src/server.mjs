@@ -90,6 +90,9 @@ const ENTRE_CORREOS_MS = 4 * 60 * 60_000;
 const ANTIGUEDAD_CORREO_MS = 3 * 24 * 60 * 60_000;
 const REVISAR_CORREOS_MS = 5 * 60_000;
 const URL_TABLERO = 'https://timer.practi.dev/pendientes/';
+// Al tercer pendiente seguido que alguien termina sin dejar un mensaje en su chat, el tablero le recuerda dejar la
+// evidencia (las pruebas y los resultados).
+const SIN_EVIDENCIA_PARA_RECORDAR = 3;
 // Tras tantos intentos fallidos seguidos con un mismo usuario, se rechaza ese usuario durante la ventana.
 const MAX_FALLOS = 10;
 const VENTANA_FALLOS_MS = 15 * 60 * 1000;
@@ -140,6 +143,7 @@ const COMENTARIO_PATH = new RegExp(`^/api/pendientes/comentarios/${UUID}$`);
 const ARCHIVOS_PATH = new RegExp(`^/api/pendientes/${UUID}/archivos$`);
 const ARCHIVO_PATH = new RegExp(`^/api/pendientes/archivos/${UUID}$`);
 const TRASPASO_PATH = new RegExp(`^/api/pendientes/${UUID}/traspaso$`);
+const EVIDENCIA_PATH = new RegExp(`^/api/pendientes/${UUID}/evidencia$`);
 const ETIQUETA_PATH = new RegExp(`^/api/pendientes/etiquetas/${UUID}$`);
 const CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}$`);
 const NOTAS_DE_CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/notas$`);
@@ -156,7 +160,7 @@ const VIDA_TRABAJO_IA_MS = 10 * 60_000;
 const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_CORREO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
-  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, ETIQUETA_PATH,
+  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, ETIQUETA_PATH,
   CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH, RECURSO_REPETIDO_PATH];
 // Las filas que apuntan a un archivo guardado por su contenido (DATA_DIR/blobs/<sha256>).
 const TABLAS_CON_BLOB = ['imagenes', 'archivos', 'nota_imagenes', 'recursos'];
@@ -1754,6 +1758,32 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       WHERE ${ACTIVIDAD_VISIBLE} AND (? IS NULL OR a.creado_en < ?) ORDER BY a.creado_en DESC, a.rowid DESC LIMIT ?`)
       .all(yo, yo, antes, antes, limite).map(actividadFila),
 
+    // Después de pasar un pendiente a Hecho: los que `yo` terminó seguidos sin evidencia, del último hacia atrás. Cuenta lo
+    // que está en Hecho a su cargo y pasó él mismo a Hecho; tiene evidencia si escribió en su chat desde que lo empezó (la
+    // última vez que pasó a Haciendo, que salió de Hecho o que se lo asignaron; si no, desde que se creó). Se recuerda
+    // cuando el recién terminado es el tercero seguido, o uno más después de esos.
+    evidencia(yo, pendienteId) {
+      if (!pendiente(yo, pendienteId)) return null;
+      if (!yo) return { recordar: false, seguidos: 0, sin_evidencia: [] };
+      const terminados = db.prepare(`SELECT id, texto, hecho_en, creado_en FROM pendientes
+        WHERE perfil_id = ? AND estado = 'hecho' AND hecho_en IS NOT NULL AND ${PENDIENTE_VISIBLE} ORDER BY hecho_en DESC LIMIT 50`).all(yo, yo);
+      const quienTermino = db.prepare(`SELECT perfil_id FROM actividad WHERE pendiente_id = ? AND tipo = 'estado'
+        AND json_extract(datos, '$.a') = 'hecho' ORDER BY creado_en DESC, rowid DESC LIMIT 1`);
+      const empezado = db.prepare(`SELECT MAX(creado_en) AS desde FROM actividad WHERE pendiente_id = ? AND (
+        (tipo = 'estado' AND (json_extract(datos, '$.a') = 'haciendo' OR json_extract(datos, '$.de') = 'hecho'))
+        OR (tipo IN ('asignado', 'traspaso') AND json_extract(datos, '$.a_id') = ?))`);
+      const escribio = db.prepare('SELECT 1 FROM comentarios WHERE pendiente_id = ? AND perfil_id = ? AND creado_en >= ? LIMIT 1');
+      const sinEvidencia = [];
+      for (const terminado of terminados) {
+        if (quienTermino.get(terminado.id)?.perfil_id !== yo) continue;
+        const desde = empezado.get(terminado.id, yo).desde ?? terminado.creado_en;
+        if (escribio.get(terminado.id, yo, desde)) break;
+        sinEvidencia.push({ id: terminado.id, texto: terminado.texto, hecho_en: terminado.hecho_en });
+      }
+      const recordar = sinEvidencia[0]?.id === pendienteId && sinEvidencia.length >= SIN_EVIDENCIA_PARA_RECORDAR;
+      return { recordar, seguidos: sinEvidencia.length, sin_evidencia: sinEvidencia.slice(0, 10) };
+    },
+
     actividadDePendiente(yo, pendienteId) {
       if (!pendiente(yo, pendienteId)) return null;
       return db.prepare(`${SELECT_ACTIVIDAD} WHERE a.pendiente_id = ? ORDER BY a.creado_en DESC, a.rowid DESC LIMIT 200`).all(pendienteId).map(actividadFila);
@@ -2498,6 +2528,8 @@ export function createApp(options = {}) {
       if (url.pathname === LEIDAS_PATH && req.method === 'POST') {
         return json(res, 200, { no_leidas: repo.marcarLeidas(yo, parseLeidas(await readJson(req))) });
       }
+      const pendienteDeEvidencia = url.pathname.match(EVIDENCIA_PATH)?.[1];
+      if (pendienteDeEvidencia && req.method === 'GET') return enviar(200, 'evidencia', repo.evidencia(yo, pendienteDeEvidencia));
       const pendienteDeActividad = url.pathname.match(ACTIVIDAD_ITEM_PATH)?.[1];
       if (pendienteDeActividad && req.method === 'GET') return enviar(200, 'actividad', repo.actividadDePendiente(yo, pendienteDeActividad));
       const pendienteDeComentarios = url.pathname.match(COMENTARIOS_PATH)?.[1];

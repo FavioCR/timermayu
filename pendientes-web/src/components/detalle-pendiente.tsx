@@ -59,6 +59,8 @@ type Props = {
   onBorrar: (pendiente: Pendiente) => void
   onCerrar: () => void
   onSalir: () => void
+  // Cambia (>0) cuando hay que mostrar el chat con el campo listo para escribir (desde el recordatorio de evidencia).
+  enfocarChat?: number
 }
 
 // Página de un pendiente al estilo Notion: propiedades arriba y la descripción con imágenes debajo;
@@ -72,10 +74,11 @@ export function DetallePendiente({ pendiente, onCerrar, ...props }: Props) {
     <Sheet open={pendiente !== null} onOpenChange={(abierto) => !abierto && onCerrar()}>
       <SheetContent
         className="gap-0 overflow-y-auto data-[side=right]:w-full data-[side=right]:sm:max-w-2xl lg:overflow-hidden data-[side=right]:lg:max-w-5xl"
-        // Radix enfocaría el título y lo dejaría seleccionado; el foco va al panel y se escribe donde se haga clic.
+        // Radix enfocaría el título y lo dejaría seleccionado; el foco va al panel y se escribe donde se haga clic (o al
+        // chat, si se abrió para escribir ahí).
         onOpenAutoFocus={(event) => {
           event.preventDefault()
-          ;(event.currentTarget as HTMLElement).focus()
+          if (!props.enfocarChat) (event.currentTarget as HTMLElement).focus()
         }}
       >
         {mostrado && <Contenido key={mostrado.id} pendiente={mostrado} {...props} />}
@@ -100,7 +103,15 @@ function Contenido({
   onPasar,
   onBorrar,
   onSalir,
+  enfocarChat = 0,
 }: Omit<Props, "pendiente" | "onCerrar"> & { pendiente: Pendiente }) {
+  const [pestana, setPestana] = useState("chat")
+  // Un pedido nuevo de escribir en el chat lo muestra aunque estuviera viendo el historial.
+  const [pedidoDeChat, setPedidoDeChat] = useState(enfocarChat)
+  if (enfocarChat !== pedidoDeChat) {
+    setPedidoDeChat(enfocarChat)
+    if (enfocarChat) setPestana("chat")
+  }
   // `version` cambia cuando llega una descripción nueva de otra persona: el editor se vuelve a montar con ella.
   const [inicial, setInicial] = useState<{ bloques: unknown[] | undefined; version: number } | null>(null)
   const [guardando, setGuardando] = useState(false)
@@ -459,7 +470,7 @@ function Contenido({
       </div>
 
       <aside aria-label="Chat e historial" className="flex flex-col border-t lg:h-full lg:w-96 lg:shrink-0 lg:border-t-0 lg:border-l">
-        <Tabs defaultValue="chat" className="flex min-h-0 flex-1 flex-col gap-0">
+        <Tabs value={pestana} onValueChange={setPestana} className="flex min-h-0 flex-1 flex-col gap-0">
           <div className="flex h-14 shrink-0 items-center border-b px-4 lg:pr-12">
             <TabsList>
               <TabsTrigger value="chat" className="px-3">
@@ -479,6 +490,7 @@ function Contenido({
               perfilesPorId={perfilesPorId}
               onCantidad={(cantidad) => onCantidadComentarios(id, cantidad)}
               onSalir={onSalir}
+              enfocar={enfocarChat}
             />
           </TabsContent>
           <TabsContent value="historial" className="min-h-0 overflow-y-auto p-4">
