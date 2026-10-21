@@ -120,7 +120,7 @@ async function startServer(t, options = {}) {
     const llamar = (method, ruta, body) => call(method, ruta, body, headers);
     return { perfil, contrasena, headers, call: llamar, data: async (method, ruta, body) => (await llamar(method, ruta, body)).json() };
   };
-  return { dataDir, base, call, data, entrarComo };
+  return { dataDir, base, call, data, entrarComo, server };
 }
 
 test('valida pendientes, perfiles, organizaciones, proyectos y orden', () => {
@@ -202,10 +202,10 @@ test('la base nueva trae a Favio, Diego y Junior una sola vez', async () => {
 
 test('cada perfil entra con su contraseña, por nombre o por correo', async (t) => {
   const { call, data, entrarComo } = await startServer(t);
-  assert.deepEqual((await data('GET', '/yo')).usuario, { perfil_id: null, nombre: 'Equipo', notas: false, apariencia: null });
+  assert.deepEqual((await data('GET', '/yo')).usuario, { perfil_id: null, nombre: 'Equipo', notas: false, apariencia: null, avisos_por_correo: null });
 
   const diego = await entrarComo('Diego');
-  assert.deepEqual((await diego.data('GET', '/yo')).usuario, { perfil_id: diego.perfil.id, nombre: 'Diego', notas: false, apariencia: null });
+  assert.deepEqual((await diego.data('GET', '/yo')).usuario, { perfil_id: diego.perfil.id, nombre: 'Diego', notas: false, apariencia: null, avisos_por_correo: null });
   assert.equal((await call('GET', '/yo', undefined, { Authorization: basic('diego', diego.contrasena) })).status, 200);
   assert.equal((await call('GET', '/yo', undefined, { Authorization: basic('Diego', 'otra-clave') })).status, 401);
   assert.equal((await call('GET', '/yo', undefined, { Authorization: basic('Favio', '') })).status, 401);
@@ -1796,6 +1796,92 @@ test('lo guardado antes (un archivo por fila) pasa a guardarse por contenido al 
     assert.equal(existsSync(path.join(dataDir, 'archivos', id)), false);
   }
   assert.deepEqual(blobs(dataDir), [sha(PDF)]);
+});
+
+test('avisos por correo: a quien no ve sus avisos le llega un resumen de esa actividad, una vez, y lo puede apagar', async (t) => {
+  const enviados = [];
+  let fallar = false;
+  const correo = { enviar: async (mensaje) => {
+    if (fallar) throw new Error('SMTP caído');
+    enviados.push(mensaje);
+  } };
+  const { server, call, entrarComo } = await startServer(t, { correo, urlTablero: 'https://tablero.ejemplo/pendientes/' });
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  assert.equal((await favio.call('PATCH', `/perfiles/${favio.perfil.id}`, { correo: 'favio@ejemplo.com' })).status, 200);
+  const MIN = 60_000;
+  const inicio = Date.now();
+  const vuelta = (minutos) => server.mandarAvisosPorCorreo(inicio + minutos * MIN);
+
+  const yo = async (quien) => (await (await call('GET', '/yo', undefined, quien.headers)).json()).usuario.avisos_por_correo;
+  assert.deepEqual(await yo(favio), { activo: true, correo: 'favio@ejemplo.com' });
+  assert.deepEqual(await yo(diego), { activo: true, correo: null });
+  assert.equal((await call('GET', '/yo').then((r) => r.json())).usuario.avisos_por_correo, null);
+
+  const { pendiente } = await diego.data('POST', '', { texto: 'Facturación <octubre>', perfil_id: favio.perfil.id });
+  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: '@Favio revisa el total & avísame' });
+
+  // Antes de una hora no se manda nada; después, un solo correo con los dos avisos (lo más nuevo primero).
+  await vuelta(30);
+  assert.equal(enviados.length, 0);
+  await vuelta(61);
+  assert.equal(enviados.length, 1);
+  const [primero] = enviados;
+  assert.equal(primero.to, 'favio@ejemplo.com');
+  assert.equal(primero.subject, 'Tienes 2 avisos sin ver en Pendientes');
+  const enlace = `https://tablero.ejemplo/pendientes/?p=${pendiente.id}`;
+  for (const parte of ['Hola, Favio:', '• Diego te mencionó en «Facturación <octubre>»', '> @Favio revisa el total & avísame',
+    '• Diego creó «Facturación <octubre>» y te lo asignó', enlace, 'Abrir el tablero: https://tablero.ejemplo/pendientes/', 'Avisos por correo']) {
+    assert.ok(primero.text.includes(parte), parte);
+  }
+  assert.ok(primero.text.indexOf('te mencionó') < primero.text.indexOf('te lo asignó'));
+  assert.ok(primero.html.includes('Facturación &lt;octubre&gt;') && !primero.html.includes('<octubre>'));
+  assert.ok(primero.html.includes(`href="${enlace}"`));
+  // Lo que ya llegó por correo no se repite.
+  await vuelta(70);
+  assert.equal(enviados.length, 1);
+
+  // Lo nuevo espera al menos 4 horas desde el último correo, y si falla el envío se reintenta en la vuelta siguiente.
+  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: '¿Lo viste, @Favio?' });
+  await vuelta(130);
+  assert.equal(enviados.length, 1);
+  fallar = true;
+  await vuelta(305);
+  assert.equal(enviados.length, 1);
+  fallar = false;
+  await vuelta(310);
+  assert.equal(enviados.length, 2);
+  assert.equal(enviados[1].subject, 'Diego te mencionó en «Facturación <octubre>»');
+  assert.ok(!enviados[1].text.includes('te lo asignó'));
+
+  // Lo que ya vio no se manda.
+  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: 'Otra cosa, @Favio' });
+  await favio.call('POST', '/notificaciones/leidas', {});
+  await vuelta(600);
+  assert.equal(enviados.length, 2);
+
+  // Apagado no le llega nada; tampoco a la cuenta del equipo, que no es un perfil.
+  assert.equal((await favio.call('PUT', '/yo/avisos-por-correo', { activo: 'no' })).status, 422);
+  assert.deepEqual(await favio.data('PUT', '/yo/avisos-por-correo', { activo: false }), { activo: false });
+  assert.equal((await call('PUT', '/yo/avisos-por-correo', { activo: false })).status, 404);
+  assert.deepEqual(await yo(favio), { activo: false, correo: 'favio@ejemplo.com' });
+  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: 'Y otra, @Favio' });
+  await vuelta(900);
+  assert.equal(enviados.length, 2);
+  // Al volver a encenderlo, lo de hace más de 3 días ya no se manda.
+  await favio.data('PUT', '/yo/avisos-por-correo', { activo: true });
+  await vuelta(4 * 24 * 60);
+  assert.equal(enviados.length, 2);
+  await vuelta(1000);
+  assert.equal(enviados.length, 3);
+});
+
+test('avisos por correo: sin configurar no se mandan ni aparecen', async (t) => {
+  const { call, entrarComo } = await startServer(t);
+  const favio = await entrarComo('Favio');
+  assert.equal((await favio.data('GET', '/yo')).usuario.avisos_por_correo, null);
+  assert.equal((await favio.call('PUT', '/yo/avisos-por-correo', { activo: false })).status, 404);
+  assert.ok(call);
 });
 
 test('IA: en una nota redacta como apuntes del curso, y solo en las notas propias', async (t) => {

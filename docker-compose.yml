@@ -48,6 +48,15 @@ services:
       AUTH_PASSWORD: ${PENDIENTES_PASSWORD:-}
       # Quién tiene notas privadas (apuntes de cursos): correos de perfiles, separados por comas. Vacío = nadie.
       NOTAS_CORREOS: ${PENDIENTES_NOTAS_CORREOS:-}
+      # Avisos por correo (lo que alguien no vio en una hora): con PENDIENTES_AVISOS_POR_CORREO=si y el SMTP puesto. Las
+      # credenciales viven solo en el .env del servidor.
+      AVISOS_POR_CORREO: ${PENDIENTES_AVISOS_POR_CORREO:-}
+      SMTP_HOST: ${PENDIENTES_SMTP_HOST:-}
+      SMTP_PORT: ${PENDIENTES_SMTP_PORT:-}
+      SMTP_SECURE: ${PENDIENTES_SMTP_SECURE:-}
+      SMTP_USER: ${PENDIENTES_SMTP_USER:-}
+      SMTP_PASSWORD: ${PENDIENTES_SMTP_PASSWORD:-}
+      MAIL_FROM: ${PENDIENTES_MAIL_FROM:-}
     volumes:
       - pendientes_data:/data
     networks:

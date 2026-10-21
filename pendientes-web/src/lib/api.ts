@@ -98,7 +98,14 @@ export type Perfil = {
 // Quien entró: un perfil, o la cuenta del equipo (perfil_id null), que solo ve lo compartido.
 // notas: si tiene las notas privadas (apuntes de cursos).
 // `apariencia`: la fuente y el tamaño de letra que eligió (null: la de siempre).
-export type Usuario = { perfil_id: string | null; nombre: string; notas: boolean; apariencia: Apariencia | null }
+// `avisos_por_correo`: si le llegan por correo los avisos que no vio, y a qué correo (null: no se mandan correos).
+export type Usuario = {
+  perfil_id: string | null
+  nombre: string
+  notas: boolean
+  apariencia: Apariencia | null
+  avisos_por_correo: { activo: boolean; correo: string | null } | null
+}
 
 // Al reescribir lo seleccionado en el editor: que vuelva solo su reemplazo y, si se dice, cómo reescribirlo.
 export type OpcionesRedaccion = { seleccion?: boolean; indicacion?: string }
@@ -473,6 +480,8 @@ export const api = {
   yo: (credenciales: string) => pedir<{ usuario: Usuario }>(credenciales, "GET", "/yo").then((data) => data.usuario),
   guardarApariencia: (credenciales: string, apariencia: Apariencia) =>
     pedir<{ apariencia: Apariencia }>(credenciales, "PUT", "/yo/apariencia", apariencia).then((data) => data.apariencia),
+  guardarAvisosPorCorreo: (credenciales: string, activo: boolean) =>
+    pedir<{ activo: boolean }>(credenciales, "PUT", "/yo/avisos-por-correo", { activo }).then((data) => data.activo),
   listar: (credenciales: string) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "GET").then((data) => data.pendientes),
   crear: (

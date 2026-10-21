@@ -36,6 +36,7 @@ import {
   Layers,
   Lock,
   LogOut,
+  Mail,
   MessageSquare,
   MonitorDown,
   NotebookPen,
@@ -97,6 +98,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command"
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -464,6 +466,20 @@ export function Tablero({
     },
     [onSalir]
   )
+
+  // Se ve al instante; si no se pudo guardar, vuelve a como estaba.
+  async function cambiarAvisosPorCorreo(activo: boolean) {
+    const conAvisos = (valor: boolean) =>
+      setUsuario((antes) => antes?.avisos_por_correo ? { ...antes, avisos_por_correo: { ...antes.avisos_por_correo, activo: valor } } : antes)
+    conAvisos(activo)
+    try {
+      await api.guardarAvisosPorCorreo(credenciales, activo)
+      toast.success(activo ? "Te llegarán por correo los avisos que no veas" : "Ya no te llegarán avisos por correo")
+    } catch (err) {
+      conAvisos(!activo)
+      fallar(err)
+    }
+  }
 
   const recargar = useCallback(async () => {
     try {
@@ -1132,6 +1148,21 @@ export function Tablero({
                 <DropdownMenuItem onSelect={() => setVentana("apariencia")}>
                   <Type /> Apariencia
                 </DropdownMenuItem>
+                {usuario?.avisos_por_correo && (
+                  <DropdownMenuCheckboxItem
+                    checked={usuario.avisos_por_correo.activo}
+                    disabled={!usuario.avisos_por_correo.correo}
+                    onCheckedChange={(activo) => cambiarAvisosPorCorreo(activo === true)}
+                  >
+                    <Mail />
+                    <span className="flex min-w-0 flex-col">
+                      Avisos por correo
+                      <span className="truncate text-xs text-muted-foreground">
+                        {usuario.avisos_por_correo.correo ? "Lo que no viste en una hora" : "Pon tu correo en Perfiles"}
+                      </span>
+                    </span>
+                  </DropdownMenuCheckboxItem>
+                )}
                 {!instalacion.instalada && (
                   <DropdownMenuItem onSelect={instalarApp}>
                     <MonitorDown /> Instalar en el escritorio

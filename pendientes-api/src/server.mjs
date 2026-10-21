@@ -22,6 +22,7 @@ import {
   pedirTipo,
   PROVEEDORES_IA,
 } from './ia.mjs';
+import { armarResumen, crearCorreo } from './correo.mjs';
 
 // Alcanza para el orden completo del tablero (hasta 5000 pendientes de ~60 bytes cada uno).
 const MAX_BODY_BYTES = 512 * 1024;
@@ -82,6 +83,13 @@ const MAX_REDACCION_NOTA = 8000;
 // Cambios en tiempo real: nginx corta una respuesta que pasa 12 s sin datos, así que el flujo manda un latido antes.
 const LATIDO_MS = 9000;
 const MAX_CONEXIONES = 500;
+// Avisos por correo: a quien lleva una hora sin ver un aviso le llega un resumen de lo que no vio (como mucho uno cada
+// 4 horas). Lo de más de 3 días ya no se manda: al encenderlo no le llega a nadie todo lo atrasado.
+const ESPERA_CORREO_MS = 60 * 60_000;
+const ENTRE_CORREOS_MS = 4 * 60 * 60_000;
+const ANTIGUEDAD_CORREO_MS = 3 * 24 * 60 * 60_000;
+const REVISAR_CORREOS_MS = 5 * 60_000;
+const URL_TABLERO = 'https://timer.practi.dev/pendientes/';
 // Tras tantos intentos fallidos seguidos con un mismo usuario, se rechaza ese usuario durante la ventana.
 const MAX_FALLOS = 10;
 const VENTANA_FALLOS_MS = 15 * 60 * 1000;
@@ -103,6 +111,7 @@ const API_PATH = '/api/pendientes';
 const ORDER_PATH = '/api/pendientes/orden';
 const YO_PATH = '/api/pendientes/yo';
 const APARIENCIA_PATH = '/api/pendientes/yo/apariencia';
+const AVISOS_POR_CORREO_PATH = '/api/pendientes/yo/avisos-por-correo';
 const PERFILES_PATH = '/api/pendientes/perfiles';
 const ORGANIZACIONES_PATH = '/api/pendientes/organizaciones';
 const PROYECTOS_PATH = '/api/pendientes/proyectos';
@@ -144,7 +153,7 @@ const IA_TRABAJO_PATH = new RegExp(`^/api/pendientes/ia/sugerir/${UUID}$`);
 const RECURSO_REPETIDO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/recursos/repetido$`);
 // Lo que se guarda el resultado de un trabajo de la IA que nadie vino a buscar.
 const VIDA_TRABAJO_IA_MS = 10 * 60_000;
-const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
+const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_CORREO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
   ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, ETIQUETA_PATH,
@@ -413,6 +422,10 @@ const MIGRACIONES = [
   // ya guardado (un archivo por fila) lo pasa openDb, que conoce la carpeta de datos.
   (db) => {
     db.exec(TABLAS_CON_BLOB.map((tabla) => `ALTER TABLE ${tabla} ADD COLUMN sha256 TEXT; CREATE INDEX ${tabla}_sha256 ON ${tabla} (sha256);`).join('\n'));
+  },
+  // Cuándo se mandó cada aviso por correo (null: todavía no), para no mandarlo dos veces.
+  (db) => {
+    db.exec('ALTER TABLE notificaciones ADD COLUMN correo_en TEXT');
   },
 ];
 
@@ -1299,6 +1312,43 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       return apariencia;
     },
 
+    // Si le llegan por correo los avisos que no vio. Encendido salvo que lo apague.
+    avisosPorCorreo: (yo) => db.prepare('SELECT valor FROM ajustes WHERE clave = ?').get(`avisos_por_correo:${yo}`)?.valor !== 'no',
+
+    guardarAvisosPorCorreo(yo, activo) {
+      db.prepare('INSERT INTO ajustes (clave, valor) VALUES (?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor')
+        .run(`avisos_por_correo:${yo}`, activo ? 'si' : 'no');
+      return activo;
+    },
+
+    // A quién le toca un correo y con qué: a quien tiene correo y no lo apagó, si su aviso sin ver más viejo lleva más
+    // de `esperaMs`. Van todos los que no vio ni le llegaron ya por correo (de los últimos `antiguedadMs`), del más viejo
+    // al más nuevo, y como mucho un correo cada `entreCorreosMs`. Solo lo que puede ver, como en la campana.
+    avisosParaCorreo({ ahora, esperaMs, entreCorreosMs, antiguedadMs }) {
+      const hace = (ms) => new Date(ahora - ms).toISOString();
+      const perfiles = db.prepare(`SELECT id, nombre, correo FROM perfiles p WHERE coalesce(correo, '') != ''
+        AND NOT EXISTS (SELECT 1 FROM ajustes WHERE clave = 'avisos_por_correo:' || p.id AND valor = 'no')
+        AND NOT EXISTS (SELECT 1 FROM notificaciones WHERE perfil_id = p.id AND correo_en > ?)`).all(hace(entreCorreosMs));
+      const sinVer = db.prepare(`SELECT n.id AS notificacion_id, n.creado_en AS avisado_en, a.id, a.pendiente_id, a.texto_pendiente,
+          a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en
+        FROM notificaciones n JOIN actividad a ON a.id = n.actividad_id
+        WHERE n.perfil_id = ? AND n.leida_en IS NULL AND n.correo_en IS NULL AND n.creado_en > ? AND ${ACTIVIDAD_VISIBLE}
+        ORDER BY n.creado_en, n.rowid`);
+      return perfiles
+        .map((perfil) => ({ perfil: { ...perfil }, avisos: sinVer.all(perfil.id, hace(antiguedadMs), perfil.id, perfil.id) }))
+        .filter(({ avisos }) => avisos.length > 0 && avisos[0].avisado_en <= hace(esperaMs))
+        .map(({ perfil, avisos }) => ({
+          perfil,
+          ids: avisos.map((aviso) => aviso.notificacion_id),
+          avisos: avisos.map(({ notificacion_id: _id, avisado_en: _en, ...actividad }) => actividadFila(actividad)),
+        }));
+    },
+
+    marcarAvisosEnviados(ids, ahora) {
+      const marcar = db.prepare('UPDATE notificaciones SET correo_en = ? WHERE id = ?');
+      transaction(db, () => ids.forEach((id) => marcar.run(new Date(ahora).toISOString(), id)));
+    },
+
     // La IA del equipo. Las claves solo salen de aquí hacia el proveedor elegido.
     ajustesIA() {
       const guardado = db.prepare("SELECT valor FROM ajustes WHERE clave = 'ia'").get();
@@ -2124,6 +2174,33 @@ export function createApp(options = {}) {
     .map((correo) => correo.trim().toLowerCase()).filter(Boolean));
   const puedeNotas = (usuario) => Boolean(usuario.perfil_id && correosNotas.has(repo.correoDe(usuario.perfil_id)));
 
+  // Avisos por correo: solo con AVISOS_POR_CORREO=si y el SMTP configurado (ver crearCorreo). Las pruebas pasan el suyo.
+  const correo = 'correo' in options ? options.correo : process.env.AVISOS_POR_CORREO === 'si' ? crearCorreo() : null;
+  const urlTablero = options.urlTablero ?? process.env.URL_TABLERO ?? URL_TABLERO;
+  let mandandoCorreos = false;
+  async function mandarAvisosPorCorreo(ahora = Date.now()) {
+    if (!correo || mandandoCorreos) return;
+    mandandoCorreos = true;
+    try {
+      const pendientes = repo.avisosParaCorreo({
+        ahora, esperaMs: ESPERA_CORREO_MS, entreCorreosMs: ENTRE_CORREOS_MS, antiguedadMs: ANTIGUEDAD_CORREO_MS,
+      });
+      for (const { perfil, ids, avisos } of pendientes) {
+        try {
+          await correo.enviar({ to: perfil.correo, ...armarResumen({ perfil, avisos, urlTablero, ahora }) });
+          repo.marcarAvisosEnviados(ids, ahora);
+        } catch (error) {
+          // Se vuelve a intentar en la próxima vuelta.
+          console.error(`No se pudo mandar el correo de avisos a ${perfil.nombre}: ${error.message}`);
+        }
+      }
+    } finally {
+      mandandoCorreos = false;
+    }
+  }
+  const revisarCorreos = correo && setInterval(() => mandarAvisosPorCorreo().catch((error) => console.error(error)), REVISAR_CORREOS_MS);
+  if (revisarCorreos) revisarCorreos.unref();
+
   // Cambios en tiempo real (SSE): cada pestaña abierta deja una conexión en GET /api/pendientes/eventos y, cuando
   // alguien cambia algo, se le avisa qué cambió (pendientes, un chat, archivos, el catálogo) para que lo vuelva a
   // pedir con sus permisos. No viaja el cambio en sí. La pestaña que hizo el cambio (X-Cliente) no se avisa a sí misma.
@@ -2320,7 +2397,15 @@ export function createApp(options = {}) {
       const listo = (hecho) => (hecho ? json(res, 200, { ok: true }) : json(res, 404, { error: 'not_found' }));
 
       if (url.pathname === YO_PATH && req.method === 'GET') {
-        return json(res, 200, { usuario: { ...usuario, notas: puedeNotas(usuario), apariencia: repo.apariencia(yo) } });
+        // avisos_por_correo: null si no se mandan (están apagados en el servidor, o es la cuenta del equipo).
+        const avisosPorCorreo = correo && yo ? { activo: repo.avisosPorCorreo(yo), correo: repo.correoDe(yo) } : null;
+        return json(res, 200, { usuario: { ...usuario, notas: puedeNotas(usuario), apariencia: repo.apariencia(yo), avisos_por_correo: avisosPorCorreo } });
+      }
+      if (url.pathname === AVISOS_POR_CORREO_PATH && req.method === 'PUT') {
+        if (!correo || !yo) return json(res, 404, { error: 'not_found' });
+        const { activo } = await readJson(req);
+        if (typeof activo !== 'boolean') throw httpError(422, 'activo_invalido');
+        return json(res, 200, { activo: repo.guardarAvisosPorCorreo(yo, activo) });
       }
       if (url.pathname === APARIENCIA_PATH && req.method === 'PUT') {
         return json(res, 200, { apariencia: repo.guardarApariencia(yo, parseApariencia(await readJson(req))) });
@@ -2530,10 +2615,13 @@ export function createApp(options = {}) {
   const cerrar = server.close.bind(server);
   server.close = (callback) => {
     clearInterval(latido);
+    clearInterval(revisarCorreos);
     for (const conexion of conexiones) conexion.res.end();
     return cerrar(callback);
   };
   server.on('close', () => db.close());
+  // Para las pruebas: la vuelta de los correos, como si fuera `ahora`.
+  server.mandarAvisosPorCorreo = mandarAvisosPorCorreo;
   return server;
 }
 
@@ -2545,6 +2633,25 @@ if (isMain && process.argv[2] === 'quitar-contrasena') {
   const { changes } = db.prepare('UPDATE perfiles SET password_hash = NULL WHERE nombre = ?').run(process.argv[3] ?? '');
   console.log(changes ? `Se quitó la contraseña de ${process.argv[3]}.` : `No hay un perfil llamado "${process.argv[3] ?? ''}".`);
   db.close();
+} else if (isMain && process.argv[2] === 'probar-correo') {
+  // Manda un correo de ejemplo para probar el SMTP:  node src/server.mjs probar-correo alguien@ejemplo.com
+  const correo = crearCorreo();
+  if (!correo) {
+    console.error('Falta configurar SMTP_HOST y MAIL_FROM.');
+    process.exitCode = 1;
+  } else {
+    const ahora = Date.now();
+    const ejemplo = (tipo, datos, minutos) => ({
+      pendiente_id: null, texto_pendiente: 'Correo de prueba', perfil_id: null, autor: 'Pendientes', tipo, datos,
+      creado_en: new Date(ahora - minutos * 60_000).toISOString(),
+    });
+    const avisos = [ejemplo('asignado', { a: 'ti', a_id: 'prueba' }, 90), ejemplo('comentario', { menciones: ['prueba'], extracto: 'Si te llegó, el correo funciona.' }, 70)];
+    correo.enviar({ to: process.argv[3], ...armarResumen({ perfil: { id: 'prueba', nombre: 'prueba' }, avisos, urlTablero: process.env.URL_TABLERO ?? URL_TABLERO, ahora }) })
+      .then((info) => console.log(`Enviado (${info.messageId}).`), (error) => {
+        console.error(`No se pudo mandar: ${error.message}`);
+        process.exitCode = 1;
+      });
+  }
 } else if (isMain) {
   const port = Number(process.env.PORT || 3000);
   const dataDir = process.env.DATA_DIR || '/data';
