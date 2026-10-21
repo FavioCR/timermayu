@@ -22,6 +22,7 @@ import {
   ChevronRight,
   ChevronsDownUp,
   CircleCheck,
+  Clapperboard,
   CircleDashed,
   ClipboardList,
   Folder,
@@ -62,6 +63,7 @@ import { toast } from "sonner"
 import { ActividadSheet } from "@/components/actividad-sheet"
 import { AparienciaDialog } from "@/components/apariencia-dialog"
 import { Aprobacion } from "@/components/aprobacion"
+import { Reproductor } from "@/components/reproductor"
 import { DetallePendiente } from "@/components/detalle-pendiente"
 import { EstadoConexion } from "@/components/estado-conexion"
 import { porNombre, PuntoEtiqueta } from "@/components/etiquetas-selector"
@@ -1732,6 +1734,14 @@ export function Tablero({
                                     <Paperclip className="size-3.5" /> {tarjeta.num_archivos}
                                   </span>
                                 )}
+                                {tarjeta.num_videos > 0 && (
+                                  <span
+                                    className="flex items-center gap-1 text-xs text-muted-foreground"
+                                    title={tarjeta.num_videos === 1 ? "1 video" : `${tarjeta.num_videos} videos`}
+                                  >
+                                    <Clapperboard className="size-3.5" /> {tarjeta.num_videos}
+                                  </span>
+                                )}
                                 {tarjeta.num_imagenes > 0 && (
                                   <span
                                     className="flex items-center gap-1 text-xs text-muted-foreground"
@@ -1947,6 +1957,7 @@ export function Tablero({
       />
       <Toaster position="bottom-right" />
 
+      <Reproductor />
       <DetallePendiente
         credenciales={credenciales}
         pendiente={pendienteAbierto}
@@ -1961,6 +1972,7 @@ export function Tablero({
         onCantidadComentarios={cambiarCantidadComentarios}
         onCantidadArchivos={cambiarCantidadArchivos}
         onPasar={setPasando}
+        onAbrirPendiente={setAbierto}
         onAprobar={aprobar}
         onBorrar={borrar}
         onCerrar={cerrarDetalle}

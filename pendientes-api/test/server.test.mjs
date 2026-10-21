@@ -809,6 +809,146 @@ test('archivos: se adjuntan al pendiente o a un mensaje, se sirven con contrase�
   assert.deepEqual([(await bajar(pagina.id)).status, enDisco(HTML)], [404, false]);
 });
 
+test('archivos grandes: llegan por partes, se reproducen por rangos y con un enlace firmado', async (t) => {
+  const { dataDir, base, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const { pendiente } = await favio.data('POST', '', { texto: 'Demo del login', perfil_id: favio.perfil.id });
+  // Un MP4 de mentira: la caja ftyp al principio y bytes que se distinguen.
+  const VIDEO = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(12), Buffer.from(Array.from({ length: 40 }, (_, i) => i))]);
+  const empezar = (quien, parte, tamano = VIDEO.length) => fetch(`${base}/api/pendientes/${pendiente.id}/archivos`, {
+    method: 'POST', headers: { ...quien.headers, 'X-Nombre-Archivo': encodeURIComponent('demo.mp4'), 'X-Tamano': String(tamano) }, body: parte,
+  });
+  const seguir = (quien, id, desde, parte) => fetch(`${base}/api/pendientes/archivos/${id}/partes?desde=${desde}`, {
+    method: 'POST', headers: quien.headers, body: parte,
+  });
+  const parcial = (id) => path.join(dataDir, 'subidas', `${id}.parcial`);
+
+  const primera = await empezar(diego, VIDEO.subarray(0, 30));
+  assert.equal(primera.status, 201);
+  const { archivo } = await primera.json();
+  assert.deepEqual([archivo.tipo, archivo.tamano, archivo.subido], ['video/mp4', VIDEO.length, 30]);
+  // Mientras se sube no se lista, no se cuenta y no se puede abrir.
+  assert.deepEqual((await diego.data('GET', `/${pendiente.id}/archivos`)).archivos, []);
+  assert.equal((await diego.data('GET')).pendientes[0].num_archivos, 0);
+  assert.equal((await fetch(`${base}/api/pendientes/archivos/${archivo.id}`, { headers: diego.headers })).status, 404);
+  assert.equal((await seguir(diego, archivo.id, 10, VIDEO.subarray(10))).status, 409);
+  assert.equal((await seguir(favio, archivo.id, 30, VIDEO.subarray(30))).status, 403);
+  assert.equal((await seguir(diego, archivo.id, 30, Buffer.concat([VIDEO.subarray(30), Buffer.from('de más')]))).status, 422);
+  assert.equal((await empezar(diego, VIDEO.subarray(0, 10), 501 * 1024 * 1024)).status, 413);
+
+  const ultima = await seguir(diego, archivo.id, 30, VIDEO.subarray(30));
+  assert.equal(ultima.status, 200);
+  assert.equal((await ultima.json()).archivo.subido, null);
+  assert.equal(existsSync(parcial(archivo.id)), false);
+  assert.equal(existsSync(path.join(dataDir, 'blobs', sha(VIDEO))), true);
+  const [enLista] = (await diego.data('GET', `/${pendiente.id}/archivos`)).archivos;
+  assert.deepEqual([enLista.id, enLista.tipo, enLista.subido, enLista.tambien_en], [archivo.id, 'video/mp4', null, []]);
+  assert.deepEqual([(await diego.data('GET')).pendientes[0].num_archivos, (await diego.data('GET')).pendientes[0].num_videos], [1, 1]);
+  // Al completarse queda en el historial y le avisa a quien creó el pendiente.
+  assert.deepEqual((await favio.data('GET', '/notificaciones')).notificaciones[0].actividad.datos, { archivo_id: archivo.id, nombre: 'demo.mp4' });
+
+  // Entero, o el rango que pida el navegador.
+  const entero = await fetch(`${base}/api/pendientes/archivos/${archivo.id}`, { headers: favio.headers });
+  assert.deepEqual([entero.status, entero.headers.get('accept-ranges'), Buffer.from(await entero.arrayBuffer()).equals(VIDEO)], [200, 'bytes', true]);
+  const pedazo = await fetch(`${base}/api/pendientes/archivos/${archivo.id}`, { headers: { ...favio.headers, Range: 'bytes=24-33' } });
+  assert.equal(pedazo.status, 206);
+  assert.equal(pedazo.headers.get('content-range'), `bytes 24-33/${VIDEO.length}`);
+  assert.ok(Buffer.from(await pedazo.arrayBuffer()).equals(VIDEO.subarray(24, 34)));
+  const cola = await fetch(`${base}/api/pendientes/archivos/${archivo.id}`, { headers: { ...favio.headers, Range: 'bytes=-5' } });
+  assert.ok(Buffer.from(await cola.arrayBuffer()).equals(VIDEO.subarray(-5)));
+  assert.equal((await fetch(`${base}/api/pendientes/archivos/${archivo.id}`, { headers: { ...favio.headers, Range: 'bytes=999-' } })).status, 416);
+
+  // El enlace firmado sirve sin contraseña (también por rangos), solo para ese archivo, y no se puede adulterar.
+  const { url } = await favio.data('GET', `/archivos/${archivo.id}/enlace`);
+  assert.match(url, /^\/api\/pendientes\/archivos\/[0-9a-f-]{36}\?t=[\w-]+\.[\w-]+$/);
+  const firmado = await fetch(`${base}${url}`, { headers: { Range: 'bytes=0-9' } });
+  assert.deepEqual([firmado.status, firmado.headers.get('content-type')], [206, 'video/mp4']);
+  assert.equal((await fetch(`${base}${url}&descargar=1`)).headers.get('content-disposition'), "attachment; filename*=UTF-8''demo.mp4");
+  assert.equal((await fetch(`${base}${url.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A'))}`)).status, 404);
+  const otro = (await (await fetch(`${base}/api/pendientes/${pendiente.id}/archivos`, {
+    method: 'POST', headers: { ...favio.headers, 'X-Nombre-Archivo': 'otro.pdf' }, body: Buffer.from('%PDF-1.4 otro'),
+  })).json()).archivo;
+  assert.equal((await fetch(`${base}${url.replace(archivo.id, otro.id)}`)).status, 404);
+  assert.equal((await fetch(`${base}/api/pendientes/archivos/${archivo.id}`)).status, 401);
+
+  // Lo que queda a medias se va con el pendiente.
+  const { archivo: aMedias } = await (await empezar(diego, VIDEO.subarray(0, 8))).json();
+  assert.equal(existsSync(parcial(aMedias.id)), true);
+  await favio.data('DELETE', `/${pendiente.id}`);
+  assert.equal(existsSync(parcial(aMedias.id)), false);
+  assert.equal(existsSync(path.join(dataDir, 'blobs', sha(VIDEO))), false);
+});
+
+test('archivos: uno ya subido se usa en otros pendientes sin volver a subirlo, y sin ver lo ajeno', async (t) => {
+  const { dataDir, base, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const nuevo = async (quien, texto, extra = {}) => (await quien.data('POST', '', { texto, ...extra })).pendiente;
+  const login = await nuevo(diego, 'Login');
+  const pagos = await nuevo(diego, 'Pagos');
+  const subir = async (quien, id, contenido, nombre) => (await (await fetch(`${base}/api/pendientes/${id}/archivos`, {
+    method: 'POST', headers: { ...quien.headers, 'X-Nombre-Archivo': encodeURIComponent(nombre) }, body: contenido,
+  })).json()).archivo;
+  const reusar = (quien, id, archivoId, para = '') => fetch(`${base}/api/pendientes/${id}/archivos/reusar${para}`, {
+    method: 'POST', headers: { ...quien.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ archivo_id: archivoId }),
+  });
+  const repetido = (quien, id, contenido, nombre) => fetch(`${base}/api/pendientes/${id}/archivos/repetido`, {
+    method: 'POST', headers: { ...quien.headers, 'X-Sha256': sha(contenido), 'X-Tamano': String(contenido.length), 'X-Nombre-Archivo': nombre },
+  });
+  const enDisco = (contenido) => existsSync(path.join(dataDir, 'blobs', sha(contenido)));
+  const GUIA = Buffer.from('%PDF-1.4 la guía de estilos');
+
+  const guia = await subir(diego, login.id, GUIA, 'Guía de estilos.pdf');
+  // Favio la usa también en Pagos: otra fila, el mismo contenido, y cada una sabe dónde más está.
+  const usada = await reusar(favio, pagos.id, guia.id);
+  assert.equal(usada.status, 201);
+  const { archivo: enPagos } = await usada.json();
+  assert.notEqual(enPagos.id, guia.id);
+  assert.deepEqual([enPagos.nombre, enPagos.tipo, enPagos.tamano, enPagos.autor], ['Guía de estilos.pdf', 'application/pdf', GUIA.length, 'Favio']);
+  assert.deepEqual((await diego.data('GET', `/${login.id}/archivos`)).archivos[0].tambien_en, [{ pendiente_id: pagos.id, texto: 'Pagos' }]);
+  assert.deepEqual((await diego.data('GET', `/${pagos.id}/archivos`)).archivos[0].tambien_en, [{ pendiente_id: login.id, texto: 'Login' }]);
+  assert.deepEqual((await diego.data('GET', `/${pagos.id}/actividad`)).actividad[0].datos, { archivo_id: enPagos.id, nombre: 'Guía de estilos.pdf' });
+  // Usarlo otra vez en el mismo pendiente no lo duplica.
+  assert.equal((await (await reusar(favio, pagos.id, guia.id)).json()).archivo.id, enPagos.id);
+  assert.equal((await diego.data('GET', `/${pagos.id}/archivos`)).archivos.length, 1);
+
+  // El buscador junta lo mismo en un renglón y dice dónde está; no distingue tildes.
+  const encontrados = (await favio.data('GET', `/archivos?q=${encodeURIComponent('GUIA')}`)).archivos;
+  assert.equal(encontrados.length, 1);
+  assert.deepEqual(encontrados[0].usado_en.map((p) => p.texto).sort(), ['Login', 'Pagos']);
+  assert.equal((await favio.data('GET', '/archivos?q=nada')).archivos.length, 0);
+
+  // Subir otra vez algo que ya está: se agrega sin mandar los bytes. Lo que no está se sube como siempre (200, null).
+  const otraVez = await repetido(favio, login.id, GUIA, 'copia.pdf');
+  assert.equal(otraVez.status, 201);
+  assert.equal((await otraVez.json()).archivo.id, guia.id, 'en el mismo pendiente devuelve el que estaba');
+  const desconocido = await repetido(favio, login.id, Buffer.from('nunca subido'), 'x.bin');
+  assert.deepEqual([desconocido.status, await desconocido.json()], [200, { archivo: null }]);
+
+  // Quitarlo de un pendiente no lo quita del otro; del disco se va con el último.
+  assert.equal((await diego.call('DELETE', `/archivos/${guia.id}`)).status, 200);
+  assert.equal((await fetch(`${base}/api/pendientes/archivos/${enPagos.id}`, { headers: diego.headers })).status, 200);
+  assert.equal(enDisco(GUIA), true);
+  assert.equal((await favio.call('DELETE', `/archivos/${enPagos.id}`)).status, 200);
+  assert.equal(enDisco(GUIA), false);
+
+  // Lo de una organización privada de Diego: Favio no lo encuentra, no lo puede reusar ni averiguar que existe.
+  const { organizacion } = await diego.data('POST', '/organizaciones', { nombre: 'Personal', compartida: false });
+  const { proyecto } = await diego.data('POST', '/proyectos', { nombre: 'Casa', organizacion_id: organizacion.id });
+  const privado = await nuevo(diego, 'Privado', { proyecto_id: proyecto.id });
+  const SECRETO = Buffer.from('%PDF-1.4 secreto');
+  const secreto = await subir(diego, privado.id, SECRETO, 'secreto.pdf');
+  const publico = await nuevo(favio, 'Público');
+  assert.deepEqual((await favio.data('GET', '/archivos?q=secreto')).archivos, []);
+  assert.equal((await reusar(favio, publico.id, secreto.id)).status, 422);
+  assert.deepEqual(await (await repetido(favio, publico.id, SECRETO, 'x.pdf')).json(), { archivo: null });
+  assert.equal((await favio.call('GET', `/archivos/${secreto.id}/enlace`)).status, 404);
+  // Diego sí puede llevarlo a uno compartido (es suyo).
+  assert.equal((await reusar(diego, publico.id, secreto.id)).status, 201);
+  assert.equal((await diego.call('POST', `/${crypto.randomUUID()}/archivos/reusar`, { archivo_id: secreto.id })).status, 404);
+});
+
 test('pasar un pendiente hecho a otra persona: vuelve a Por hacer y conserva su historial y su chat', async (t) => {
   const { call, entrarComo } = await startServer(t);
   const diego = await entrarComo('Diego');

@@ -4,24 +4,25 @@ import { ExternalLink, ImageOff, LoaderCircle, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, type CarouselApi } from "@/components/ui/carousel"
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
-import { api, type Archivo } from "@/lib/api"
-import { tamanoLegible, urlDeArchivo } from "@/lib/archivos"
+import { tamanoLegible } from "@/lib/archivos"
+
+// Una imagen del visor: un adjunto, o una imagen de la descripción o de una nota. `url` es la del API.
+export type ImagenDelVisor = { id: string; nombre: string; tamano?: number; url: string }
 
 // Una imagen a tamaño completo. Pide contraseña, así que llega como blob (el mismo que ya usó la miniatura).
-function ImagenGrande({ credenciales, archivo }: { credenciales: string; archivo: Archivo }) {
+function ImagenGrande({ imagen, cargar }: { imagen: ImagenDelVisor; cargar: (url: string) => Promise<string> }) {
   const [url, setUrl] = useState<string | null>(null)
   const [fallo, setFallo] = useState(false)
 
   useEffect(() => {
     let vigente = true
-    api
-      .urlDeImagen(credenciales, urlDeArchivo(archivo.id))
+    cargar(imagen.url)
       .then((blob) => vigente && setUrl(blob))
       .catch(() => vigente && setFallo(true))
     return () => {
       vigente = false
     }
-  }, [credenciales, archivo.id])
+  }, [cargar, imagen.url])
 
   if (fallo) {
     return (
@@ -31,24 +32,39 @@ function ImagenGrande({ credenciales, archivo }: { credenciales: string; archivo
     )
   }
   if (!url) return <LoaderCircle aria-label="Cargando la imagen" className="size-8 animate-spin text-white/70" />
-  return <img src={url} alt={archivo.nombre} draggable={false} className="max-h-full max-w-full object-contain select-none" />
+  return <img src={url} alt={imagen.nombre} draggable={false} className="max-h-full max-w-full object-contain select-none" />
 }
 
-// Las imágenes de un chat en grande y en carrusel, empezando por la que se tocó: se pasa de una a otra con las flechas
-// (en pantalla o del teclado) o deslizando en el celular.
+// Sin otra forma de abrirla, la original va a otra pestaña (abierta dentro del clic, para que el navegador no la bloquee).
+function abrirEnPestana(imagen: ImagenDelVisor, cargar: (url: string) => Promise<string>) {
+  const pestana = window.open("", "_blank")
+  if (!pestana) return
+  pestana.opener = null
+  cargar(imagen.url)
+    .then((url) => {
+      pestana.location.href = url
+    })
+    .catch(() => pestana.close())
+}
+
+// Imágenes en grande y en carrusel (las de un chat, los adjuntos o una descripción), empezando por la que se tocó: se
+// pasa de una a otra con las flechas (en pantalla o del teclado) o deslizando en el celular.
 export function VisorImagenes({
-  credenciales,
   imagenes,
+  cargar,
   inicial,
+  etiqueta = "Imágenes",
   onCerrar,
-  onAbrirOriginal,
+  onAbrirOriginal = (imagen) => abrirEnPestana(imagen, cargar),
 }: {
-  credenciales: string
-  imagenes: Archivo[]
+  imagenes: ImagenDelVisor[]
+  // Trae la imagen (con la contraseña) y devuelve una url para mostrarla.
+  cargar: (url: string) => Promise<string>
   // La que se tocó (null: cerrado).
   inicial: number | null
+  etiqueta?: string
   onCerrar: () => void
-  onAbrirOriginal: (archivo: Archivo) => void
+  onAbrirOriginal?: (imagen: ImagenDelVisor) => void
 }) {
   const [carrusel, setCarrusel] = useState<CarouselApi>()
   const [actual, setActual] = useState(inicial ?? 0)
@@ -78,14 +94,14 @@ export function VisorImagenes({
             setApi={setCarrusel}
             opts={{ startIndex: inicial, duration: 18 }}
             className="flex h-full min-h-0 flex-col"
-            aria-label="Imágenes del chat"
+            aria-label={etiqueta}
           >
             <div className="flex items-center gap-3 px-4 pt-3 pb-2">
               <div className="min-w-0 flex-1">
                 <DialogTitle className="truncate text-sm font-medium text-white">{imagen?.nombre}</DialogTitle>
                 <DialogDescription className="text-xs text-white/60">
                   {imagenes.length > 1 && `${actual + 1} de ${imagenes.length} · `}
-                  {imagen && tamanoLegible(imagen.tamano)}
+                  {imagen?.tamano !== undefined && tamanoLegible(imagen.tamano)}
                 </DialogDescription>
               </div>
               <Button
@@ -104,14 +120,14 @@ export function VisorImagenes({
             </div>
             <div className="relative min-h-0 flex-1 [&>[data-slot=carousel-content]]:h-full">
               <CarouselContent className="h-full">
-                {imagenes.map((archivo, i) => (
+                {imagenes.map((imagenDe, i) => (
                   <CarouselItem
-                    key={archivo.id}
+                    key={imagenDe.id}
                     aria-label={`${i + 1} de ${imagenes.length}`}
                     className="flex h-full items-center justify-center p-2 sm:p-4"
                   >
                     {/* Solo se cargan la que se ve y sus vecinas. */}
-                    {Math.abs(i - actual) <= 1 && <ImagenGrande credenciales={credenciales} archivo={archivo} />}
+                    {Math.abs(i - actual) <= 1 && <ImagenGrande imagen={imagenDe} cargar={cargar} />}
                   </CarouselItem>
                 ))}
               </CarouselContent>

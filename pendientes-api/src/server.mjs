@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import {
   closeSync, copyFileSync, createReadStream, existsSync, linkSync, mkdirSync, openSync, readFileSync, readSync, renameSync, unlinkSync,
 } from 'node:fs';
@@ -39,6 +39,10 @@ const MAX_NOMBRE = 40;
 const MAX_CORREO = 120;
 const MAX_COMENTARIO = 2000;
 const MAX_ARCHIVO_BYTES = 10 * 1024 * 1024;
+// Lo más grande (videos, sobre todo) llega en partes de hasta MAX_PARTE_BYTES, como los recursos de las notas.
+const MAX_ARCHIVO_GRANDE_BYTES = 500 * 1024 * 1024;
+// Lo que vale el enlace firmado a un archivo: un <video> lo pide por rangos sin poder mandar la contraseña.
+const VIDA_ENLACE_MS = 4 * 60 * 60 * 1000;
 const MAX_NOMBRE_ARCHIVO = 120;
 const MAX_ADJUNTOS = 10;
 const MAX_NOTA = 500;
@@ -128,6 +132,7 @@ const IA_REDACTAR_PATH = '/api/pendientes/ia/redactar';
 const ETIQUETAS_PATH = '/api/pendientes/etiquetas';
 const EVENTOS_PATH = '/api/pendientes/eventos';
 const NOTAS_PATH = '/api/pendientes/notas';
+const TODOS_LOS_ARCHIVOS_PATH = '/api/pendientes/archivos';
 const NOTAS_BUSCAR_PATH = '/api/pendientes/notas/buscar';
 const CURSOS_PATH = '/api/pendientes/notas/cursos';
 const ITEM_PATH = new RegExp(`^/api/pendientes/${UUID}$`);
@@ -142,6 +147,10 @@ const COMENTARIOS_PATH = new RegExp(`^/api/pendientes/${UUID}/comentarios$`);
 const COMENTARIO_PATH = new RegExp(`^/api/pendientes/comentarios/${UUID}$`);
 const ARCHIVOS_PATH = new RegExp(`^/api/pendientes/${UUID}/archivos$`);
 const ARCHIVO_PATH = new RegExp(`^/api/pendientes/archivos/${UUID}$`);
+const PARTES_DE_ARCHIVO_PATH = new RegExp(`^/api/pendientes/archivos/${UUID}/partes$`);
+const ENLACE_DE_ARCHIVO_PATH = new RegExp(`^/api/pendientes/archivos/${UUID}/enlace$`);
+const ARCHIVO_REPETIDO_PATH = new RegExp(`^/api/pendientes/${UUID}/archivos/repetido$`);
+const REUSAR_ARCHIVO_PATH = new RegExp(`^/api/pendientes/${UUID}/archivos/reusar$`);
 const TRASPASO_PATH = new RegExp(`^/api/pendientes/${UUID}/traspaso$`);
 const EVIDENCIA_PATH = new RegExp(`^/api/pendientes/${UUID}/evidencia$`);
 const APROBACION_PATH = new RegExp(`^/api/pendientes/${UUID}/aprobacion$`);
@@ -159,16 +168,18 @@ const RECURSO_REPETIDO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/
 // Lo que se guarda el resultado de un trabajo de la IA que nadie vino a buscar.
 const VIDA_TRABAJO_IA_MS = 10 * 60_000;
 const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_CORREO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
-  IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH];
+  IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH, TODOS_LOS_ARCHIVOS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
   ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, APROBACION_PATH, ETIQUETA_PATH,
-  CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH, RECURSO_REPETIDO_PATH];
+  CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH, RECURSO_REPETIDO_PATH,
+  PARTES_DE_ARCHIVO_PATH, ENLACE_DE_ARCHIVO_PATH, ARCHIVO_REPETIDO_PATH, REUSAR_ARCHIVO_PATH];
 // Las filas que apuntan a un archivo guardado por su contenido (DATA_DIR/blobs/<sha256>).
 const TABLAS_CON_BLOB = ['imagenes', 'archivos', 'nota_imagenes', 'recursos'];
 const SHA256 = /^[0-9a-f]{64}$/;
 const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en, hecho_en,
   (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios,
-  (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0) AS num_archivos,
+  (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0 AND a.subido IS NULL) AS num_archivos,
+  (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0 AND a.subido IS NULL AND a.tipo LIKE 'video/%') AS num_videos,
   (SELECT json_group_array(pe.etiqueta_id) FROM pendiente_etiquetas pe WHERE pe.pendiente_id = pendientes.id) AS etiquetas,
   (SELECT json_group_array(ap.perfil_id ORDER BY ap.creado_en, ap.rowid) FROM aprobaciones ap WHERE ap.pendiente_id = pendientes.id) AS aprobaciones`;
 const SELECT_PERFIL = 'SELECT id, nombre, correo, telefono, color, password_hash IS NOT NULL AS tiene_contrasena, creado_en FROM perfiles';
@@ -188,7 +199,7 @@ const ACTIVIDAD_VISIBLE = `(a.pendiente_id IN (SELECT id FROM pendientes WHERE $
   OR (a.pendiente_id IS NULL AND (a.privado_de IS NULL OR a.privado_de = ?)))`;
 const SELECT_ACTIVIDAD = 'SELECT a.id, a.pendiente_id, a.texto_pendiente, a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en FROM actividad a';
 const SELECT_COMENTARIO = 'SELECT id, pendiente_id, perfil_id, autor, texto, respuesta_a, creado_en FROM comentarios';
-const SELECT_ARCHIVO = 'SELECT id, pendiente_id, comentario_id, nombre, tipo, tamano, perfil_id, autor, creado_en FROM archivos';
+const SELECT_ARCHIVO = 'SELECT id, pendiente_id, comentario_id, nombre, tipo, tamano, subido, perfil_id, autor, creado_en FROM archivos';
 // Lo de las notas se busca siempre junto con el dueño del curso: lo de otro perfil no existe.
 const SELECT_CURSO = 'SELECT id, nombre, icono, creado_en, actualizado_en FROM cursos';
 const SELECT_NOTA = 'SELECT n.id, n.curso_id, n.titulo, n.creado_en, n.actualizado_en FROM notas n JOIN cursos c ON c.id = n.curso_id';
@@ -451,6 +462,11 @@ const MIGRACIONES = [
         BEGIN DELETE FROM aprobaciones WHERE pendiente_id = NEW.id AND perfil_id = NEW.perfil_id; END;
     `);
   },
+  // Adjuntos grandes, subidos por partes: `subido` dice cuánto llegó mientras se sube; NULL, que ya está completo.
+  // Mientras tanto viven en subidas/<id>.parcial, sin sha256, y no se listan ni se cuentan.
+  (db) => {
+    db.exec('ALTER TABLE archivos ADD COLUMN subido INTEGER');
+  },
 ];
 
 function json(res, status, body) {
@@ -532,11 +548,60 @@ export function tipoDeImagen(buffer) {
   return null;
 }
 
-// Las imágenes y los PDF se pueden mostrar en el navegador; cualquier otra cosa se guarda tal cual y solo se descarga.
+// Lo que el navegador puede mostrar o reproducir: imágenes, PDF, videos y audios (se mira el contenido, como en las
+// imágenes). Cualquier otra cosa se guarda tal cual y solo se descarga.
 export function tipoDeArchivo(buffer) {
   if (tipoDeImagen(buffer)) return tipoDeImagen(buffer);
-  if (buffer.subarray(0, 5).toString('latin1') === '%PDF-') return 'application/pdf';
+  const ascii = (inicio, fin) => buffer.subarray(inicio, fin).toString('latin1');
+  if (ascii(0, 5) === '%PDF-') return 'application/pdf';
+  // MP4, MOV y M4A empiezan con una caja "ftyp" que dice la marca.
+  if (ascii(4, 8) === 'ftyp') {
+    const marca = ascii(8, 12);
+    if (marca === 'qt  ') return 'video/quicktime';
+    if (marca === 'M4A ' || marca === 'M4B ') return 'audio/mp4';
+    return 'video/mp4';
+  }
+  if (buffer.length >= 4 && buffer.readUInt32BE(0) === 0x1a45dfa3 && ascii(0, 64).includes('webm')) return 'video/webm';
+  if (ascii(0, 4) === 'OggS') return 'audio/ogg';
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WAVE') return 'audio/wav';
+  if (ascii(0, 3) === 'ID3' || (buffer.length >= 2 && buffer[0] === 0xff && (buffer[1] & 0xe6) === 0xe2)) return 'audio/mpeg';
   return 'application/octet-stream';
+}
+
+// Manda un archivo guardado en el disco. Si el navegador pide un rango (un <video> al empezar o al adelantar), solo
+// ese pedazo. Nada se ejecuta como página de este sitio; lo que no se muestra se descarga.
+function enviarGuardado(req, res, { ruta, tamano, tipo, nombre, descargar = false }) {
+  const enLinea = !descargar && tipo !== 'application/octet-stream';
+  const cabeceras = {
+    'Content-Type': tipo,
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'private, max-age=31536000, immutable',
+    'Content-Disposition': `${enLinea ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(nombre)}`,
+    'Content-Security-Policy': "default-src 'none'; sandbox",
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+  };
+  let inicio = 0;
+  let fin = tamano - 1;
+  const rango = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? '').trim());
+  if (rango && (rango[1] || rango[2])) {
+    if (rango[1]) {
+      inicio = Number(rango[1]);
+      if (rango[2]) fin = Math.min(Number(rango[2]), tamano - 1);
+    } else {
+      inicio = Math.max(tamano - Number(rango[2]), 0);
+    }
+    if (inicio > fin) {
+      res.writeHead(416, { 'Content-Range': `bytes */${tamano}` });
+      return res.end();
+    }
+    cabeceras['Content-Range'] = `bytes ${inicio}-${fin}/${tamano}`;
+  }
+  cabeceras['Content-Length'] = fin - inicio + 1;
+  res.writeHead(cabeceras['Content-Range'] ? 206 : 200, cabeceras);
+  const flujo = createReadStream(ruta, { start: inicio, end: fin });
+  flujo.on('error', (error) => res.destroy(error));
+  return flujo.pipe(res);
 }
 
 // El nombre viaja en una cabecera, codificado con encodeURIComponent. Se queda solo con el nombre, sin carpetas.
@@ -954,6 +1019,8 @@ export function openDb(dataDir) {
   mkdirSync(path.join(dataDir, 'blobs'), { recursive: true });
   // Ahí quedan los recursos mientras se suben por partes.
   mkdirSync(path.join(dataDir, 'notas', 'recursos'), { recursive: true });
+  // Y los adjuntos grandes del tablero.
+  mkdirSync(path.join(dataDir, 'subidas'), { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'pendientes.db'));
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   const { user_version: version } = db.prepare('PRAGMA user_version').get();
@@ -1001,7 +1068,8 @@ async function hashDeArchivo(ruta) {
 function adoptarArchivosSueltos(db, dataDir) {
   const carpetas = { imagenes: ['imagenes'], archivos: ['archivos'], nota_imagenes: ['notas', 'imagenes'], recursos: ['notas', 'recursos'] };
   for (const [tabla, carpeta] of Object.entries(carpetas)) {
-    const filas = db.prepare(`SELECT id FROM ${tabla} WHERE sha256 IS NULL${tabla === 'recursos' ? ' AND subido = tamano' : ''}`).all();
+    const completos = { recursos: ' AND subido = tamano', archivos: ' AND subido IS NULL' }[tabla] ?? '';
+    const filas = db.prepare(`SELECT id FROM ${tabla} WHERE sha256 IS NULL${completos}`).all();
     for (const { id } of filas) {
       const viejo = path.join(dataDir, ...carpeta, id);
       if (!existsSync(viejo)) continue;
@@ -1225,13 +1293,44 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
   const esAutor = (quien, row) => (row.perfil_id ? row.perfil_id === quien.perfil_id : quien.perfil_id === null && row.autor === quien.nombre);
 
-  // Archivos de un mensaje que nunca se envió.
+  // Un adjunto grande, mientras se sube por partes.
+  const parcialDeArchivo = (id) => path.join(dataDir, 'subidas', `${id}.parcial`);
+  // Los que están recibiendo una parte: dos a la vez se pisarían.
+  const recibiendoArchivos = new Set();
+
+  // Ya borradas sus filas: lo que quedó a medias y el contenido que nadie más usa.
+  async function soltarArchivos(filas) {
+    await Promise.all(filas.map(({ id }) => borrarSiEsta(parcialDeArchivo(id))));
+    await soltar(filas.map((row) => row.sha256));
+  }
+
+  // Archivos de un mensaje que nunca se envió, y los que quedaron a medias (se cerró la página mientras subían).
   async function limpiarBorradores() {
     const limite = new Date(Date.now() - VIDA_BORRADOR_MS).toISOString();
-    const viejos = db.prepare('SELECT id, sha256 FROM archivos WHERE borrador = 1 AND creado_en < ?').all(limite);
+    const viejos = db.prepare('SELECT id, sha256 FROM archivos WHERE (borrador = 1 OR subido IS NOT NULL) AND creado_en < ?').all(limite)
+      .filter(({ id }) => !recibiendoArchivos.has(id));
     const borrar = db.prepare('DELETE FROM archivos WHERE id = ?');
     for (const { id } of viejos) borrar.run(id);
-    await soltar(viejos.map((row) => row.sha256));
+    await soltarArchivos(viejos);
+  }
+
+  // Otra fila de archivos que apunta a un contenido que ya está guardado (reusar un adjunto, o subir uno repetido).
+  // Si ese pendiente ya lo tiene, devuelve el que estaba.
+  function copiarArchivo(quien, item, { nombre, tipo, tamano, sha256 }, paraChat) {
+    return conCandado(sha256, () => {
+      if (!existsSync(blob(sha256))) throw httpError(422, 'archivo_invalido');
+      const yaEsta = !paraChat && db.prepare(`${SELECT_ARCHIVO} WHERE pendiente_id = ? AND sha256 = ? AND borrador = 0 AND subido IS NULL LIMIT 1`)
+        .get(item.id, sha256);
+      if (yaEsta) return fila(yaEsta);
+      const id = randomUUID();
+      return transaction(db, () => {
+        db.prepare(`INSERT INTO archivos (id, pendiente_id, comentario_id, borrador, nombre, tipo, tamano, perfil_id, autor, creado_en, sha256)
+          VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(id, item.id, paraChat ? 1 : 0, nombre, tipo, tamano, quien.perfil_id, quien.nombre, new Date().toISOString(), sha256);
+        if (!paraChat) registrar(quien, item, 'archivo', { archivo_id: id, nombre }, [item.creado_por]);
+        return fila(db.prepare(`${SELECT_ARCHIVO} WHERE id = ?`).get(id));
+      });
+    });
   }
 
   // Lo nuevo va arriba de todo; lo que recibe un responsable, al final de la cola de su columna (el orden es uno
@@ -1622,6 +1721,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (!actual) return false;
       const contenidos = db.prepare('SELECT sha256 FROM imagenes WHERE pendiente_id = ? UNION ALL SELECT sha256 FROM archivos WHERE pendiente_id = ?')
         .all(id, id).map((row) => row.sha256);
+      const aMedias = db.prepare('SELECT id FROM archivos WHERE pendiente_id = ? AND subido IS NOT NULL').all(id);
       transaction(db, () => {
         // Su historial queda con la privacidad que tenía al borrarse (ON DELETE SET NULL suelta el pendiente_id).
         db.prepare('UPDATE actividad SET privado_de = ? WHERE pendiente_id = ?').run(privadoDe(id), id);
@@ -1630,6 +1730,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         db.prepare('DELETE FROM pendientes WHERE id = ?').run(id);
       });
       await soltar(contenidos);
+      await Promise.all(aMedias.map((row) => borrarSiEsta(parcialDeArchivo(row.id))));
       return true;
     },
 
@@ -1727,7 +1828,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (!item) return null;
       const id = randomUUID();
       return transaction(db, () => {
-        const adjuntos = archivoIds.map((archivoId) => fila(db.prepare(`${SELECT_ARCHIVO} WHERE id = ? AND pendiente_id = ? AND borrador = 1`)
+        const adjuntos = archivoIds.map((archivoId) => fila(db.prepare(`${SELECT_ARCHIVO} WHERE id = ? AND pendiente_id = ? AND borrador = 1 AND subido IS NULL`)
           .get(archivoId, pendienteId)));
         if (adjuntos.some((archivo) => !archivo || !esAutor(quien, archivo))) throw httpError(422, 'archivos_invalidos');
         const respondido = respuestaA && db.prepare('SELECT perfil_id FROM comentarios WHERE id = ? AND pendiente_id = ?').get(respuestaA, pendienteId);
@@ -1784,31 +1885,143 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       }));
     },
 
-    // Los del pendiente y los de su chat (no los borradores).
+    // Lo grande llega por partes y en orden: la primera crea el archivo con su tamaño total (todavía no se lista ni se
+    // avisa) y cada una sigue donde quedó la anterior. Al completarse queda como cualquier otro adjunto.
+    async empezarArchivo(quien, pendienteId, { nombre, tamano, parte, paraChat }) {
+      const item = pendiente(quien.perfil_id, pendienteId);
+      if (!item) return null;
+      if (parte.length === 0) throw httpError(422, 'archivo_vacio');
+      if (parte.length > tamano) throw httpError(422, 'parte_invalida');
+      if (parte.length === tamano) return this.guardarArchivo(quien, pendienteId, { nombre, contenido: parte, paraChat });
+      await limpiarBorradores();
+      const id = randomUUID();
+      await writeFile(parcialDeArchivo(id), parte, { mode: 0o600 });
+      db.prepare(`INSERT INTO archivos (id, pendiente_id, comentario_id, borrador, nombre, tipo, tamano, subido, perfil_id, autor, creado_en)
+        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, pendienteId, paraChat ? 1 : 0, nombre, tipoDeArchivo(parte), tamano, parte.length, quien.perfil_id, quien.nombre, new Date().toISOString());
+      return fila(db.prepare(`${SELECT_ARCHIVO} WHERE id = ?`).get(id));
+    },
+
+    async seguirArchivo(quien, id, { desde, parte }) {
+      const actual = fila(db.prepare(`SELECT a.id, a.pendiente_id, a.nombre, a.borrador, a.tamano, a.subido, a.perfil_id, a.autor FROM archivos a
+        JOIN pendientes ON pendientes.id = a.pendiente_id WHERE a.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, quien.perfil_id));
+      if (!actual) return null;
+      if (!esAutor(quien, actual)) throw httpError(403, 'solo_el_autor');
+      if (recibiendoArchivos.has(id) || actual.subido === null || desde !== actual.subido) throw httpError(409, 'parte_fuera_de_orden');
+      if (parte.length === 0 || actual.subido + parte.length > actual.tamano) throw httpError(422, 'parte_invalida');
+      recibiendoArchivos.add(id);
+      try {
+        await appendFile(parcialDeArchivo(id), parte);
+        // Lo que manda es lo que quedó en el disco.
+        const { size: subido } = await stat(parcialDeArchivo(id));
+        if (subido !== actual.subido + parte.length) throw new Error(`El archivo ${id} quedó con ${subido} bytes`);
+        if (subido < actual.tamano) {
+          db.prepare('UPDATE archivos SET subido = ? WHERE id = ?').run(subido, id);
+        } else {
+          await adoptarArchivo(parcialDeArchivo(id), (hash) => transaction(db, () => {
+            db.prepare('UPDATE archivos SET subido = NULL, sha256 = ? WHERE id = ?').run(hash, id);
+            const item = pendiente(quien.perfil_id, actual.pendiente_id);
+            if (!actual.borrador && item) registrar(quien, item, 'archivo', { archivo_id: id, nombre: actual.nombre }, [item.creado_por]);
+          }));
+        }
+      } catch (error) {
+        const fallido = db.prepare('SELECT id, sha256 FROM archivos WHERE id = ?').get(id);
+        db.prepare('DELETE FROM archivos WHERE id = ?').run(id);
+        await soltarArchivos([fallido ?? { id, sha256: null }]);
+        throw error;
+      } finally {
+        recibiendoArchivos.delete(id);
+      }
+      return fila(db.prepare(`${SELECT_ARCHIVO} WHERE id = ?`).get(id));
+    },
+
+    // Un adjunto que ya está en otro pendiente (o en su chat) se agrega a este sin volver a subirlo: es otra fila que
+    // apunta al mismo contenido, así que quitarlo de uno no lo quita de los demás.
+    async reusarArchivo(quien, pendienteId, { archivo_id: archivoId, paraChat }) {
+      const item = pendiente(quien.perfil_id, pendienteId);
+      if (!item) return null;
+      const origen = db.prepare(`SELECT a.nombre, a.tipo, a.tamano, a.sha256 FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
+        WHERE a.id = ? AND a.borrador = 0 AND a.subido IS NULL AND ${PENDIENTE_VISIBLE}`).get(archivoId, quien.perfil_id);
+      if (!origen) throw httpError(422, 'archivo_invalido');
+      return copiarArchivo(quien, item, origen, paraChat);
+    },
+
+    // Antes de subir algo grande, el tablero pregunta si ese mismo contenido ya está en un pendiente que quien sube
+    // puede ver: entonces lo agrega sin mandar nada. Solo mira lo que ya puede abrir, así que no revela nada de otros.
+    // { archivo: null }: no está (y se sube como siempre); null: el pendiente no existe para quien pregunta.
+    async archivoRepetido(quien, pendienteId, { nombre, tamano, sha256, paraChat }) {
+      const item = pendiente(quien.perfil_id, pendienteId);
+      if (!item) return null;
+      const origen = db.prepare(`SELECT a.tipo FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
+        WHERE a.sha256 = ? AND a.tamano = ? AND a.borrador = 0 AND a.subido IS NULL AND ${PENDIENTE_VISIBLE} LIMIT 1`).get(sha256, tamano, quien.perfil_id);
+      if (!origen || !existsSync(blob(sha256))) return { archivo: null };
+      return { archivo: await copiarArchivo(quien, item, { nombre, tipo: origen.tipo, tamano, sha256 }, paraChat) };
+    },
+
+    // Para reusar: lo ya subido a los pendientes que `yo` ve (sin borradores ni lo que se sigue subiendo), un renglón por
+    // contenido con su nombre más reciente y dónde está. Lo nuevo primero.
+    buscarArchivos(yo, texto = '') {
+      const filas = db.prepare(`SELECT a.id, a.nombre, a.tipo, a.tamano, a.sha256, a.creado_en, pendientes.id AS pendiente_id, pendientes.texto
+        FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
+        WHERE a.borrador = 0 AND a.subido IS NULL AND ${PENDIENTE_VISIBLE} ORDER BY a.creado_en DESC, a.rowid DESC`).all(yo);
+      const buscado = normalizar(texto.trim());
+      const porContenido = new Map();
+      for (const row of filas) {
+        let grupo = porContenido.get(row.sha256);
+        if (!grupo) {
+          grupo = { id: row.id, nombre: row.nombre, tipo: row.tipo, tamano: row.tamano, creado_en: row.creado_en, nombres: new Set(), usado_en: new Map() };
+          porContenido.set(row.sha256, grupo);
+        }
+        grupo.nombres.add(row.nombre);
+        if (!grupo.usado_en.has(row.pendiente_id)) grupo.usado_en.set(row.pendiente_id, row.texto);
+      }
+      return [...porContenido.values()]
+        .filter((grupo) => !buscado || [...grupo.nombres].some((nombre) => normalizar(nombre).includes(buscado)))
+        .slice(0, 50)
+        .map(({ nombres: _nombres, usado_en: usadoEn, ...grupo }) => ({
+          ...grupo,
+          usado_en: [...usadoEn].map(([pendienteId, textoPendiente]) => ({ pendiente_id: pendienteId, texto: textoPendiente })),
+        }));
+    },
+
+    // Los del pendiente y los de su chat (no los borradores ni lo que se sigue subiendo), cada uno con los otros
+    // pendientes que `yo` ve donde está ese mismo contenido.
     listarArchivos(yo, pendienteId) {
       if (!pendiente(yo, pendienteId)) return null;
-      return db.prepare(`${SELECT_ARCHIVO} WHERE pendiente_id = ? AND borrador = 0 ORDER BY creado_en, rowid`).all(pendienteId).map(fila);
+      const enOtros = db.prepare(`SELECT DISTINCT pendientes.id AS pendiente_id, pendientes.texto FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
+        WHERE a.sha256 = ? AND a.pendiente_id <> ? AND a.borrador = 0 AND a.subido IS NULL AND ${PENDIENTE_VISIBLE}`);
+      return db.prepare(`${SELECT_ARCHIVO.replace(' FROM archivos', ', sha256 AS contenido FROM archivos')}
+        WHERE pendiente_id = ? AND borrador = 0 AND subido IS NULL ORDER BY creado_en, rowid`)
+        .all(pendienteId)
+        .map(({ contenido, ...archivo }) => ({ ...archivo, tambien_en: enOtros.all(contenido, pendienteId, yo).map(fila) }));
     },
 
+    // Dónde está y qué es, para mandarlo por partes (puede pesar cientos de MB). Solo si ya terminó de subirse.
     async leerArchivo(yo, id) {
       const archivo = db.prepare(`SELECT a.nombre, a.tipo, a.sha256 FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
-        WHERE a.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, yo);
-      const contenido = archivo && await leerContenido(archivo.sha256);
-      return contenido && { nombre: archivo.nombre, tipo: archivo.tipo, contenido };
+        WHERE a.id = ? AND a.subido IS NULL AND ${PENDIENTE_VISIBLE}`).get(id, yo);
+      if (!archivo?.sha256) return null;
+      try {
+        const { size } = await stat(blob(archivo.sha256));
+        return { nombre: archivo.nombre, tipo: archivo.tipo, tamano: size, ruta: blob(archivo.sha256) };
+      } catch (error) {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      }
     },
 
-    // Cada quien quita lo que subió. Lo de un mensaje se va al borrar el mensaje.
+    // Cada quien quita lo que subió (también lo que dejó a medias). Lo de un mensaje se va al borrar el mensaje.
     async borrarArchivo(quien, id) {
-      const archivo = fila(db.prepare(`SELECT a.perfil_id, a.autor, a.comentario_id, a.sha256 FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
+      const archivo = fila(db.prepare(`SELECT a.id, a.perfil_id, a.autor, a.comentario_id, a.sha256 FROM archivos a JOIN pendientes ON pendientes.id = a.pendiente_id
         WHERE a.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, quien.perfil_id));
-      if (!archivo) return false;
+      if (!archivo || recibiendoArchivos.has(id)) return false;
       if (archivo.comentario_id) throw httpError(409, 'archivo_de_mensaje');
       if (!esAutor(quien, archivo)) throw httpError(403, 'solo_el_autor');
       transaction(db, () => {
         db.prepare("DELETE FROM actividad WHERE tipo = 'archivo' AND json_extract(datos, '$.archivo_id') = ?").run(id);
         db.prepare('DELETE FROM archivos WHERE id = ?').run(id);
       });
-      await soltar([archivo.sha256]);
+      await soltarArchivos([archivo]);
       return true;
     },
 
@@ -2328,7 +2541,8 @@ export function createApp(options = {}) {
     if (pendienteId) return { tipo: 'pendientes', pendiente_id: pendienteId };
     if (deRuta(COMENTARIOS_PATH)) return { tipo: 'comentarios', pendiente_id: deRuta(COMENTARIOS_PATH) };
     if (deRuta(COMENTARIO_PATH)) return { tipo: 'comentarios', pendiente_id: repo.pendienteDeComentario(deRuta(COMENTARIO_PATH)) };
-    if (deRuta(ARCHIVOS_PATH)) return { tipo: 'archivos', pendiente_id: deRuta(ARCHIVOS_PATH) };
+    const pendienteDeArchivos = deRuta(ARCHIVOS_PATH) ?? deRuta(ARCHIVO_REPETIDO_PATH) ?? deRuta(REUSAR_ARCHIVO_PATH);
+    if (pendienteDeArchivos) return { tipo: 'archivos', pendiente_id: pendienteDeArchivos };
     if (deRuta(ARCHIVO_PATH)) return { tipo: 'archivos', pendiente_id: repo.pendienteDeArchivo(deRuta(ARCHIVO_PATH)) };
     if ([PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ETIQUETAS_PATH].includes(pathname)
       || [PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, ETIQUETA_PATH].some((ruta) => ruta.test(pathname))) {
@@ -2336,6 +2550,22 @@ export function createApp(options = {}) {
     }
     if (pathname === IA_PATH) return { tipo: 'ia' };
     return null;
+  }
+
+  // Un <video> no puede mandar la contraseña: pide el archivo con un enlace firmado que vale unas horas, solo para ese
+  // archivo y para quien lo pidió (al usarlo se vuelve a mirar que lo siga viendo). Reiniciar el servidor los invalida.
+  const secretoDeEnlaces = randomBytes(32);
+  const firmar = (id, dato) => createHmac('sha256', secretoDeEnlaces).update(`${id}.${dato}`).digest('base64url');
+  function enlaceDeArchivo(id, yo) {
+    const dato = Buffer.from(`${yo ?? ''}.${Date.now() + VIDA_ENLACE_MS}`).toString('base64url');
+    return `${API_PATH}/archivos/${id}?t=${dato}.${firmar(id, dato)}`;
+  }
+  // El perfil del enlace (null: la cuenta del equipo), o undefined si no vale.
+  function firmanteDe(id, token) {
+    const [dato, firma] = String(token ?? '').split('.');
+    if (!dato || !firma || !safeEqual(firma, firmar(id, dato))) return undefined;
+    const [perfil, vence] = Buffer.from(dato, 'base64url').toString().split('.');
+    return Number(vence) > Date.now() ? perfil || null : undefined;
   }
 
   // Devuelve { perfil_id, nombre } de quien llama, o null. La cuenta del equipo (AUTH_USER) no es un perfil.
@@ -2442,19 +2672,8 @@ export function createApp(options = {}) {
     if (recursoId && method === 'GET') {
       const recurso = await repo.leerRecurso(yo, recursoId);
       if (!recurso) return json(res, 404, { error: 'not_found' });
-      // Como los archivos de un pendiente: imágenes y PDF se abren en el navegador; nada se ejecuta como página del sitio.
-      const enLinea = recurso.tipo !== 'application/octet-stream';
-      res.writeHead(200, {
-        'Content-Type': recurso.tipo,
-        'Content-Length': recurso.tamano,
-        'Cache-Control': 'private, max-age=31536000, immutable',
-        'Content-Disposition': `${enLinea ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(recurso.nombre)}`,
-        'Content-Security-Policy': "default-src 'none'; sandbox",
-        'X-Content-Type-Options': 'nosniff',
-      });
-      const flujo = createReadStream(recurso.ruta);
-      flujo.on('error', (error) => res.destroy(error));
-      return flujo.pipe(res);
+      // Como los archivos de un pendiente.
+      return enviarGuardado(req, res, recurso);
     }
     if (recursoId && method === 'PATCH') {
       const input = await readJson(req);
@@ -2474,6 +2693,15 @@ export function createApp(options = {}) {
 
       const known = RUTAS_FIJAS.includes(url.pathname) || RUTAS_CON_ID.some((ruta) => ruta.test(url.pathname));
       if (!known) return json(res, 404, { error: 'not_found' });
+
+      // Un archivo pedido con su enlace firmado (el reproductor de videos) no lleva contraseña.
+      const archivoFirmado = req.method === 'GET' && url.searchParams.has('t') ? url.pathname.match(ARCHIVO_PATH)?.[1] : undefined;
+      if (archivoFirmado) {
+        const firmante = firmanteDe(archivoFirmado, url.searchParams.get('t'));
+        const archivo = firmante !== undefined && await repo.leerArchivo(firmante, archivoFirmado);
+        if (!archivo) return json(res, 404, { error: 'not_found' });
+        return enviarGuardado(req, res, { ...archivo, descargar: url.searchParams.has('descargar') });
+      }
 
       // No se manda WWW-Authenticate para que el navegador no muestre su ventana nativa:
       // la página tiene su propio formulario de acceso.
@@ -2602,29 +2830,65 @@ export function createApp(options = {}) {
       const comentarioId = url.pathname.match(COMENTARIO_PATH)?.[1];
       if (comentarioId && req.method === 'DELETE') return listo(await repo.borrarComentario(usuario, comentarioId));
 
+      if (url.pathname === TODOS_LOS_ARCHIVOS_PATH && req.method === 'GET') {
+        return json(res, 200, { archivos: repo.buscarArchivos(yo, String(url.searchParams.get('q') ?? '').slice(0, 200)) });
+      }
       const pendienteDeArchivos = url.pathname.match(ARCHIVOS_PATH)?.[1];
+      const paraChat = url.searchParams.get('para') === 'chat';
       if (pendienteDeArchivos && req.method === 'GET') return enviar(200, 'archivos', repo.listarArchivos(yo, pendienteDeArchivos));
       if (pendienteDeArchivos && req.method === 'POST') {
         const nombre = nombreDeArchivo(req.headers['x-nombre-archivo']);
+        // Lo grande llega por partes: la primera trae el tamaño total (X-Tamano).
+        if (req.headers['x-tamano'] !== undefined) {
+          const tamano = Number(req.headers['x-tamano']);
+          if (!Number.isInteger(tamano) || tamano < 1) throw httpError(422, 'parte_invalida');
+          if (tamano > MAX_ARCHIVO_GRANDE_BYTES) throw httpError(413, 'archivo_muy_grande');
+          const parte = await readBody(req, MAX_PARTE_BYTES);
+          return enviar(201, 'archivo', await repo.empezarArchivo(usuario, pendienteDeArchivos, { nombre, tamano, parte, paraChat }));
+        }
         const contenido = await readBody(req, MAX_ARCHIVO_BYTES);
-        return enviar(201, 'archivo', await repo.guardarArchivo(usuario, pendienteDeArchivos, { nombre, contenido, paraChat: url.searchParams.get('para') === 'chat' }));
+        return enviar(201, 'archivo', await repo.guardarArchivo(usuario, pendienteDeArchivos, { nombre, contenido, paraChat }));
+      }
+      const pendienteDeRepetido = url.pathname.match(ARCHIVO_REPETIDO_PATH)?.[1];
+      if (pendienteDeRepetido && req.method === 'POST') {
+        const sha256 = String(req.headers['x-sha256'] ?? '').toLowerCase();
+        const tamano = Number(req.headers['x-tamano']);
+        if (!SHA256.test(sha256) || !Number.isInteger(tamano) || tamano < 1) throw httpError(422, 'parte_invalida');
+        const nombre = nombreDeArchivo(req.headers['x-nombre-archivo']);
+        const repetido = await repo.archivoRepetido(usuario, pendienteDeRepetido, { nombre, tamano, sha256, paraChat });
+        if (!repetido) return json(res, 404, { error: 'not_found' });
+        // Que no esté es lo normal: 200, no un error.
+        return json(res, repetido.archivo ? 201 : 200, repetido);
+      }
+      const pendienteDeReuso = url.pathname.match(REUSAR_ARCHIVO_PATH)?.[1];
+      if (pendienteDeReuso && req.method === 'POST') {
+        const { archivo_id: archivoDeOrigen } = await readJson(req);
+        if (typeof archivoDeOrigen !== 'string' || !new RegExp(`^${UUID}$`).test(archivoDeOrigen)) throw httpError(422, 'archivo_invalido');
+        return enviar(201, 'archivo', await repo.reusarArchivo(usuario, pendienteDeReuso, { archivo_id: archivoDeOrigen, paraChat }));
+      }
+      const archivoDeParte = url.pathname.match(PARTES_DE_ARCHIVO_PATH)?.[1];
+      if (archivoDeParte && req.method === 'POST') {
+        const desde = Number(url.searchParams.get('desde'));
+        if (!Number.isInteger(desde) || desde < 0) throw httpError(422, 'parte_invalida');
+        const archivo = await repo.seguirArchivo(usuario, archivoDeParte, { desde, parte: await readBody(req, MAX_PARTE_BYTES) });
+        // Se avisa una vez, al completarse; no con cada parte.
+        if (archivo?.subido === null) {
+          const cliente = String(req.headers['x-cliente'] ?? '').slice(0, 64);
+          res.on('finish', () => res.statusCode < 400 && avisarCambio({ tipo: 'archivos', pendiente_id: archivo.pendiente_id }, cliente));
+        }
+        return enviar(200, 'archivo', archivo);
+      }
+      const archivoDeEnlace = url.pathname.match(ENLACE_DE_ARCHIVO_PATH)?.[1];
+      if (archivoDeEnlace && req.method === 'GET') {
+        if (!(await repo.leerArchivo(yo, archivoDeEnlace))) return json(res, 404, { error: 'not_found' });
+        return json(res, 200, { url: enlaceDeArchivo(archivoDeEnlace, yo) });
       }
 
       const archivoId = url.pathname.match(ARCHIVO_PATH)?.[1];
       if (archivoId && req.method === 'GET') {
         const archivo = await repo.leerArchivo(yo, archivoId);
         if (!archivo) return json(res, 404, { error: 'not_found' });
-        // Solo imágenes y PDF se abren en el navegador; lo demás se descarga. Nada se ejecuta como página de este sitio.
-        const enLinea = archivo.tipo !== 'application/octet-stream';
-        res.writeHead(200, {
-          'Content-Type': archivo.tipo,
-          'Content-Length': archivo.contenido.length,
-          'Cache-Control': 'private, max-age=31536000, immutable',
-          'Content-Disposition': `${enLinea ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(archivo.nombre)}`,
-          'Content-Security-Policy': "default-src 'none'; sandbox",
-          'X-Content-Type-Options': 'nosniff',
-        });
-        return res.end(archivo.contenido);
+        return enviarGuardado(req, res, archivo);
       }
       if (archivoId && req.method === 'DELETE') return listo(await repo.borrarArchivo(usuario, archivoId));
 

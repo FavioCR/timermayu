@@ -10,10 +10,10 @@ import { Button } from "@/components/ui/button"
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { Textarea } from "@/components/ui/textarea"
-import { api, esNoAutorizado, MAX_IMAGEN_BYTES, mensajeDeError, type Archivo, type Comentario, type Perfil, type Usuario } from "@/lib/api"
+import { api, esNoAutorizado, MAX_ARCHIVO_BYTES, mensajeDeError, type Archivo, type Comentario, type Perfil, type Usuario } from "@/lib/api"
 import { fechaCompleta, haceCuanto } from "@/lib/actividad"
 import { useCambios } from "@/lib/cambios"
-import { abrirArchivo, traeArchivos } from "@/lib/archivos"
+import { abrirArchivo, traeArchivos, urlDeArchivo } from "@/lib/archivos"
 import { comprimirImagen } from "@/lib/comprimir-imagen"
 
 // Mientras el chat está abierto se buscan mensajes nuevos cada tanto (y al volver a la pestaña).
@@ -79,7 +79,7 @@ function CitaMensaje({
 }
 
 // Un archivo elegido para el próximo mensaje: mientras sube no tiene `archivo`.
-type Adjunto = { clave: string; nombre: string; tipo: string; tamano: number; archivo?: Archivo }
+type Adjunto = { clave: string; nombre: string; tipo: string; tamano: number; avance?: number; archivo?: Archivo }
 // Lo escrito entre una @ y el cursor, mientras se escribe una mención.
 const MENCION_EN_CURSO = /(?:^|\s)@([^\s@]{0,30})$/u
 
@@ -155,7 +155,14 @@ export function ChatPendiente({
   const [encima, setEncima] = useState(false)
   const [respondiendo, setRespondiendo] = useState<Comentario | null>(null)
   // Al agrandar una imagen se ven todas las del chat en carrusel, en el orden de los mensajes.
-  const imagenesDelChat = useMemo(() => (comentarios ?? []).flatMap((comentario) => comentario.archivos.filter(esImagenVisible)), [comentarios])
+  const imagenesDelChat = useMemo(
+    () =>
+      (comentarios ?? []).flatMap((comentario) =>
+        comentario.archivos.filter(esImagenVisible).map((archivo) => ({ ...archivo, url: urlDeArchivo(archivo.id) }))
+      ),
+    [comentarios]
+  )
+  const cargarImagen = useCallback((url: string) => api.urlDeImagen(credenciales, url), [credenciales])
   const [agrandada, setAgrandada] = useState<number | null>(null)
   // El mensaje al que se saltó desde una cita, resaltado un momento.
   const [resaltado, setResaltado] = useState<string | null>(null)
@@ -339,15 +346,16 @@ export function ChatPendiente({
       const clave = crypto.randomUUID()
       const quitar = () => setAdjuntos((actuales) => actuales.filter((a) => a.clave !== clave))
       setAdjuntos((actuales) => [...actuales, { clave, nombre: original.name, tipo: original.type, tamano: original.size }])
-      // Las fotos y capturas se achican a WebP antes de subir; los 10 MB cuentan después de eso.
+      // Las fotos y capturas se achican a WebP antes de subir; el límite cuenta después de eso.
       const archivo = await comprimirImagen(original)
-      if (archivo.size > MAX_IMAGEN_BYTES) {
+      if (archivo.size > MAX_ARCHIVO_BYTES) {
         quitar()
-        setError(`«${original.name}» pesa más de 10 MB.`)
+        setError(`«${original.name}» pesa más de 500 MB.`)
         continue
       }
       try {
-        const subido = await api.archivos.subir(credenciales, pendienteId, archivo, true)
+        const avanzar = (avance: number) => setAdjuntos((actuales) => actuales.map((a) => (a.clave === clave ? { ...a, avance } : a)))
+        const subido = await api.archivos.subir(credenciales, pendienteId, archivo, true, avanzar)
         setAdjuntos((actuales) => actuales.map((a) => (a.clave === clave ? { ...a, archivo: subido } : a)))
       } catch (err) {
         quitar()
@@ -517,11 +525,15 @@ export function ChatPendiente({
         )}
       </div>
       <VisorImagenes
-        credenciales={credenciales}
         imagenes={imagenesDelChat}
+        cargar={cargarImagen}
         inicial={agrandada}
+        etiqueta="Imágenes del chat"
         onCerrar={() => setAgrandada(null)}
-        onAbrirOriginal={(archivo) => abrirArchivo(credenciales, archivo).catch(fallar)}
+        onAbrirOriginal={(imagen) => {
+          const archivo = imagenesDelChat.find((a) => a.id === imagen.id)
+          if (archivo) abrirArchivo(credenciales, archivo).catch(fallar)
+        }}
       />
       {error && (
         <p role="alert" className="m-0 px-4 pb-2 text-sm text-destructive">
@@ -576,6 +588,7 @@ export function ChatPendiente({
                     key={adjunto.clave}
                     archivo={adjunto.archivo ?? adjunto}
                     subiendo={!adjunto.archivo}
+                    nota={!adjunto.archivo && adjunto.avance ? `${Math.round(adjunto.avance * 100)} %` : undefined}
                     onQuitar={() => setAdjuntos((actuales) => actuales.filter((a) => a.clave !== adjunto.clave))}
                   />
                 ))}

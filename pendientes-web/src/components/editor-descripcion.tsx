@@ -1,6 +1,6 @@
 import "@blocknote/shadcn/style.css"
 
-import { createContext, useContext, useMemo, useRef, useState } from "react"
+import { createContext, useContext, useMemo, useRef, useState, type MouseEvent } from "react"
 import {
   BlockNoteSchema,
   createFileBlockConfig,
@@ -31,6 +31,7 @@ import { cn } from "cn"
 import { ChipArchivo } from "@/components/archivos"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { RedactarIA } from "@/components/redactar-ia"
+import { VisorImagenes, type ImagenDelVisor } from "@/components/visor-imagenes"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import type { OpcionesRedaccion, Perfil } from "@/lib/api"
 import { tipoPorNombre } from "@/lib/archivos"
@@ -220,6 +221,26 @@ export default function EditorDescripcion({
 
   const personas = useMemo(() => ({ porId: new Map(perfiles.map((perfil) => [perfil.id, perfil])), yo }), [perfiles, yo])
 
+  // Tocar una imagen la agranda, con las demás del documento en carrusel (en su orden).
+  const [agrandada, setAgrandada] = useState<{ imagenes: ImagenDelVisor[]; inicial: number } | null>(null)
+  function agrandarImagen(event: MouseEvent) {
+    if (!(event.target instanceof HTMLImageElement)) return
+    const id = event.target.closest("[data-content-type=image]")?.closest<HTMLElement>("[data-id]")?.dataset.id
+    if (!id) return
+    const imagenes: ImagenDelVisor[] = []
+    const recorrer = (bloques: Bloque[]) => {
+      for (const bloque of bloques) {
+        if (bloque.type === "image" && bloque.props.url) {
+          imagenes.push({ id: bloque.id, nombre: bloque.props.name || bloque.props.caption || "Imagen", url: bloque.props.url })
+        }
+        recorrer(bloque.children as Bloque[])
+      }
+    }
+    recorrer(editor.document as Bloque[])
+    const inicial = imagenes.findIndex((imagen) => imagen.id === id)
+    if (inicial >= 0) setAgrandada({ imagenes, inicial })
+  }
+
   // /ia: el campo de la IA sale debajo de la línea donde se escribió, y lo redactado va ahí. «Reescribir con IA» (al
   // seleccionar texto): sale debajo de lo seleccionado y lo reemplaza.
   // `enteras`: las líneas seleccionadas, si se seleccionaron completas (y sin líneas anidadas): esas se reemplazan enteras.
@@ -325,6 +346,7 @@ export default function EditorDescripcion({
       <Personas.Provider value={personas}>
         <Reescribir.Provider value={redactar ? abrirReescribir : null}>
           <BlockNoteView
+            onClick={agrandarImagen}
             editor={editor}
             theme={oscuro ? "dark" : "light"}
             slashMenu={false}
@@ -351,6 +373,12 @@ export default function EditorDescripcion({
             {ia && redactar && <RedactarIA previo={ia.previo} seleccion={"seleccion" in ia} redactar={redactar} onUsar={usarRedaccion} />}
           </PopoverContent>
         </Popover>
+        <VisorImagenes
+          imagenes={agrandada?.imagenes ?? []}
+          cargar={resolverUrl}
+          inicial={agrandada?.inicial ?? null}
+          onCerrar={() => setAgrandada(null)}
+        />
       </Personas.Provider>
     </AbrirArchivo.Provider>
   )

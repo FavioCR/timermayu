@@ -1,13 +1,31 @@
-import { useEffect, useRef, useState } from "react"
-import { File, FileArchive, FileImage, FileSpreadsheet, FileText, LoaderCircle, Paperclip, X } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import {
+  File,
+  FileArchive,
+  FileImage,
+  FileMusic,
+  FileSpreadsheet,
+  FileText,
+  FileVideoCamera,
+  Library,
+  Link2,
+  LoaderCircle,
+  Paperclip,
+  X,
+} from "lucide-react"
 import { cn } from "cn"
 
+import { VisorImagenes } from "@/components/visor-imagenes"
 import { Button } from "@/components/ui/button"
-import { api, esNoAutorizado, MAX_IMAGEN_BYTES, mensajeDeError, type Archivo, type Usuario } from "@/lib/api"
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { api, esNoAutorizado, MAX_ARCHIVO_BYTES, mensajeDeError, type Archivo, type ArchivoEncontrado, type Usuario } from "@/lib/api"
 import { abrirArchivo, claseDeArchivo, tamanoLegible, traeArchivos, urlDeArchivo, type ClaseDeArchivo } from "@/lib/archivos"
 
 export const ICONOS: Record<ClaseDeArchivo, typeof File> = {
   imagen: FileImage,
+  video: FileVideoCamera,
+  audio: FileMusic,
   documento: FileText,
   planilla: FileSpreadsheet,
   comprimido: FileArchive,
@@ -120,6 +138,138 @@ export function ChipArchivo({
   )
 }
 
+// Los otros pendientes donde está el mismo archivo; se abren desde aquí.
+function TambienEn({ archivo, onAbrirPendiente }: { archivo: Archivo; onAbrirPendiente?: (id: string) => void }) {
+  const otros = archivo.tambien_en ?? []
+  if (otros.length === 0) return null
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          className="-ml-1 text-muted-foreground"
+          aria-label={`«${archivo.nombre}» también está en ${otros.length === 1 ? "otro pendiente" : `${otros.length} pendientes más`}`}
+        >
+          <Link2 /> {otros.length === 1 ? "en 1 más" : `en ${otros.length} más`}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 gap-1 p-2">
+        <p className="m-0 px-2 pt-1 pb-1.5 text-xs text-muted-foreground">También está en:</p>
+        {otros.map((otro) => (
+          <button
+            key={otro.pendiente_id}
+            type="button"
+            disabled={!onAbrirPendiente}
+            onClick={() => onAbrirPendiente?.(otro.pendiente_id)}
+            className="truncate rounded-md px-2 py-1.5 text-left text-sm outline-none enabled:hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {otro.texto}
+          </button>
+        ))}
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+// Lo ya subido a otros pendientes, para usarlo en este sin volver a subirlo (es el mismo archivo: quitarlo de uno no lo
+// quita de los demás). Se busca por nombre en el servidor.
+function UsarExistente({
+  credenciales,
+  pendienteId,
+  onUsar,
+  onError,
+}: {
+  credenciales: string
+  pendienteId: string
+  onUsar: (archivo: ArchivoEncontrado) => Promise<void>
+  onError: (err: unknown) => void
+}) {
+  const [abierto, setAbierto] = useState(false)
+  const [texto, setTexto] = useState("")
+  const [encontrados, setEncontrados] = useState<{ texto: string; lista: ArchivoEncontrado[] } | null>(null)
+  const [usando, setUsando] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!abierto) return
+    let vigente = true
+    const espera = window.setTimeout(() => {
+      api.archivos
+        .buscar(credenciales, texto)
+        .then((lista) => vigente && setEncontrados({ texto, lista }))
+        .catch((err) => vigente && onError(err))
+    }, texto ? 200 : 0)
+    return () => {
+      vigente = false
+      window.clearTimeout(espera)
+    }
+  }, [abierto, credenciales, texto, onError])
+
+  // Lo que ya está en este pendiente no se ofrece.
+  const lista = (encontrados?.lista ?? []).filter((archivo) => !archivo.usado_en.some((uso) => uso.pendiente_id === pendienteId))
+  const buscando = encontrados === null || encontrados.texto !== texto
+
+  async function usar(archivo: ArchivoEncontrado) {
+    setUsando(archivo.id)
+    try {
+      await onUsar(archivo)
+      setAbierto(false)
+      setTexto("")
+    } finally {
+      setUsando(null)
+    }
+  }
+
+  return (
+    <Popover open={abierto} onOpenChange={setAbierto}>
+      <PopoverTrigger asChild>
+        <Button type="button" variant="ghost" size="xs" className="text-muted-foreground">
+          <Library /> Usar uno que ya existe
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[min(26rem,calc(100vw-2rem))] p-0">
+        <Command shouldFilter={false}>
+          <CommandInput placeholder="Buscar por nombre…" value={texto} onValueChange={setTexto} aria-label="Buscar un archivo ya subido" />
+          <CommandList className="max-h-80">
+            {!buscando && <CommandEmpty>{texto ? `Nada con «${texto}».` : "Todavía no hay archivos en otros pendientes."}</CommandEmpty>}
+            {buscando && lista.length === 0 && (
+              <div className="flex justify-center py-6">
+                <LoaderCircle aria-label="Buscando" className="size-4 animate-spin text-muted-foreground" />
+              </div>
+            )}
+            {lista.length > 0 && (
+              <CommandGroup heading="Ya subidos">
+                {lista.map((archivo) => {
+                  const Icono = ICONOS[claseDeArchivo(archivo.nombre, archivo.tipo)]
+                  const lugares = archivo.usado_en.map((uso) => `«${uso.texto}»`).join(", ")
+                  return (
+                    <CommandItem
+                      key={archivo.id}
+                      value={archivo.id}
+                      disabled={usando !== null}
+                      onSelect={() => usar(archivo)}
+                      className="items-start"
+                    >
+                      {usando === archivo.id ? <LoaderCircle className="mt-0.5 animate-spin" /> : <Icono className="mt-0.5" />}
+                      <span className="flex min-w-0 flex-col">
+                        <span className="truncate font-medium">{archivo.nombre}</span>
+                        <span className="truncate text-xs text-muted-foreground">
+                          {tamanoLegible(archivo.tamano)} · en {lugares}
+                        </span>
+                      </span>
+                    </CommandItem>
+                  )
+                })}
+              </CommandGroup>
+            )}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
 // Los archivos del pendiente y los que llegaron por su chat. Se vuelve a pedir cuando cambia `version`.
 export function ArchivosPendiente({
   credenciales,
@@ -127,6 +277,7 @@ export function ArchivosPendiente({
   usuario,
   version,
   onCantidad,
+  onAbrirPendiente,
   onSalir,
 }: {
   credenciales: string
@@ -134,10 +285,13 @@ export function ArchivosPendiente({
   usuario: Usuario | null
   version: string
   onCantidad: (cantidad: number) => void
+  onAbrirPendiente?: (id: string) => void
   onSalir: () => void
 }) {
   const [archivos, setArchivos] = useState<Archivo[] | null>(null)
-  const [subiendo, setSubiendo] = useState<{ clave: string; nombre: string; tipo: string; tamano: number }[]>([])
+  const [subiendo, setSubiendo] = useState<{ clave: string; nombre: string; tipo: string; tamano: number; avance: number }[]>([])
+  // La imagen que se agrandó (con las demás del pendiente en carrusel).
+  const [agrandada, setAgrandada] = useState<number | null>(null)
   const [encima, setEncima] = useState(false)
   const [error, setError] = useState("")
   const entrada = useRef<HTMLInputElement>(null)
@@ -146,10 +300,14 @@ export function ArchivosPendiente({
     avisarCantidad.current = onCantidad
   })
 
-  const fallar = (err: unknown) => {
-    if (esNoAutorizado(err)) onSalir()
-    else setError(mensajeDeError(err))
-  }
+  const fallar = useCallback(
+    (err: unknown) => {
+      if (esNoAutorizado(err)) onSalir()
+      else setError(mensajeDeError(err))
+    },
+    [onSalir]
+  )
+  const cargarImagen = useCallback((url: string) => api.urlDeImagen(credenciales, url), [credenciales])
 
   useEffect(() => {
     let vigente = true
@@ -175,21 +333,34 @@ export function ArchivosPendiente({
   async function subir(lista: FileList | null) {
     // Se copian antes de esperar nada: al limpiar el campo, el navegador vacía la lista.
     for (const archivo of [...(lista ?? [])]) {
-      if (archivo.size > MAX_IMAGEN_BYTES) {
-        setError(`«${archivo.name}» pesa más de 10 MB.`)
+      if (archivo.size > MAX_ARCHIVO_BYTES) {
+        setError(`«${archivo.name}» pesa más de 500 MB.`)
         continue
       }
       const clave = crypto.randomUUID()
-      setSubiendo((actuales) => [...actuales, { clave, nombre: archivo.name, tipo: archivo.type, tamano: archivo.size }])
+      setSubiendo((actuales) => [...actuales, { clave, nombre: archivo.name, tipo: archivo.type, tamano: archivo.size, avance: 0 }])
+      const avanzar = (avance: number) => setSubiendo((actuales) => actuales.map((s) => (s.clave === clave ? { ...s, avance } : s)))
       try {
-        const nuevo = await api.archivos.subir(credenciales, pendienteId, archivo)
-        setArchivos((actuales) => [...(actuales ?? []), nuevo])
+        const nuevo = await api.archivos.subir(credenciales, pendienteId, archivo, false, avanzar)
+        // Si ya estaba (el mismo archivo subido otra vez), no se repite.
+        setArchivos((actuales) => [...(actuales ?? []).filter((a) => a.id !== nuevo.id), nuevo])
         setError("")
       } catch (err) {
         fallar(err)
       } finally {
         setSubiendo((actuales) => actuales.filter((s) => s.clave !== clave))
       }
+    }
+  }
+
+  async function usarExistente(encontrado: ArchivoEncontrado) {
+    try {
+      const nuevo = await api.archivos.reusar(credenciales, pendienteId, encontrado.id)
+      // Viene sin la lista de dónde más está: es donde estaba el elegido.
+      setArchivos((actuales) => [...(actuales ?? []).filter((a) => a.id !== nuevo.id), { ...nuevo, tambien_en: encontrado.usado_en }])
+      setError("")
+    } catch (err) {
+      fallar(err)
     }
   }
 
@@ -205,6 +376,7 @@ export function ArchivosPendiente({
 
   const esMio = (archivo: Archivo) =>
     archivo.perfil_id ? archivo.perfil_id === usuario?.perfil_id : usuario?.perfil_id === null && archivo.autor === usuario.nombre
+  const imagenes = (archivos ?? []).filter(esImagenVisible).map((archivo) => ({ ...archivo, url: urlDeArchivo(archivo.id) }))
 
   return (
     <div
@@ -224,20 +396,32 @@ export function ArchivosPendiente({
     >
       <div className="flex flex-wrap items-center gap-1.5">
         {archivos?.map((archivo) => (
-          <ChipArchivo
-            key={archivo.id}
-            archivo={archivo}
-            nota={archivo.comentario_id ? "en el chat" : undefined}
-            onAbrir={() => abrirArchivo(credenciales, archivo).catch(fallar)}
-            onQuitar={!archivo.comentario_id && esMio(archivo) ? () => quitar(archivo) : undefined}
-          />
+          <span key={archivo.id} className="inline-flex max-w-full min-w-0 items-center">
+            <ChipArchivo
+              archivo={archivo}
+              nota={archivo.comentario_id ? "en el chat" : undefined}
+              onAbrir={() =>
+                esImagenVisible(archivo)
+                  ? setAgrandada(imagenes.findIndex((imagen) => imagen.id === archivo.id))
+                  : abrirArchivo(credenciales, archivo).catch(fallar)
+              }
+              onQuitar={!archivo.comentario_id && esMio(archivo) ? () => quitar(archivo) : undefined}
+            />
+            <TambienEn archivo={archivo} onAbrirPendiente={onAbrirPendiente} />
+          </span>
         ))}
         {subiendo.map((archivo) => (
-          <ChipArchivo key={archivo.clave} archivo={archivo} subiendo />
+          <ChipArchivo key={archivo.clave} archivo={archivo} subiendo nota={archivo.avance > 0 ? `${Math.round(archivo.avance * 100)} %` : undefined} />
         ))}
         <Button type="button" variant="ghost" size="xs" className="text-muted-foreground" onClick={() => entrada.current?.click()}>
-          <Paperclip /> {archivos?.length || subiendo.length ? "Adjuntar" : "Adjuntar archivo (PDF, Word, imágenes…)"}
+          <Paperclip /> {archivos?.length || subiendo.length ? "Adjuntar" : "Adjuntar archivo (PDF, Word, imágenes, videos…)"}
         </Button>
+        <UsarExistente
+          credenciales={credenciales}
+          pendienteId={pendienteId}
+          onUsar={usarExistente}
+          onError={fallar}
+        />
         <input
           ref={entrada}
           type="file"
@@ -255,6 +439,17 @@ export function ArchivosPendiente({
           {error}
         </p>
       )}
+      <VisorImagenes
+        imagenes={imagenes}
+        cargar={cargarImagen}
+        inicial={agrandada}
+        etiqueta="Imágenes adjuntas"
+        onCerrar={() => setAgrandada(null)}
+        onAbrirOriginal={(imagen) => {
+          const archivo = imagenes.find((a) => a.id === imagen.id)
+          if (archivo) abrirArchivo(credenciales, archivo).catch(fallar)
+        }}
+      />
     </div>
   )
 }

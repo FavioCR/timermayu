@@ -57,6 +57,8 @@ type Props = {
   onCantidadComentarios: (id: string, cantidad: number) => void
   onCantidadArchivos: (id: string, cantidad: number) => void
   onPasar: (pendiente: Pendiente) => void
+  // Abre otro pendiente (uno donde también está un archivo de este).
+  onAbrirPendiente: (id: string) => void
   onAprobar: (id: string, aprueba: boolean) => void
   onBorrar: (pendiente: Pendiente) => void
   onCerrar: () => void
@@ -103,6 +105,7 @@ function Contenido({
   onCantidadComentarios,
   onCantidadArchivos,
   onPasar,
+  onAbrirPendiente,
   onAprobar,
   onBorrar,
   onSalir,
@@ -429,6 +432,7 @@ function Contenido({
               usuario={usuario}
               version={`${pendiente.actualizado_en}:${pendiente.num_comentarios}:${pendiente.num_archivos}`}
               onCantidad={(cantidad) => onCantidadArchivos(id, cantidad)}
+              onAbrirPendiente={onAbrirPendiente}
               onSalir={onSalir}
             />
           </dd>

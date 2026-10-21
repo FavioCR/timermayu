@@ -16,8 +16,9 @@ export type Pendiente = {
   creado_por: string | null
   resumen: string | null
   num_imagenes: number
-  // Archivos adjuntos al pendiente y a los mensajes de su chat.
+  // Archivos adjuntos al pendiente y a los mensajes de su chat; num_videos, cuántos de esos son videos.
   num_archivos: number
+  num_videos: number
   num_comentarios: number
   // Ids de sus etiquetas.
   etiquetas: string[]
@@ -210,9 +211,18 @@ export type Archivo = {
   nombre: string
   tipo: string
   tamano: number
+  // Cuánto llegó mientras se sube por partes; null cuando ya está completo (lo único que se lista).
+  subido: number | null
   perfil_id: string | null
   autor: string
   creado_en: string
+  // En la lista de un pendiente: los otros pendientes que ves donde está ese mismo archivo.
+  tambien_en?: { pendiente_id: string; texto: string }[]
+}
+
+// Lo ya subido que se puede usar en otro pendiente sin volver a subirlo: un renglón por contenido, y dónde está.
+export type ArchivoEncontrado = Pick<Archivo, "id" | "nombre" | "tipo" | "tamano" | "creado_en"> & {
+  usado_en: { pendiente_id: string; texto: string }[]
 }
 
 // Los mismos colores que asigna el API cuando no se elige uno.
@@ -266,6 +276,8 @@ const MENSAJES: Record<string, string> = {
   descripcion_invalida: "La descripción es demasiado larga.",
   imagen_invalida: "Solo se pueden subir imágenes PNG, JPG, GIF o WebP.",
   body_too_large: "El archivo pesa más de 10 MB.",
+  archivo_muy_grande: "El archivo pesa más de 500 MB.",
+  archivo_invalido: "Ese archivo ya no está disponible.",
   archivo_vacio: "Ese archivo está vacío.",
   archivos_invalidos: "Esos archivos ya no están listos para enviar. Vuelve a adjuntarlos.",
   archivo_de_mensaje: "Ese archivo es de un mensaje del chat: se quita borrando el mensaje.",
@@ -432,27 +444,113 @@ async function subirImagen(credenciales: string, pendienteId: string, archivo: F
   return (data as { imagen: { id: string; url: string } }).imagen
 }
 
-// Cualquier archivo, para un pendiente o (con paraChat) para el próximo mensaje del chat.
-async function subirArchivo(credenciales: string, pendienteId: string, archivo: File, paraChat = false) {
-  if (archivo.size > MAX_IMAGEN_BYTES) throw new ApiError("body_too_large", 413)
+// nginx deja pasar hasta 11 MB por petición: lo más grande (videos, PDF pesados) se sube en partes de 8 MB, en orden.
+export const PARTE_BYTES = 8 * 1024 * 1024
+export const MAX_ARCHIVO_BYTES = 500 * 1024 * 1024
+
+// Sube una parte con XMLHttpRequest, que sí avisa cuánto lleva (fetch no). Lo creado viene en la respuesta bajo `clave`.
+export function enviarParte<T>(url: string, headers: Record<string, string>, parte: Blob, clave: string, onProgreso: (bytes: number) => void) {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open("POST", url)
+    for (const [nombre, valor] of Object.entries(headers)) xhr.setRequestHeader(nombre, valor)
+    xhr.upload.onprogress = (event) => onProgreso(event.loaded)
+    xhr.onload = () => {
+      let data: Record<string, unknown> = {}
+      try {
+        data = JSON.parse(xhr.responseText)
+      } catch {
+        // Un 413 de nginx no trae JSON.
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && data[clave]) resolve(data[clave] as T)
+      else reject(new ApiError(typeof data.error === "string" ? data.error : xhr.status === 413 ? "body_too_large" : `http_${xhr.status}`, xhr.status))
+    }
+    xhr.onerror = () => reject(new ApiError("sin_conexion", 0))
+    xhr.send(parte)
+  })
+}
+
+// El SHA-256 de un archivo, leído por partes para no tener cientos de MB en memoria. null si el navegador no puede.
+export async function hashDeArchivo(archivo: File) {
+  try {
+    const { createSHA256 } = await import("hash-wasm")
+    const hash = await createSHA256()
+    for (let desde = 0; desde < archivo.size; desde += PARTE_BYTES) {
+      hash.update(new Uint8Array(await archivo.slice(desde, desde + PARTE_BYTES).arrayBuffer()))
+    }
+    return hash.digest("hex")
+  } catch {
+    return null
+  }
+}
+
+// Si ese mismo archivo ya está en un pendiente que ves, se agrega sin volver a subirlo. null: no está.
+async function archivoRepetido(credenciales: string, pendienteId: string, archivo: File, sha256: string, para: string) {
   let response: Response
   try {
-    response = await fetch(`${BASE}/${pendienteId}/archivos${paraChat ? "?para=chat" : ""}`, {
+    response = await fetch(`${BASE}/${pendienteId}/archivos/repetido${para}`, {
       method: "POST",
       headers: {
         Authorization: `Basic ${credenciales}`,
         "X-Cliente": CLIENTE,
-        "Content-Type": archivo.type || "application/octet-stream",
         "X-Nombre-Archivo": encodeURIComponent(archivo.name),
+        "X-Tamano": String(archivo.size),
+        "X-Sha256": sha256,
       },
-      body: archivo,
     })
   } catch {
     throw new ApiError("sin_conexion", 0)
   }
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw new ApiError(data.error ?? `http_${response.status}`, response.status)
-  return (data as { archivo: Archivo }).archivo
+  return (data.archivo ?? null) as Archivo | null
+}
+
+// Cualquier archivo, para un pendiente o (con paraChat) para el próximo mensaje del chat. Lo que no cabe en una parte va
+// por partes, y antes se pregunta si ya está subido. onProgreso va de 0 a 1.
+async function subirArchivo(credenciales: string, pendienteId: string, archivo: File, paraChat = false, onProgreso: (avance: number) => void = () => {}) {
+  if (archivo.size > MAX_ARCHIVO_BYTES) throw new ApiError("archivo_muy_grande", 413)
+  if (archivo.size === 0) throw new ApiError("archivo_vacio", 422)
+  const para = paraChat ? "?para=chat" : ""
+  const auth = { Authorization: `Basic ${credenciales}`, "X-Cliente": CLIENTE }
+  const nombre = { "X-Nombre-Archivo": encodeURIComponent(archivo.name) }
+  const avance = (desde: number) => (bytes: number) => onProgreso(Math.min((desde + bytes) / archivo.size, 1))
+  if (archivo.size <= PARTE_BYTES) {
+    const subido = await enviarParte<Archivo>(
+      `${BASE}/${pendienteId}/archivos${para}`,
+      { ...auth, ...nombre, "Content-Type": archivo.type || "application/octet-stream" },
+      archivo,
+      "archivo",
+      avance(0)
+    )
+    onProgreso(1)
+    return subido
+  }
+  const sha256 = await hashDeArchivo(archivo)
+  const repetido = sha256 && (await archivoRepetido(credenciales, pendienteId, archivo, sha256, para))
+  if (repetido) {
+    onProgreso(1)
+    return repetido
+  }
+  let subido = await enviarParte<Archivo>(
+    `${BASE}/${pendienteId}/archivos${para}`,
+    { ...auth, ...nombre, "Content-Type": "application/octet-stream", "X-Tamano": String(archivo.size) },
+    archivo.slice(0, PARTE_BYTES),
+    "archivo",
+    avance(0)
+  )
+  while (subido.subido !== null) {
+    const desde = subido.subido
+    subido = await enviarParte<Archivo>(
+      `${BASE}/archivos/${subido.id}/partes?desde=${desde}`,
+      { ...auth, "Content-Type": "application/octet-stream" },
+      archivo.slice(desde, desde + PARTE_BYTES),
+      "archivo",
+      avance(desde)
+    )
+  }
+  onProgreso(1)
+  return subido
 }
 
 async function descargarArchivo(credenciales: string, id: string) {
@@ -563,6 +661,16 @@ export const api = {
     subir: subirArchivo,
     descargar: descargarArchivo,
     borrar: (credenciales: string, id: string) => pedir<{ ok: true }>(credenciales, "DELETE", `/archivos/${id}`),
+    // Lo ya subido a los pendientes que ves, para usarlo en otro sin volver a subirlo.
+    buscar: (credenciales: string, texto: string) =>
+      pedir<{ archivos: ArchivoEncontrado[] }>(credenciales, "GET", `/archivos?q=${encodeURIComponent(texto)}`).then((data) => data.archivos),
+    reusar: (credenciales: string, pendienteId: string, archivoId: string, paraChat = false) =>
+      pedir<{ archivo: Archivo }>(credenciales, "POST", `/${pendienteId}/archivos/reusar${paraChat ? "?para=chat" : ""}`, { archivo_id: archivoId }).then(
+        (data) => data.archivo
+      ),
+    // Un enlace que sirve sin contraseña por unas horas: el <video> lo pide por partes.
+    enlace: (credenciales: string, id: string) =>
+      pedir<{ url: string }>(credenciales, "GET", `/archivos/${id}/enlace`).then((data) => data.url),
   },
   notificaciones: {
     listar: (credenciales: string) =>

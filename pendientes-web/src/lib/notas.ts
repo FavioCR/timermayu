@@ -1,6 +1,4 @@
-import { createSHA256 } from "hash-wasm"
-
-import { ApiError, CLIENTE, pedir, type OpcionesRedaccion } from "@/lib/api"
+import { ApiError, CLIENTE, enviarParte, hashDeArchivo, PARTE_BYTES, pedir, type OpcionesRedaccion } from "@/lib/api"
 
 // Notas privadas: cursos con sus notas (como en Notion) y sus recursos (PDF y otros archivos).
 export type Curso = { id: string; nombre: string; icono: string; creado_en: string; actualizado_en: string }
@@ -19,8 +17,6 @@ export const PREFIJO_IMAGEN_NOTA = `${BASE}/notas/imagenes/`
 export const PREFIJO_RECURSO = `${BASE}/notas/recursos/`
 export const urlDeRecurso = (id: string) => `${PREFIJO_RECURSO}${id}`
 export const MAX_RECURSO_BYTES = 300 * 1024 * 1024
-// nginx deja pasar hasta 11 MB por petición: los recursos más grandes se suben en partes de 8 MB.
-const PARTE_BYTES = 8 * 1024 * 1024
 
 export const ICONOS_CURSO = [
   "📘", "📗", "📕", "📙", "📓", "📚", "🎓", "✏️", "📐", "📊", "🧮", "🧪",
@@ -29,41 +25,6 @@ export const ICONOS_CURSO = [
 ]
 
 export const sinTildes = (texto: string) => texto.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase()
-
-// Sube una parte con XMLHttpRequest, que sí avisa cuánto lleva (fetch no).
-function enviarParte(url: string, headers: Record<string, string>, parte: Blob, onProgreso: (bytes: number) => void) {
-  return new Promise<Recurso>((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    xhr.open("POST", url)
-    for (const [nombre, valor] of Object.entries(headers)) xhr.setRequestHeader(nombre, valor)
-    xhr.upload.onprogress = (event) => onProgreso(event.loaded)
-    xhr.onload = () => {
-      let data: { recurso?: Recurso; error?: string } = {}
-      try {
-        data = JSON.parse(xhr.responseText)
-      } catch {
-        // Un 413 de nginx no trae JSON.
-      }
-      if (xhr.status >= 200 && xhr.status < 300 && data.recurso) resolve(data.recurso)
-      else reject(new ApiError(data.error ?? (xhr.status === 413 ? "body_too_large" : `http_${xhr.status}`), xhr.status))
-    }
-    xhr.onerror = () => reject(new ApiError("sin_conexion", 0))
-    xhr.send(parte)
-  })
-}
-
-// El SHA-256 del archivo, leído por partes para no tener cientos de MB en memoria. null si el navegador no puede.
-async function hashDeArchivo(archivo: File) {
-  try {
-    const hash = await createSHA256()
-    for (let desde = 0; desde < archivo.size; desde += PARTE_BYTES) {
-      hash.update(new Uint8Array(await archivo.slice(desde, desde + PARTE_BYTES).arrayBuffer()))
-    }
-    return hash.digest("hex")
-  } catch {
-    return null
-  }
-}
 
 // Si ya tienes ese mismo archivo en alguno de tus cursos, se agrega sin volver a subirlo. null: no lo tienes.
 async function recursoRepetido(credenciales: string, cursoId: string, archivo: File, sha256: string) {
@@ -99,7 +60,7 @@ async function subirRecurso(credenciales: string, cursoId: string, archivo: File
   }
   const auth = { Authorization: `Basic ${credenciales}`, "X-Cliente": CLIENTE }
   const avance = (desde: number) => (bytes: number) => onProgreso(Math.min((desde + bytes) / archivo.size, 1))
-  let recurso = await enviarParte(
+  let recurso = await enviarParte<Recurso>(
     `${BASE}/notas/cursos/${cursoId}/recursos`,
     {
       ...auth,
@@ -108,14 +69,16 @@ async function subirRecurso(credenciales: string, cursoId: string, archivo: File
       "X-Tamano": String(archivo.size),
     },
     archivo.slice(0, PARTE_BYTES),
+    "recurso",
     avance(0)
   )
   while (recurso.subido < recurso.tamano) {
     const desde = recurso.subido
-    recurso = await enviarParte(
+    recurso = await enviarParte<Recurso>(
       `${BASE}/notas/recursos/${recurso.id}/partes?desde=${desde}`,
       { ...auth, "Content-Type": "application/octet-stream" },
       archivo.slice(desde, desde + PARTE_BYTES),
+      "recurso",
       avance(desde)
     )
   }
