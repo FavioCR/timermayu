@@ -21,6 +21,8 @@ export type Pendiente = {
   num_comentarios: number
   // Ids de sus etiquetas.
   etiquetas: string[]
+  // Perfiles que aprobaron su funcionalidad, del primero al último. Solo en Hecho: al salir de ahí se pierden.
+  aprobaciones: string[]
   creado_en: string
   actualizado_en: string
   // Cuándo pasó a Hecho; null si no está hecho. El tablero solo muestra los hechos de la última semana.
@@ -142,6 +144,8 @@ export type TipoActividad =
   | "archivo"
   | "etiquetas"
   | "tipo"
+  | "aprobado"
+  | "aprobacion_quitada"
 
 // Lo que se anota según el tipo: de/a en los cambios, extracto y menciones (ids de perfil) en los mensajes, etc.
 export type DatosActividad = {
@@ -242,6 +246,9 @@ const MENSAJES: Record<string, string> = {
   telefono_invalido: "Escribe el teléfono con código de país, por ejemplo +506 8888 8888.",
   comentario_invalido: "Escribe el mensaje (máximo 2000 caracteres).",
   solo_el_autor: "Solo quien escribió el mensaje lo puede borrar.",
+  aprobar_con_perfil: "Para aprobar, entra con tu perfil.",
+  aprobar_solo_hechos: "Solo se aprueba lo que está en Hecho.",
+  aprobar_lo_propio: "Lo que está a tu cargo lo aprueba otra persona.",
   correo_duplicado: "Ese correo ya lo tiene otro perfil.",
   contrasena_invalida: "La contraseña debe tener al menos 8 caracteres.",
   solo_el_mismo: "Ese perfil ya tiene contraseña: solo esa persona puede cambiarlo.",
@@ -513,6 +520,11 @@ export const api = {
   // Vuelve a Por hacer con otra persona como responsable; conserva historial, chat y archivos.
   traspasar: (credenciales: string, id: string, perfilId: string, nota: string) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "POST", `/${id}/traspaso`, { perfil_id: perfilId, nota }).then((data) => data.pendiente),
+  // El check de otro perfil sobre un pendiente hecho: aprueba su funcionalidad (o quita esa aprobación).
+  aprobar: (credenciales: string, id: string) =>
+    pedir<{ pendiente: Pendiente }>(credenciales, "POST", `/${id}/aprobacion`).then((data) => data.pendiente),
+  desaprobar: (credenciales: string, id: string) =>
+    pedir<{ pendiente: Pendiente }>(credenciales, "DELETE", `/${id}/aprobacion`).then((data) => data.pendiente),
   ordenar: (credenciales: string, items: { id: string; estado: Estado }[]) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "PUT", "/orden", { items }).then((data) => data.pendientes),
   subirImagen,

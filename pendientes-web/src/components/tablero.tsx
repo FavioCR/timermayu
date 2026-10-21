@@ -61,6 +61,7 @@ import { toast } from "sonner"
 
 import { ActividadSheet } from "@/components/actividad-sheet"
 import { AparienciaDialog } from "@/components/apariencia-dialog"
+import { Aprobacion } from "@/components/aprobacion"
 import { DetallePendiente } from "@/components/detalle-pendiente"
 import { EstadoConexion } from "@/components/estado-conexion"
 import { porNombre, PuntoEtiqueta } from "@/components/etiquetas-selector"
@@ -895,6 +896,29 @@ export function Tablero({
     [credenciales, fallar, recargar, revisarEvidencia]
   )
 
+  // El check de un pendiente hecho: se ve al instante y lo confirma el servidor.
+  const aprobar = useCallback(
+    async (id: string, aprueba: boolean) => {
+      const yo = usuario?.perfil_id
+      if (!yo) return
+      setTarjetas((actuales) =>
+        actuales.map((t) => {
+          if (t.id !== id) return t
+          const otras = t.aprobaciones.filter((perfilId) => perfilId !== yo)
+          return { ...t, aprobaciones: aprueba ? [...otras, yo] : otras }
+        })
+      )
+      try {
+        const actualizado = await (aprueba ? api.aprobar : api.desaprobar)(credenciales, id)
+        setTarjetas((actuales) => actuales.map((t) => (t.id === id ? aTarjeta(actualizado) : t)))
+      } catch (err) {
+        fallar(err)
+        recargar()
+      }
+    },
+    [credenciales, fallar, recargar, usuario?.perfil_id]
+  )
+
   const cerrarDetalle = useCallback(() => {
     setAbierto(null)
     setChatEnfocado(null)
@@ -1093,6 +1117,9 @@ export function Tablero({
       }
       try {
         await api.ordenar(credenciales, finales.map((tarjeta) => ({ id: tarjeta.id, estado: tarjeta.column as Estado })))
+        // Lo que salió de Hecho vuelve a trabajarse: el servidor ya le quitó las aprobaciones.
+        const salieron = new Set(finales.filter((t) => t.column !== "hecho" && columnasAlEmpezar.current.get(t.id) === "hecho").map((t) => t.id))
+        if (salieron.size > 0) setTarjetas((actuales) => actuales.map((t) => (salieron.has(t.id) ? { ...t, aprobaciones: [] } : t)))
         if (pendienteDeRecarga) recargar()
         for (const tarjeta of finales) {
           if (tarjeta.column === "hecho" && columnasAlEmpezar.current.get(tarjeta.id) !== "hecho") revisarEvidencia(tarjeta)
@@ -1660,6 +1687,16 @@ export function Tablero({
                                   ))}
                                 </div>
                               )}
+                              {tarjeta.column === "hecho" && (
+                                <Aprobacion
+                                  compacto
+                                  pendiente={tarjeta}
+                                  perfilesPorId={perfilesPorId}
+                                  yo={usuario?.perfil_id ?? null}
+                                  onAprobar={(aprueba) => aprobar(tarjeta.id, aprueba)}
+                                  botonProps={noArrastrar}
+                                />
+                              )}
                               <div className="flex min-w-0 items-center gap-2">
                                 {proyecto && (
                                   <Badge
@@ -1924,6 +1961,7 @@ export function Tablero({
         onCantidadComentarios={cambiarCantidadComentarios}
         onCantidadArchivos={cambiarCantidadArchivos}
         onPasar={setPasando}
+        onAprobar={aprobar}
         onBorrar={borrar}
         onCerrar={cerrarDetalle}
         onSalir={onSalir}

@@ -44,6 +44,10 @@ export function describir(actividad, yo) {
     }
     case 'tipo':
       return datos.a ? `marcó ${titulo} como ${datos.a}` : `le quitó el tipo a ${titulo}`;
+    case 'aprobado':
+      return `aprobó ${titulo}`;
+    case 'aprobacion_quitada':
+      return `quitó su aprobación de ${titulo}`;
     case 'borrado':
       return `borró ${titulo}`;
     default:

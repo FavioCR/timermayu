@@ -1798,6 +1798,58 @@ test('lo guardado antes (un archivo por fila) pasa a guardarse por contenido al 
   assert.deepEqual(blobs(dataDir), [sha(PDF)]);
 });
 
+test('aprobaciones: otros perfiles aprueban un pendiente hecho; se pierden si vuelve a trabajarse', async (t) => {
+  const { call, data, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const junior = await entrarComo('Junior');
+  const { pendiente } = await favio.data('POST', '', { texto: 'Login con Google', perfil_id: diego.perfil.id });
+  assert.deepEqual(pendiente.aprobaciones, []);
+  const ruta = `/${pendiente.id}/aprobacion`;
+  const aprobar = async (quien) => (await quien.data('POST', ruta)).pendiente.aprobaciones;
+
+  // Solo lo que está en Hecho, y no lo aprueba su responsable ni la cuenta del equipo.
+  assert.equal((await junior.call('POST', ruta)).status, 409);
+  await diego.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  assert.equal((await diego.call('POST', ruta)).status, 409);
+  assert.equal((await call('POST', ruta)).status, 403);
+  assert.equal((await call('DELETE', ruta)).status, 403);
+  assert.equal((await junior.call('POST', `/${crypto.randomUUID()}/aprobacion`)).status, 404);
+
+  assert.deepEqual(await aprobar(junior), [junior.perfil.id]);
+  assert.deepEqual(await aprobar(junior), [junior.perfil.id], 'aprobar dos veces cuenta una');
+  assert.deepEqual(await aprobar(favio), [junior.perfil.id, favio.perfil.id]);
+  assert.deepEqual((await data('GET')).pendientes.find((p) => p.id === pendiente.id).aprobaciones, [junior.perfil.id, favio.perfil.id]);
+  // Se avisa a su responsable y a quien lo creó, no a quien aprueba.
+  const avisos = async (quien) => (await quien.data('GET', '/notificaciones')).notificaciones
+    .filter((n) => n.actividad.tipo === 'aprobado').map((n) => n.actividad.autor);
+  assert.deepEqual(await avisos(diego), ['Favio', 'Junior']);
+  assert.deepEqual(await avisos(favio), ['Junior']);
+  assert.deepEqual(await avisos(junior), []);
+
+  // Cada quien quita la suya; quitarla otra vez no anota nada.
+  assert.deepEqual((await junior.data('DELETE', ruta)).pendiente.aprobaciones, [favio.perfil.id]);
+  assert.deepEqual((await junior.data('DELETE', ruta)).pendiente.aprobaciones, [favio.perfil.id]);
+  assert.deepEqual((await diego.data('GET', `/${pendiente.id}/actividad`)).actividad.slice(0, 3).map((a) => [a.tipo, a.autor]),
+    [['aprobacion_quitada', 'Junior'], ['aprobado', 'Favio'], ['aprobado', 'Junior']]);
+
+  // Si queda a cargo de quien lo aprobó, su aprobación se va.
+  await aprobar(junior);
+  assert.deepEqual((await diego.data('PATCH', `/${pendiente.id}`, { perfil_id: favio.perfil.id })).pendiente.aprobaciones, [junior.perfil.id]);
+  assert.deepEqual(await aprobar(diego), [junior.perfil.id, diego.perfil.id]);
+
+  // Al volver a trabajarse, sea cambiándolo o arrastrándolo, las aprobaciones se pierden.
+  assert.deepEqual((await favio.data('PATCH', `/${pendiente.id}`, { estado: 'haciendo' })).pendiente.aprobaciones, []);
+  await favio.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  await aprobar(junior);
+  await favio.data('PUT', '/orden', { items: [{ id: pendiente.id, estado: 'pendiente' }] });
+  assert.deepEqual((await favio.data('GET')).pendientes.find((p) => p.id === pendiente.id).aprobaciones, []);
+  // Pasarlo a otra persona también lo devuelve a Por hacer.
+  await favio.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  await aprobar(junior);
+  assert.deepEqual((await favio.data('POST', `/${pendiente.id}/traspaso`, { perfil_id: diego.perfil.id })).pendiente.aprobaciones, []);
+});
+
 test('evidencia: al tercer pendiente seguido que alguien termina sin escribir en su chat, se le recuerda', async (t) => {
   const { call, entrarComo } = await startServer(t);
   const diego = await entrarComo('Diego');

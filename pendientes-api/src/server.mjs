@@ -144,6 +144,7 @@ const ARCHIVOS_PATH = new RegExp(`^/api/pendientes/${UUID}/archivos$`);
 const ARCHIVO_PATH = new RegExp(`^/api/pendientes/archivos/${UUID}$`);
 const TRASPASO_PATH = new RegExp(`^/api/pendientes/${UUID}/traspaso$`);
 const EVIDENCIA_PATH = new RegExp(`^/api/pendientes/${UUID}/evidencia$`);
+const APROBACION_PATH = new RegExp(`^/api/pendientes/${UUID}/aprobacion$`);
 const ETIQUETA_PATH = new RegExp(`^/api/pendientes/etiquetas/${UUID}$`);
 const CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}$`);
 const NOTAS_DE_CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/notas$`);
@@ -160,7 +161,7 @@ const VIDA_TRABAJO_IA_MS = 10 * 60_000;
 const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_CORREO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
-  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, ETIQUETA_PATH,
+  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, APROBACION_PATH, ETIQUETA_PATH,
   CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH, RECURSO_REPETIDO_PATH];
 // Las filas que apuntan a un archivo guardado por su contenido (DATA_DIR/blobs/<sha256>).
 const TABLAS_CON_BLOB = ['imagenes', 'archivos', 'nota_imagenes', 'recursos'];
@@ -168,7 +169,8 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en, hecho_en,
   (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios,
   (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0) AS num_archivos,
-  (SELECT json_group_array(pe.etiqueta_id) FROM pendiente_etiquetas pe WHERE pe.pendiente_id = pendientes.id) AS etiquetas`;
+  (SELECT json_group_array(pe.etiqueta_id) FROM pendiente_etiquetas pe WHERE pe.pendiente_id = pendientes.id) AS etiquetas,
+  (SELECT json_group_array(ap.perfil_id ORDER BY ap.creado_en, ap.rowid) FROM aprobaciones ap WHERE ap.pendiente_id = pendientes.id) AS aprobaciones`;
 const SELECT_PERFIL = 'SELECT id, nombre, correo, telefono, color, password_hash IS NOT NULL AS tiene_contrasena, creado_en FROM perfiles';
 const SELECT_ORGANIZACION = `SELECT id, nombre, color, duenio_id, compartida, creado_en,
   (SELECT json_group_array(perfil_id) FROM organizacion_miembros m WHERE m.organizacion_id = organizaciones.id) AS miembros FROM organizaciones`;
@@ -430,6 +432,24 @@ const MIGRACIONES = [
   // Cuándo se mandó cada aviso por correo (null: todavía no), para no mandarlo dos veces.
   (db) => {
     db.exec('ALTER TABLE notificaciones ADD COLUMN correo_en TEXT');
+  },
+  // Aprobaciones: otros perfiles dan por buena la funcionalidad de un pendiente hecho. Se pierden si sale de Hecho (se
+  // vuelve a trabajar), y quien queda a cargo no puede tener la suya.
+  (db) => {
+    db.exec(`
+      CREATE TABLE aprobaciones (
+        pendiente_id TEXT NOT NULL REFERENCES pendientes(id) ON DELETE CASCADE,
+        perfil_id TEXT NOT NULL REFERENCES perfiles(id) ON DELETE CASCADE,
+        creado_en TEXT NOT NULL,
+        PRIMARY KEY (pendiente_id, perfil_id)
+      );
+      CREATE TRIGGER aprobaciones_al_salir_de_hecho AFTER UPDATE OF estado ON pendientes
+        WHEN OLD.estado = 'hecho' AND NEW.estado <> 'hecho'
+        BEGIN DELETE FROM aprobaciones WHERE pendiente_id = NEW.id; END;
+      CREATE TRIGGER aprobaciones_del_responsable AFTER UPDATE OF perfil_id ON pendientes
+        WHEN NEW.perfil_id IS NOT NULL
+        BEGIN DELETE FROM aprobaciones WHERE pendiente_id = NEW.id AND perfil_id = NEW.perfil_id; END;
+    `);
   },
 ];
 
@@ -903,7 +923,7 @@ const fila = (row) => (row ? { ...row } : null);
 const perfilFila = (row) => (row ? { ...row, tiene_contrasena: Boolean(row.tiene_contrasena) } : null);
 const organizacionFila = (row) => (row ? { ...row, compartida: Boolean(row.compartida), miembros: JSON.parse(row.miembros).sort() } : null);
 const actividadFila = (row) => (row ? { ...row, datos: row.datos ? JSON.parse(row.datos) : null } : null);
-const pendienteFila = (row) => (row ? { ...row, etiquetas: JSON.parse(row.etiquetas).sort() } : null);
+const pendienteFila = (row) => (row ? { ...row, etiquetas: JSON.parse(row.etiquetas).sort(), aprobaciones: JSON.parse(row.aprobaciones) } : null);
 
 // Proyecto sin organización con ese nombre; se crea si no existe.
 function proyectoSuelto(db, nombre) {
@@ -1636,6 +1656,35 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       });
     },
 
+    // Otro perfil da por buena la funcionalidad de un pendiente hecho. Su responsable no la aprueba (es su trabajo), ni
+    // la cuenta del equipo (no se sabría quién). Se avisa al responsable y a quien lo creó.
+    aprobar(quien, id) {
+      const yo = quien.perfil_id;
+      const actual = pendiente(yo, id);
+      if (!actual) return null;
+      if (!yo) throw httpError(403, 'aprobar_con_perfil');
+      if (actual.estado !== 'hecho') throw httpError(409, 'aprobar_solo_hechos');
+      if (actual.perfil_id === yo) throw httpError(409, 'aprobar_lo_propio');
+      return transaction(db, () => {
+        const { changes } = db.prepare('INSERT OR IGNORE INTO aprobaciones (pendiente_id, perfil_id, creado_en) VALUES (?, ?, ?)')
+          .run(id, yo, new Date().toISOString());
+        if (changes) registrar(quien, actual, 'aprobado', null, [actual.perfil_id, actual.creado_por]);
+        return pendiente(yo, id);
+      });
+    },
+
+    desaprobar(quien, id) {
+      const yo = quien.perfil_id;
+      const actual = pendiente(yo, id);
+      if (!actual) return null;
+      if (!yo) throw httpError(403, 'aprobar_con_perfil');
+      return transaction(db, () => {
+        const { changes } = db.prepare('DELETE FROM aprobaciones WHERE pendiente_id = ? AND perfil_id = ?').run(id, yo);
+        if (changes) registrar(quien, actual, 'aprobacion_quitada');
+        return pendiente(yo, id);
+      });
+    },
+
     ordenar(quien, orden) {
       const yo = quien.perfil_id;
       const now = new Date().toISOString();
@@ -2275,7 +2324,7 @@ export function createApp(options = {}) {
     if (method === 'GET') return null;
     const deRuta = (ruta) => pathname.match(ruta)?.[1];
     if (pathname === API_PATH || pathname === ORDER_PATH) return { tipo: 'pendientes' };
-    const pendienteId = deRuta(ITEM_PATH) ?? deRuta(TRASPASO_PATH);
+    const pendienteId = deRuta(ITEM_PATH) ?? deRuta(TRASPASO_PATH) ?? deRuta(APROBACION_PATH);
     if (pendienteId) return { tipo: 'pendientes', pendiente_id: pendienteId };
     if (deRuta(COMENTARIOS_PATH)) return { tipo: 'comentarios', pendiente_id: deRuta(COMENTARIOS_PATH) };
     if (deRuta(COMENTARIO_PATH)) return { tipo: 'comentarios', pendiente_id: repo.pendienteDeComentario(deRuta(COMENTARIO_PATH)) };
@@ -2583,6 +2632,9 @@ export function createApp(options = {}) {
       if (pendienteDeTraspaso && req.method === 'POST') {
         return enviar(200, 'pendiente', repo.traspasar(usuario, pendienteDeTraspaso, parseTraspaso(await readJson(req))));
       }
+      const pendienteDeAprobacion = url.pathname.match(APROBACION_PATH)?.[1];
+      if (pendienteDeAprobacion && req.method === 'POST') return enviar(200, 'pendiente', repo.aprobar(usuario, pendienteDeAprobacion));
+      if (pendienteDeAprobacion && req.method === 'DELETE') return enviar(200, 'pendiente', repo.desaprobar(usuario, pendienteDeAprobacion));
 
       if (url.pathname === PERFILES_PATH && req.method === 'GET') return json(res, 200, { perfiles: repo.listarPerfiles() });
       // El nombre de la cuenta del equipo no puede ser un perfil: al entrar no se sabría cuál es.

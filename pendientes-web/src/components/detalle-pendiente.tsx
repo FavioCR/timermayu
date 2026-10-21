@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { Forward, History, Lock, MessageCircle, MessageSquare, Trash2, Users } from "lucide-react"
 
+import { Aprobacion } from "@/components/aprobacion"
 import { ArchivosPendiente } from "@/components/archivos"
 import { ChatPendiente } from "@/components/chat-pendiente"
 import type { DocumentoDescripcion } from "@/components/editor-descripcion"
@@ -56,6 +57,7 @@ type Props = {
   onCantidadComentarios: (id: string, cantidad: number) => void
   onCantidadArchivos: (id: string, cantidad: number) => void
   onPasar: (pendiente: Pendiente) => void
+  onAprobar: (id: string, aprueba: boolean) => void
   onBorrar: (pendiente: Pendiente) => void
   onCerrar: () => void
   onSalir: () => void
@@ -101,6 +103,7 @@ function Contenido({
   onCantidadComentarios,
   onCantidadArchivos,
   onPasar,
+  onAprobar,
   onBorrar,
   onSalir,
   enfocarChat = 0,
@@ -318,6 +321,20 @@ function Contenido({
               </Button>
             )}
           </dd>
+
+          {pendiente.estado === "hecho" && (
+            <>
+              <dt className="text-muted-foreground">Aprobación</dt>
+              <dd>
+                <Aprobacion
+                  pendiente={pendiente}
+                  perfilesPorId={perfilesPorId}
+                  yo={usuario?.perfil_id ?? null}
+                  onAprobar={(aprueba) => onAprobar(id, aprueba)}
+                />
+              </dd>
+            </>
+          )}
 
           <dt className="text-muted-foreground">Tipo</dt>
           <dd>

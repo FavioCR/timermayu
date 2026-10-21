@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react"
 import {
   ArrowRightLeft,
+  BadgeCheck,
+  BadgeX,
   CircleCheck,
   FileText,
   Folder,
@@ -33,6 +35,8 @@ const ICONOS: Record<TipoActividad, typeof Plus> = {
   archivo: Paperclip,
   etiquetas: Tag,
   tipo: GitCommitHorizontal,
+  aprobado: BadgeCheck,
+  aprobacion_quitada: BadgeX,
 }
 
 function agruparPorDia(items: Actividad[]) {

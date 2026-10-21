@@ -59,6 +59,10 @@ export function describir(actividad: Actividad, { conTitulo = true, yo = null }:
     case "tipo":
       if (!datos.a) return conTitulo ? `le quitó el tipo a ${titulo}` : "le quitó el tipo"
       return conTitulo ? `marcó ${titulo} como ${datos.a}` : `lo marcó como ${datos.a}`
+    case "aprobado":
+      return conTitulo ? `aprobó ${titulo}` : "aprobó la funcionalidad"
+    case "aprobacion_quitada":
+      return conTitulo ? `quitó su aprobación de ${titulo}` : "quitó su aprobación"
     case "borrado":
       return `borró ${titulo}`
   }
