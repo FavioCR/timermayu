@@ -84,9 +84,9 @@ const MAX_REDACCION_NOTA = 8000;
 const LATIDO_MS = 9000;
 const MAX_CONEXIONES = 500;
 // Avisos por correo: a quien lleva una hora sin ver un aviso le llega un resumen de lo que no vio (como mucho uno cada
-// 4 horas). Lo de más de 3 días ya no se manda: al encenderlo no le llega a nadie todo lo atrasado.
+// 2 días, pedido por el usuario). Lo de más de 3 días ya no se manda: al encenderlo no le llega a nadie todo lo atrasado.
 const ESPERA_CORREO_MS = 60 * 60_000;
-const ENTRE_CORREOS_MS = 4 * 60 * 60_000;
+const ENTRE_CORREOS_MS = 2 * 24 * 60 * 60_000;
 const ANTIGUEDAD_CORREO_MS = 3 * 24 * 60 * 60_000;
 const REVISAR_CORREOS_MS = 5 * 60_000;
 const URL_TABLERO = 'https://timer.practi.dev/pendientes/';

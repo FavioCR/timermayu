@@ -1913,40 +1913,40 @@ test('avisos por correo: a quien no ve sus avisos le llega un resumen de esa act
   // Lo que ya llegó por correo no se repite.
   await vuelta(70);
   assert.equal(enviados.length, 1);
+  const DIAS = 24 * 60;
 
-  // Lo nuevo espera al menos 4 horas desde el último correo, y si falla el envío se reintenta en la vuelta siguiente.
-  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: '¿Lo viste, @Favio?' });
-  await vuelta(130);
-  assert.equal(enviados.length, 1);
-  fallar = true;
-  await vuelta(305);
-  assert.equal(enviados.length, 1);
-  fallar = false;
-  await vuelta(310);
-  assert.equal(enviados.length, 2);
-  assert.equal(enviados[1].subject, 'Diego te mencionó en «Facturación <octubre>»');
-  assert.ok(!enviados[1].text.includes('te lo asignó'));
-
-  // Lo que ya vio no se manda.
+  // Lo que ya vio no se manda, aunque hayan pasado los 2 días desde el último correo.
   await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: 'Otra cosa, @Favio' });
   await favio.call('POST', '/notificaciones/leidas', {});
-  await vuelta(600);
-  assert.equal(enviados.length, 2);
+  await vuelta(61 + 2 * DIAS + 10);
+  assert.equal(enviados.length, 1);
 
   // Apagado no le llega nada; tampoco a la cuenta del equipo, que no es un perfil.
   assert.equal((await favio.call('PUT', '/yo/avisos-por-correo', { activo: 'no' })).status, 422);
   assert.deepEqual(await favio.data('PUT', '/yo/avisos-por-correo', { activo: false }), { activo: false });
   assert.equal((await call('PUT', '/yo/avisos-por-correo', { activo: false })).status, 404);
   assert.deepEqual(await yo(favio), { activo: false, correo: 'favio@ejemplo.com' });
-  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: 'Y otra, @Favio' });
-  await vuelta(900);
-  assert.equal(enviados.length, 2);
-  // Al volver a encenderlo, lo de hace más de 3 días ya no se manda.
+  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: '¿Lo viste, @Favio?' });
+  await vuelta(61 + 2 * DIAS + 15);
+  assert.equal(enviados.length, 1);
+
+  // Encendido otra vez: pasados los 2 días le llega lo nuevo; si falla el envío, se reintenta en la vuelta siguiente.
   await favio.data('PUT', '/yo/avisos-por-correo', { activo: true });
-  await vuelta(4 * 24 * 60);
+  fallar = true;
+  await vuelta(61 + 2 * DIAS + 20);
+  assert.equal(enviados.length, 1);
+  fallar = false;
+  await vuelta(61 + 2 * DIAS + 25);
   assert.equal(enviados.length, 2);
-  await vuelta(1000);
-  assert.equal(enviados.length, 3);
+  assert.equal(enviados[1].subject, 'Diego te mencionó en «Facturación <octubre>»');
+  assert.ok(!enviados[1].text.includes('te lo asignó'));
+
+  // Lo nuevo espera 2 días desde el último correo, y lo de más de 3 días ya no se manda.
+  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: 'Y otra, @Favio' });
+  await vuelta(61 + 2 * DIAS + 90);
+  assert.equal(enviados.length, 2);
+  await vuelta(61 + 4 * DIAS + 30);
+  assert.equal(enviados.length, 2);
 });
 
 test('avisos por correo: sin configurar no se mandan ni aparecen', async (t) => {
