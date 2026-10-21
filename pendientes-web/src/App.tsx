@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useState } from "react"
 
 import { LoginForm } from "@/components/login-form"
+import { NuevaVersion } from "@/components/nueva-version"
 import { Tablero } from "@/components/tablero"
 import { APARIENCIA_NORMAL, aplicarApariencia } from "@/lib/apariencia"
 import { guardarCredenciales, leerCredenciales } from "@/lib/api"
@@ -25,23 +26,22 @@ export default function App() {
     aplicarApariencia(APARIENCIA_NORMAL)
   }, [])
 
-  if (!credenciales) {
-    return (
-      <div className="flex min-h-svh w-full items-center justify-center bg-background p-6 md:p-10">
-        <div className="w-full max-w-sm">
-          <LoginForm onEntrar={entrar} notas={notas} />
+  return (
+    <>
+      <NuevaVersion />
+      {!credenciales ? (
+        <div className="flex min-h-svh w-full items-center justify-center bg-background p-6 md:p-10">
+          <div className="w-full max-w-sm">
+            <LoginForm onEntrar={entrar} notas={notas} />
+          </div>
         </div>
-      </div>
-    )
-  }
-
-  if (notas) {
-    return (
-      <Suspense fallback={null}>
-        <PaginaNotas credenciales={credenciales} onSalir={salir} />
-      </Suspense>
-    )
-  }
-
-  return <Tablero credenciales={credenciales} onCredenciales={entrar} onSalir={salir} />
+      ) : notas ? (
+        <Suspense fallback={null}>
+          <PaginaNotas credenciales={credenciales} onSalir={salir} />
+        </Suspense>
+      ) : (
+        <Tablero credenciales={credenciales} onCredenciales={entrar} onSalir={salir} />
+      )}
+    </>
+  )
 }

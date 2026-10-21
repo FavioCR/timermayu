@@ -328,7 +328,7 @@ export default function PaginaNotas({ credenciales, onSalir }: { credenciales: s
         onSalir={onSalir}
       />
       <SidebarInset className="min-w-0">
-        <header className="sticky top-0 z-10 flex h-12 shrink-0 items-center gap-2 border-b bg-background/95 px-3 backdrop-blur">
+        <header className="sticky top-(--alto-aviso) z-10 flex h-12 shrink-0 items-center gap-2 border-b bg-background/95 px-3 backdrop-blur">
           <SidebarTrigger aria-label="Mostrar u ocultar la barra lateral" />
           <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
           <Breadcrumb className="min-w-0 flex-1">

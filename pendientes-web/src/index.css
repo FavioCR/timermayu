@@ -53,6 +53,8 @@
 }
 
 :root {
+    /* Lo que ocupa arriba el aviso de versión nueva mientras se ve (lo pone nueva-version.tsx). */
+    --alto-aviso: 0px;
     --background: oklch(0.985 0.003 264);
     --foreground: oklch(0.18 0.02 264);
     --card: oklch(1 0 0);
