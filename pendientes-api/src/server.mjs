@@ -3,7 +3,10 @@ import {
   closeSync, copyFileSync, createReadStream, existsSync, linkSync, mkdirSync, openSync, readFileSync, readSync, renameSync, unlinkSync,
 } from 'node:fs';
 import { appendFile, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { lookup } from 'node:dns';
 import http from 'node:http';
+import https from 'node:https';
+import { BlockList, isIP } from 'node:net';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +36,11 @@ const MAX_BYTES_IMAGENES_IA = 7 * 1024 * 1024;
 // Los formatos que aceptan los tres proveedores.
 const TIPOS_IMAGEN_IA = ['image/png', 'image/jpeg', 'image/webp'];
 const MAX_IMAGEN_BYTES = 10 * 1024 * 1024;
+// Una imagen de otra página que se trae al pegar (después se achica en el navegador antes de subirla): lo que puede
+// pesar, lo que puede tardar (bajo los 12 s que espera nginx) y cuántas redirecciones se siguen.
+const MAX_IMAGEN_EXTERNA_BYTES = 15 * 1024 * 1024;
+const TIEMPO_IMAGEN_EXTERNA_MS = 8000;
+const MAX_REDIRECCIONES_IMAGEN = 3;
 const MAX_TEXTO = 500;
 const MAX_PROYECTO = 60;
 const MAX_NOMBRE = 40;
@@ -142,6 +150,7 @@ const ORGANIZACION_PATH = new RegExp(`^/api/pendientes/organizaciones/${UUID}$`)
 const PROYECTO_PATH = new RegExp(`^/api/pendientes/proyectos/${UUID}$`);
 const SUBIR_IMAGEN_PATH = new RegExp(`^/api/pendientes/${UUID}/imagenes$`);
 const IMAGEN_PATH = new RegExp(`^/api/pendientes/imagenes/${UUID}$`);
+const TRAER_IMAGEN_PATH = '/api/pendientes/imagenes/traer';
 const ACTIVIDAD_ITEM_PATH = new RegExp(`^/api/pendientes/${UUID}/actividad$`);
 const COMENTARIOS_PATH = new RegExp(`^/api/pendientes/${UUID}/comentarios$`);
 const COMENTARIO_PATH = new RegExp(`^/api/pendientes/comentarios/${UUID}$`);
@@ -168,7 +177,8 @@ const RECURSO_REPETIDO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/
 // Lo que se guarda el resultado de un trabajo de la IA que nadie vino a buscar.
 const VIDA_TRABAJO_IA_MS = 10 * 60_000;
 const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_CORREO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
-  IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH, TODOS_LOS_ARCHIVOS_PATH];
+  IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH, TODOS_LOS_ARCHIVOS_PATH,
+  TRAER_IMAGEN_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
   ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, APROBACION_PATH, ETIQUETA_PATH,
   CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH, RECURSO_REPETIDO_PATH,
@@ -546,6 +556,93 @@ export function tipoDeImagen(buffer) {
   if (['GIF87a', 'GIF89a'].includes(ascii(0, 6))) return 'image/gif';
   if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'image/webp';
   return null;
+}
+
+// Al pegar lo copiado de otra página, sus imágenes pasan a ser del pendiente (o de la nota). El navegador no puede leer
+// una imagen de otro sitio (CORS), así que la pide el servidor: solo de internet, nunca de la propia máquina ni de las
+// redes internas (la del servidor, Tailscale…). Se mira la dirección a la que de verdad se conecta, también en cada
+// redirección, y solo se devuelve si el contenido es una imagen.
+const REDES_INTERNAS = new BlockList();
+for (const [red, bits] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
+  ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 3]]) {
+  REDES_INTERNAS.addSubnet(red, bits, 'ipv4');
+}
+// :: y ::1, las IPv4 escritas como IPv6 (y por NAT64), las privadas, las de enlace local y multicast.
+for (const [red, bits] of [['::', 127], ['::ffff:0:0', 96], ['64:ff9b::', 96], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8]]) {
+  REDES_INTERNAS.addSubnet(red, bits, 'ipv6');
+}
+const esInterna = (direccion) => REDES_INTERNAS.check(direccion, isIP(direccion) === 6 ? 'ipv6' : 'ipv4');
+
+// Como dns.lookup, pero falla si el nombre lleva a alguna dirección interna.
+function buscarSoloPublicas(nombre, opciones, listo) {
+  lookup(nombre, { ...opciones, all: true }, (error, direcciones) => {
+    if (error) return listo(error);
+    if (direcciones.length === 0 || direcciones.some(({ address }) => esInterna(address))) return listo(httpError(422, 'imagen_externa_invalida'));
+    return opciones.all ? listo(null, direcciones) : listo(null, direcciones[0].address, direcciones[0].family);
+  });
+}
+
+function pedirImagenExterna(direccion, vence, redesInternas) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try {
+      url = new URL(direccion);
+    } catch {
+      return reject(httpError(422, 'imagen_externa_invalida'));
+    }
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || (!redesInternas && isIP(host) && esInterna(host))) {
+      return reject(httpError(422, 'imagen_externa_invalida'));
+    }
+    const fallar = (error) => {
+      clearTimeout(reloj);
+      reject(error.statusCode ? error : httpError(422, 'imagen_externa_no_disponible'));
+    };
+    const pedido = (url.protocol === 'https:' ? https : http).get(url, {
+      agent: false,
+      lookup: redesInternas ? undefined : buscarSoloPublicas,
+      headers: { Accept: 'image/png,image/jpeg,image/gif,image/webp;q=0.9,*/*;q=0.1', 'User-Agent': 'Mozilla/5.0 (Pendientes)' },
+    }, (res) => {
+      res.on('error', fallar);
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        clearTimeout(reloj);
+        return resolve({ redireccion: new URL(res.headers.location, url).href });
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return fallar(httpError(422, 'imagen_externa_no_disponible'));
+      }
+      const partes = [];
+      let tamano = 0;
+      res.on('data', (parte) => {
+        tamano += parte.length;
+        if (tamano > MAX_IMAGEN_EXTERNA_BYTES) pedido.destroy(httpError(413, 'imagen_muy_grande'));
+        else partes.push(parte);
+      });
+      res.on('end', () => {
+        clearTimeout(reloj);
+        const contenido = Buffer.concat(partes);
+        const tipo = tipoDeImagen(contenido);
+        if (tipo) resolve({ tipo, contenido });
+        else reject(httpError(415, 'imagen_invalida'));
+      });
+    });
+    const reloj = setTimeout(() => pedido.destroy(httpError(504, 'imagen_externa_tardo')), Math.max(0, vence - Date.now()));
+    pedido.on('error', fallar);
+  });
+}
+
+// `redesInternas`: solo para las pruebas, que sirven las imágenes desde la propia máquina.
+export async function traerImagenExterna(direccion, { redesInternas = false } = {}) {
+  const vence = Date.now() + TIEMPO_IMAGEN_EXTERNA_MS;
+  let url = direccion;
+  for (let salto = 0; salto <= MAX_REDIRECCIONES_IMAGEN; salto++) {
+    const respuesta = await pedirImagenExterna(url, vence, redesInternas);
+    if (!respuesta.redireccion) return respuesta;
+    url = respuesta.redireccion;
+  }
+  throw httpError(422, 'imagen_externa_no_disponible');
 }
 
 // Lo que el navegador puede mostrar o reproducir: imágenes, PDF, videos y audios (se mira el contenido, como en las
@@ -2453,6 +2550,8 @@ export function createApp(options = {}) {
   const authPassword = options.authPassword ?? process.env.AUTH_PASSWORD ?? '';
   const db = openDb(dataDir);
   const repo = createRepo(db, dataDir, options.graciaImagenesMs ?? GRACIA_IMAGENES_MS);
+  // Las pruebas sirven las imágenes "de otra página" desde la propia máquina; en producción nunca se piden ahí.
+  const imagenesDeRedesInternas = options.imagenesDeRedesInternas ?? process.env.IMAGENES_DE_REDES_INTERNAS === '1';
   // Las pruebas apuntan cada proveedor de IA a un servidor falso (IA_URL_GEMINI, IA_URL_OPENAI, IA_URL_OPENROUTER).
   const basesIA = Object.fromEntries(Object.entries(PROVEEDORES_IA).map(([id, { url }]) =>
     [id, options.basesIA?.[id] ?? process.env[`IA_URL_${id.toUpperCase()}`] ?? url]));
@@ -2944,6 +3043,19 @@ export function createApp(options = {}) {
         return enviar(200, 'proyecto', repo.actualizarProyecto(yo, proyectoId, parseProyecto(await readJson(req), { partial: true })));
       }
       if (proyectoId && req.method === 'DELETE') return listo(repo.borrarProyecto(yo, proyectoId));
+
+      if (url.pathname === TRAER_IMAGEN_PATH && req.method === 'POST') {
+        const { url: direccion } = await readJson(req);
+        if (typeof direccion !== 'string' || direccion.length > 8192) throw httpError(422, 'imagen_externa_invalida');
+        const imagen = await traerImagenExterna(direccion, { redesInternas: imagenesDeRedesInternas });
+        res.writeHead(200, {
+          'Content-Type': imagen.tipo,
+          'Content-Length': imagen.contenido.length,
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        return res.end(imagen.contenido);
+      }
 
       const pendienteDeImagen = url.pathname.match(SUBIR_IMAGEN_PATH)?.[1];
       if (pendienteDeImagen && req.method === 'POST') {

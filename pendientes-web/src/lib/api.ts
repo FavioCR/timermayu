@@ -581,6 +581,31 @@ function urlDeImagen(credenciales: string, url: string) {
   return promesa
 }
 
+// Una imagen que llegó pegada, para volver a subirla al pendiente (o a la nota): las del tablero se piden con la
+// contraseña; las de otra página, a través del servidor (el navegador no las puede leer: CORS); las que ya están en la
+// página (data: o blob:), directamente.
+async function traerImagen(credenciales: string, url: string): Promise<Blob> {
+  let response: Response
+  try {
+    response = url.startsWith(`${BASE}/`)
+      ? await fetch(url, { headers: { Authorization: `Basic ${credenciales}` } })
+      : /^https?:\/\//i.test(url)
+        ? await fetch(`${BASE}/imagenes/traer`, {
+            method: "POST",
+            headers: { Authorization: `Basic ${credenciales}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ url }),
+          })
+        : await fetch(url)
+  } catch {
+    throw new ApiError("sin_conexion", 0)
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}))
+    throw new ApiError(data.error ?? `http_${response.status}`, response.status)
+  }
+  return response.blob()
+}
+
 // Después de pasar algo a Hecho: si hay que recordarle dejar la evidencia, cuántos van seguidos sin ella y cuáles.
 export type Evidencia = { recordar: boolean; seguidos: number; sin_evidencia: { id: string; texto: string; hecho_en: string }[] }
 
@@ -627,6 +652,7 @@ export const api = {
     pedir<{ pendientes: Pendiente[] }>(credenciales, "PUT", "/orden", { items }).then((data) => data.pendientes),
   subirImagen,
   urlDeImagen,
+  traerImagen,
   perfiles: {
     listar: (credenciales: string) =>
       pedir<{ perfiles: Perfil[] }>(credenciales, "GET", "/perfiles").then((data) => data.perfiles),

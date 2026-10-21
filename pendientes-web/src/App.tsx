@@ -3,6 +3,7 @@ import { lazy, Suspense, useCallback, useState } from "react"
 import { LoginForm } from "@/components/login-form"
 import { NuevaVersion } from "@/components/nueva-version"
 import { Tablero } from "@/components/tablero"
+import { Toaster } from "@/components/ui/sonner"
 import { APARIENCIA_NORMAL, aplicarApariencia } from "@/lib/apariencia"
 import { guardarCredenciales, leerCredenciales } from "@/lib/api"
 import { esNotas } from "@/lib/notas"
@@ -42,6 +43,8 @@ export default function App() {
       ) : (
         <Tablero credenciales={credenciales} onCredenciales={entrar} onSalir={salir} />
       )}
+      {/* Los avisos que se van solos, del tablero y de las notas. */}
+      <Toaster position="bottom-right" />
     </>
   )
 }

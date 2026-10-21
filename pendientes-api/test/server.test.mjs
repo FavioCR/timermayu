@@ -517,6 +517,53 @@ test('sube imágenes, las sirve con contraseña y rechaza lo que no es imagen', 
   assert.equal((await subir(Buffer.alloc(10 * 1024 * 1024 + 1))).status, 413);
 });
 
+test('trae la imagen de otra página para pegarla: solo de internet y solo si es una imagen', async (t) => {
+  // Una página "de afuera", en la propia máquina.
+  const sitio = http.createServer((req, res) => {
+    const responder = (status, tipo, cuerpo, extra = {}) => {
+      res.writeHead(status, { ...(tipo && { 'Content-Type': tipo }), ...extra });
+      res.end(cuerpo);
+    };
+    if (req.url === '/foto.png') return responder(200, 'image/png', PNG);
+    if (req.url === '/vuelta') return responder(302, null, '', { Location: '/foto.png' });
+    if (req.url === '/pagina') return responder(200, 'text/html', '<html></html>');
+    if (req.url === '/dibujo.svg') return responder(200, 'image/svg+xml', '<svg xmlns="http://www.w3.org/2000/svg"/>');
+    if (req.url === '/enorme.png') return responder(200, 'image/png', Buffer.concat([PNG, Buffer.alloc(15 * 1024 * 1024)]));
+    return responder(404, null, '');
+  });
+  await new Promise((resolve) => sitio.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => sitio.close(resolve)));
+  const { port } = sitio.address();
+  const origen = `http://127.0.0.1:${port}`;
+  const traer = (call, url) => call('POST', '/imagenes/traer', { url });
+
+  // Nada de la propia máquina ni de las redes internas (por dirección o por nombre), ni lo que no es http(s).
+  const { base, call } = await startServer(t);
+  for (const url of [`${origen}/foto.png`, `http://localhost:${port}/foto.png`, 'http://10.0.0.1/x.png', 'http://192.168.1.10/x.png',
+    'http://[::1]/x.png', 'http://[::ffff:127.0.0.1]/x.png', 'http://169.254.169.254/latest/meta-data', 'http://100.100.100.100/x.png',
+    'file:///etc/passwd', 'data:image/png;base64,iVBORw0KGgo=', 'ftp://ejemplo.com/x.png', 'http://usuario:clave@ejemplo.com/x.png', 'no es una url']) {
+    assert.equal((await traer(call, url)).status, 422, url);
+  }
+  assert.equal((await call('POST', '/imagenes/traer', { url: 3 })).status, 422);
+  assert.equal((await fetch(`${base}/api/pendientes/imagenes/traer`, { method: 'POST', body: JSON.stringify({ url: `${origen}/foto.png` }) })).status, 401);
+
+  // Las pruebas sí pueden pedir a la propia máquina: llega la imagen (también tras una redirección), y nada más.
+  const local = await startServer(t, { imagenesDeRedesInternas: true });
+  const foto = await traer(local.call, `${origen}/foto.png`);
+  assert.equal(foto.status, 200);
+  assert.equal(foto.headers.get('content-type'), 'image/png');
+  assert.equal(foto.headers.get('x-content-type-options'), 'nosniff');
+  assert.deepEqual(Buffer.from(await foto.arrayBuffer()), PNG);
+  const diego = await local.entrarComo('Diego');
+  const redirigida = await traer(diego.call, `${origen}/vuelta`);
+  assert.equal(redirigida.status, 200);
+  assert.deepEqual(Buffer.from(await redirigida.arrayBuffer()), PNG);
+  assert.equal((await traer(local.call, `${origen}/pagina`)).status, 415);
+  assert.equal((await traer(local.call, `${origen}/dibujo.svg`)).status, 415);
+  assert.equal((await traer(local.call, `${origen}/no-esta.png`)).status, 422);
+  assert.equal((await traer(local.call, `${origen}/enorme.png`)).status, 413);
+});
+
 test('borra las imágenes que salen de la descripción, salvo si otra tarjeta las usa', async (t) => {
   const { base, dataDir, data } = await startServer(t, { graciaImagenesMs: 0 });
   const subir = async (id, contenido) => (await (await fetch(`${base}/api/pendientes/${id}/imagenes`, {

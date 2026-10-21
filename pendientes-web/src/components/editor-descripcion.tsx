@@ -27,6 +27,7 @@ import {
 } from "@blocknote/react"
 import { BlockNoteView } from "@blocknote/shadcn"
 import { Clock, Sparkles } from "lucide-react"
+import { toast } from "sonner"
 import { TextSelection, type Transaction } from "prosemirror-state"
 import { cn } from "cn"
 
@@ -39,6 +40,7 @@ import type { OpcionesRedaccion, Perfil } from "@/lib/api"
 import { claseDeArchivo, tipoPorNombre } from "@/lib/archivos"
 import { medioDeMarca, tramoLegible, type Medio } from "@/lib/marcas-de-tiempo"
 import { claveMarcas, marcasDeTiempo } from "@/lib/marcas-en-editor"
+import { comoImagenSubible, imagenesDelPortapapeles, nombreDeImagen, prepararHtml } from "@/lib/pegar-con-imagenes"
 
 // Tocar un archivo de la descripción lo abre con la contraseña (un enlace directo no la lleva).
 const AbrirArchivo = createContext<(url: string, nombre: string) => void>(() => {})
@@ -123,6 +125,17 @@ function conArrobas(bloques: Bloque[]): Bloque[] {
   return bloques.map(visitar)
 }
 
+// Las imágenes del documento, también las anidadas.
+function imagenesDe(bloques: Bloque[]): { id: string; url: string; nombre: string }[] {
+  return bloques.flatMap((bloque) => [
+    ...(bloque.type === "image" ? [{ id: bloque.id, url: bloque.props.url, nombre: bloque.props.name }] : []),
+    ...imagenesDe(bloque.children as Bloque[]),
+  ])
+}
+
+// Una dirección que solo sirve en esta página (lo pegado mientras se sube).
+const esTemporal = (url: string) => /^(blob|data):/i.test(url)
+
 const escapar = (texto: string) => texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 // Las @Nombre que escribe la IA pasan a ser menciones de verdad (como elegirlas con @: avisan a esa persona).
@@ -206,6 +219,7 @@ export default function EditorDescripcion({
   pista = PISTA_DESCRIPCION,
   medios = SIN_MEDIOS,
   onReproducir,
+  traerImagen,
 }: {
   inicial: (typeof schema.PartialBlock)[] | undefined
   oscuro: boolean
@@ -224,8 +238,11 @@ export default function EditorDescripcion({
   // verlos en ese momento. Sin ellos (o en las notas) las marcas son texto.
   medios?: Medio[]
   onReproducir?: (medio: Medio, desde: number, hasta: number | null) => void
+  // Una imagen pegada (de otra página, de otra tarjeta o nota, o ya en la página), para subirla aquí.
+  traerImagen: (url: string) => Promise<Blob>
 }) {
   const [extensionMarcas] = useState(marcasDeTiempo)
+  const alPegar = useRef<(event: ClipboardEvent, porDefecto: () => boolean | undefined) => boolean | undefined>(() => undefined)
   const editor = useCreateBlockNote({
     schema,
     initialContent: inicial,
@@ -233,7 +250,74 @@ export default function EditorDescripcion({
     uploadFile: subirArchivo,
     resolveFileUrl: resolverUrl,
     extensions: [extensionMarcas],
+    pasteHandler: ({ event, defaultPasteHandler }) => alPegar.current(event, defaultPasteHandler),
   })
+
+  // Pegar texto con imágenes las trae tal cual: con imágenes manda el HTML (aunque el texto plano parezca Markdown, que
+  // no las lleva), y cada imagen pegada se sube aquí, así no depende de la página, tarjeta o nota de donde vino. Mientras
+  // se sube, la que solo existe en esta página (subiendo: id del bloque → su dirección) no se guarda.
+  const subiendo = useRef(new Map<string, string>())
+  const ultimos = useRef({ subirArchivo, traerImagen })
+  ultimos.current = { subirArchivo, traerImagen }
+  alPegar.current = (event, porDefecto) => {
+    const datos = event.clipboardData
+    const html = datos?.getData("text/html") ?? ""
+    const antes = new Set(imagenesDe(editor.document as Bloque[]).map((imagen) => imagen.id))
+    const enCodigo = Boolean(editor.prosemirrorState.selection.$from.parent.type.spec.code)
+    let hecho: boolean | undefined = true
+    let perdidas = 0
+    if (datos && !enCodigo && !datos.types.includes("blocknote/html") && /<img[\s>]/i.test(html)) {
+      const preparado = prepararHtml(html, imagenesDelPortapapeles(datos))
+      perdidas = preparado.perdidas
+      editor.pasteHTML(preparado.html)
+    } else {
+      hecho = porDefecto()
+    }
+    const nuevas = imagenesDe(editor.document as Bloque[]).filter((imagen) => !antes.has(imagen.id) && imagen.url)
+    void subirPegadas(nuevas, perdidas)
+    return hecho
+  }
+
+  async function subirPegadas(imagenes: { id: string; url: string; nombre: string }[], perdidasAlPegar: number) {
+    let perdidas = perdidasAlPegar
+    for (const { id, url } of imagenes) subiendo.current.set(id, url)
+    const urlDe = (id: string) => (editor.getBlock(id)?.props as { url?: string } | undefined)?.url
+    await Promise.all(
+      imagenes.map(async ({ id, url, nombre }) => {
+        try {
+          const archivo = await comoImagenSubible(await ultimos.current.traerImagen(url), nombreDeImagen(nombre, url))
+          const nueva = await ultimos.current.subirArchivo(archivo)
+          if (urlDe(id) === url) editor.updateBlock(id, { props: { url: nueva } })
+        } catch {
+          // Lo de otra página o del tablero queda como vino; lo que solo existe aquí no se puede guardar.
+          if (esTemporal(url) && urlDe(id) === url) {
+            editor.removeBlocks([id])
+            perdidas++
+          }
+        } finally {
+          subiendo.current.delete(id)
+          if (url.startsWith("blob:")) URL.revokeObjectURL(url)
+        }
+      })
+    )
+    if (perdidas > 0) {
+      toast.warning(perdidas === 1 ? "No se pudo pegar 1 imagen" : `No se pudieron pegar ${perdidas} imágenes`, {
+        description:
+          perdidas === 1
+            ? "La app de donde viene no la deja copiar junto al texto. Cópiala sola y pégala aquí."
+            : "La app de donde vienen no las deja copiar junto al texto. Cópialas una por una y pégalas aquí.",
+        duration: 12000,
+      })
+    }
+  }
+
+  // Lo que se guarda: sin las imágenes pegadas que todavía tienen una dirección de esta página.
+  function paraGuardar(bloques: Bloque[]): Bloque[] {
+    if (subiendo.current.size === 0) return bloques
+    return bloques
+      .filter((bloque) => !(bloque.type === "image" && subiendo.current.has(bloque.id) && esTemporal(bloque.props.url)))
+      .map((bloque) => ({ ...bloque, children: paraGuardar(bloque.children as Bloque[]) }) as Bloque)
+  }
 
   // Los adjuntos llegan (o se van) con el editor ya abierto: las marcas se resaltan, o dejan de hacerlo, enseguida.
   const conMedios = medios.length > 0 && onReproducir !== undefined
@@ -423,7 +507,7 @@ export default function EditorDescripcion({
             slashMenu={false}
             emojiPicker={false}
             formattingToolbar={false}
-            onChange={() => onCambio(editor.document)}
+            onChange={() => onCambio(paraGuardar(editor.document as Bloque[]))}
           >
             <SuggestionMenuController triggerCharacter="/" getItems={itemsDeBarra} />
             {/* Los emojis de «:», como siempre, salvo después de un número: 01:30 es un tiempo (o una hora), no un emoji. */}

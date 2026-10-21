@@ -249,6 +249,7 @@ export function VistaNota({
               abrirArchivo={abrirArchivo}
               redactar={redactar}
               pista="Escribe, / para bloques (/ia para escribir con IA), o pega imágenes y PDFs"
+              traerImagen={(url) => api.traerImagen(credenciales, url)}
             />
           </Suspense>
         ) : (

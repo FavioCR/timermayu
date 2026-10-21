@@ -459,6 +459,7 @@ function Contenido({
                 redactar={redactarDescripcion}
                 medios={mediosDe.id === id ? mediosDe.lista : undefined}
                 onReproducir={(medio, desde, hasta) => reproducir({ credenciales, archivo: medio, desde, hasta })}
+                traerImagen={(url) => api.traerImagen(credenciales, url)}
               />
             </Suspense>
           ) : (

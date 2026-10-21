@@ -117,7 +117,6 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTi
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "@/components/ui/input-group"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Toaster } from "@/components/ui/sonner"
 import {
   api,
   crearCredenciales,
@@ -1990,8 +1989,6 @@ export function Tablero({
         onCerrar={() => setPasando(null)}
         onPasar={pasar}
       />
-      <Toaster position="bottom-right" />
-
       <Reproductor />
       <DetallePendiente
         credenciales={credenciales}
