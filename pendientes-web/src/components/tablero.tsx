@@ -1563,7 +1563,8 @@ export function Tablero({
                         )}
                       </InputGroup>
                     </div>
-                    <KanbanCards id={columna.id} className={enPantalla === 0 ? "p-0" : "gap-2.5 p-3"}>
+                    {/* Se ven las 5 primeras; las demás, con scroll dentro de la columna. */}
+                    <KanbanCards id={columna.id} visibles={5} className={enPantalla === 0 ? "p-0" : "gap-2.5 p-3"}>
                       {(tarjeta: Tarjeta) => {
                         const perfil = tarjeta.perfil_id ? perfilesPorId.get(tarjeta.perfil_id) : null
                         const proyecto = tarjeta.proyecto_id ? proyectosPorId.get(tarjeta.proyecto_id) : null

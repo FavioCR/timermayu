@@ -26,12 +26,14 @@ import {
   type HTMLAttributes,
   type ReactNode,
   useContext,
+  useEffect,
+  useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
 import tunnel from "tunnel-rat";
 import { Card } from "@/components/ui/card";
-import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
 const t = tunnel();
@@ -158,28 +160,57 @@ export type KanbanCardsProps<T extends KanbanItemProps = KanbanItemProps> =
   Omit<HTMLAttributes<HTMLDivElement>, "children" | "id"> & {
     children: (item: T) => ReactNode;
     id: string;
+    // Cuántas tarjetas se ven enteras; las demás quedan con scroll dentro de la columna (se asoma un poco la siguiente).
+    visibles?: number;
   };
+
+// Lo que se asoma de la tarjeta siguiente, para que se note que hay más abajo.
+const ASOMO_PX = 28;
 
 export const KanbanCards = <T extends KanbanItemProps = KanbanItemProps>({
   children,
   className,
+  visibles,
   ...props
 }: KanbanCardsProps<T>) => {
   const { data } = useContext(KanbanContext) as KanbanContextProps<T>;
   const filteredData = data.filter((item) => item.column === props.id);
   const items = filteredData.map((item) => item.id);
+  const raiz = useRef<HTMLDivElement>(null);
+  const lista = useRef<HTMLDivElement>(null);
+  const claveItems = items.join();
+
+  // El alto se mide en el DOM (las tarjetas miden distinto según su contenido) y se recalcula si alguna cambia de tamaño.
+  // Se usa offsetTop, que no cambia con las transformaciones de dnd-kit mientras se arrastra.
+  useEffect(() => {
+    const contenedor = lista.current;
+    const viewport = raiz.current?.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]');
+    if (!visibles || !contenedor || !viewport) return;
+    const medir = () => {
+      const siguiente = contenedor.children[visibles] as HTMLElement | undefined;
+      viewport.style.maxHeight = siguiente ? `${siguiente.offsetTop + Math.min(ASOMO_PX, siguiente.offsetHeight / 2)}px` : "";
+    };
+    medir();
+    const observador = new ResizeObserver(medir);
+    observador.observe(contenedor);
+    for (const tarjeta of contenedor.children) observador.observe(tarjeta);
+    return () => {
+      observador.disconnect();
+      viewport.style.maxHeight = "";
+    };
+  }, [visibles, claveItems]);
 
   return (
-    <ScrollArea className="overflow-hidden">
+    <ScrollArea ref={raiz} className="overflow-hidden">
       <SortableContext items={items}>
         <div
-          className={cn("flex flex-grow flex-col gap-2 p-2", className)}
+          ref={lista}
+          className={cn("relative flex flex-grow flex-col gap-2 p-2", className)}
           {...props}
         >
           {filteredData.map(children)}
         </div>
       </SortableContext>
-      <ScrollBar orientation="vertical" />
     </ScrollArea>
   );
 };
