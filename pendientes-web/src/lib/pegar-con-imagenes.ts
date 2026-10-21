@@ -28,17 +28,20 @@ export function imagenesDelPortapapeles(datos: DataTransfer): Blob[] {
   return datos.types.includes("text/rtf") ? imagenesDeRtf(datos.getData("text/rtf")) : []
 }
 
-// El HTML listo para pegar: cada imagen con algo que se ve, o fuera si no hay de dónde sacarla (`perdidas`).
-// Si vienen tantas imágenes aparte como <img>, se usan esas (son las de verdad, sin pedir nada a nadie).
-export function prepararHtml(html: string, aparte: Blob[]): { html: string; perdidas: number } {
+// El HTML listo para pegar: cada imagen con algo que se ve, o fuera si no hay de dónde sacarla (`perdidas`; `locales`
+// si eran archivos de la computadora, como las capturas de un Markdown). Si vienen tantas imágenes aparte como <img>, se
+// usan esas (son las de verdad, sin pedir nada a nadie).
+export function prepararHtml(html: string, aparte: Blob[]): { html: string; perdidas: number; locales: boolean } {
   const documento = new DOMParser().parseFromString(html, "text/html")
   const imagenes = [...documento.body.querySelectorAll("img")]
   const todasAparte = aparte.length >= imagenes.length
   let siguiente = 0
   let perdidas = 0
+  let locales = false
   for (const imagen of imagenes) {
     const src = imagen.getAttribute("src")?.trim() ?? ""
     imagen.removeAttribute("srcset")
+    quitarSaltoDespues(imagen)
     if ((todasAparte || !seVe(src)) && siguiente < aparte.length) {
       imagen.setAttribute("src", URL.createObjectURL(aparte[siguiente++]))
     } else if (/^data:image\//i.test(src)) {
@@ -51,9 +54,33 @@ export function prepararHtml(html: string, aparte: Blob[]): { html: string; perd
     } else if (!seVe(src)) {
       imagen.remove()
       perdidas++
+      // file://… o una ruta sin dirección (capturas/foto.jpg).
+      locales ||= /^file:/i.test(src) || !/^[a-z][a-z0-9+.-]*:/i.test(src)
     }
+    if (imagen.isConnected) sacarDelParrafo(imagen)
   }
-  return { html: documento.body.innerHTML, perdidas }
+  return { html: documento.body.innerHTML, perdidas, locales }
+}
+
+// El salto de línea entre la imagen y su pie sobra: la imagen va en su propia línea (o no va).
+function quitarSaltoDespues(imagen: HTMLImageElement) {
+  let siguiente = imagen.nextSibling
+  while (siguiente?.nodeType === Node.TEXT_NODE && !siguiente.textContent?.trim()) siguiente = siguiente.nextSibling
+  if (siguiente?.nodeName === "BR") siguiente.remove()
+}
+
+// En el editor una imagen es una línea aparte: dentro de un párrafo con texto (la imagen y su pie, como en un Markdown
+// convertido) no tendría dónde ir y se perdería. El párrafo se corta en dos con la imagen en medio.
+function sacarDelParrafo(imagen: HTMLImageElement) {
+  const parrafo = imagen.closest("p")
+  if (!parrafo) return
+  const resto = imagen.ownerDocument.createRange()
+  resto.setStartAfter(imagen)
+  resto.setEnd(parrafo, parrafo.childNodes.length)
+  const despues = parrafo.cloneNode(false) as HTMLParagraphElement
+  despues.append(resto.extractContents())
+  parrafo.after(imagen, despues)
+  for (const parte of [parrafo, despues]) if (!parte.textContent?.trim() && !parte.querySelector("img")) parte.remove()
 }
 
 // Las imágenes PNG y JPEG del RTF (Word las guarda en hexadecimal dentro de cada grupo \pict). Lo que va en

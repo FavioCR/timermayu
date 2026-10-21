@@ -201,8 +201,7 @@ const SIN_MEDIOS: Medio[] = []
 
 const noDespuesDeUnNumero = (tr: Transaction) => !/\d$/.test(tr.doc.textBetween(Math.max(0, tr.selection.from - 1), tr.selection.from))
 
-const PISTA_DESCRIPCION =
-  "Escribe una descripción: / para más bloques (/ia para escribir con IA), @ para mencionar, o pega una imagen o un archivo"
+const PISTA_DESCRIPCION = "Escribe una descripción: / para más bloques (/ia para escribir con IA), @ para mencionar, o pega una imagen o un archivo"
 
 // Se carga aparte (React.lazy) para que el tablero no espere al editor. También es el editor de las notas privadas,
 // sin perfiles (sin @menciones) y con su propia pista.
@@ -266,19 +265,21 @@ export default function EditorDescripcion({
     const enCodigo = Boolean(editor.prosemirrorState.selection.$from.parent.type.spec.code)
     let hecho: boolean | undefined = true
     let perdidas = 0
+    let locales = false
     if (datos && !enCodigo && !datos.types.includes("blocknote/html") && /<img[\s>]/i.test(html)) {
       const preparado = prepararHtml(html, imagenesDelPortapapeles(datos))
       perdidas = preparado.perdidas
+      locales = preparado.locales
       editor.pasteHTML(preparado.html)
     } else {
       hecho = porDefecto()
     }
     const nuevas = imagenesDe(editor.document as Bloque[]).filter((imagen) => !antes.has(imagen.id) && imagen.url)
-    void subirPegadas(nuevas, perdidas)
+    void subirPegadas(nuevas, perdidas, locales)
     return hecho
   }
 
-  async function subirPegadas(imagenes: { id: string; url: string; nombre: string }[], perdidasAlPegar: number) {
+  async function subirPegadas(imagenes: { id: string; url: string; nombre: string }[], perdidasAlPegar: number, locales: boolean) {
     let perdidas = perdidasAlPegar
     for (const { id, url } of imagenes) subiendo.current.set(id, url)
     const urlDe = (id: string) => (editor.getBlock(id)?.props as { url?: string } | undefined)?.url
@@ -302,8 +303,11 @@ export default function EditorDescripcion({
     )
     if (perdidas > 0) {
       toast.warning(perdidas === 1 ? "No se pudo pegar 1 imagen" : `No se pudieron pegar ${perdidas} imágenes`, {
-        description:
-          perdidas === 1
+        description: locales
+          ? perdidas === 1
+            ? "Es un archivo de tu computadora (como las capturas de un Markdown) y el navegador no puede leerlo por su ruta. Cópiala desde un documento que la lleve dentro (HTML, Google Docs, Word) o pégala sola."
+            : "Son archivos de tu computadora (como las capturas de un Markdown) y el navegador no puede leerlos por su ruta. Cópialas desde un documento que las lleve dentro (HTML, Google Docs, Word) o pégalas una por una."
+          : perdidas === 1
             ? "La app de donde viene no la deja copiar junto al texto. Cópiala sola y pégala aquí."
             : "La app de donde vienen no las deja copiar junto al texto. Cópialas una por una y pégalas aquí.",
         duration: 12000,
@@ -435,7 +439,12 @@ export default function EditorDescripcion({
       // color, si está marcada).
       const mismaLinea = enteras?.length === 1 && nuevos.length === 1 && nuevos[0].type === enteras[0].type
       if (enteras && !mismaLinea && enteras.every((linea) => editor.getBlock(linea.id))) {
-        const final = editor.replaceBlocks(enteras.map((linea) => linea.id), nuevos).insertedBlocks.at(-1)
+        const final = editor
+          .replaceBlocks(
+            enteras.map((linea) => linea.id),
+            nuevos
+          )
+          .insertedBlocks.at(-1)
         if (final) editor.setTextCursorPosition(final, "end")
         return
       }
