@@ -1,4 +1,5 @@
 import {
+  Fragment,
   lazy,
   Suspense,
   useCallback,
@@ -63,6 +64,7 @@ import { toast } from "sonner"
 import { ActividadSheet } from "@/components/actividad-sheet"
 import { AparienciaDialog } from "@/components/apariencia-dialog"
 import { Aprobacion } from "@/components/aprobacion"
+import { ARCHIVADOS_POR_VEZ, ArchivadosAlPie, SeparadorDeArchivados } from "@/components/archivados-al-pie"
 import { Reproductor } from "@/components/reproductor"
 import { DetallePendiente } from "@/components/detalle-pendiente"
 import { EstadoConexion } from "@/components/estado-conexion"
@@ -145,8 +147,8 @@ const PerfilesDialog = lazy(() => import("@/components/perfiles-dialog").then((m
 const IaDialog = lazy(() => import("@/components/ia-dialog").then((modulo) => ({ default: modulo.IaDialog })))
 const CrearConIaDialog = lazy(() => import("@/components/crear-con-ia-dialog").then((modulo) => ({ default: modulo.CrearConIaDialog })))
 
-// El tablero muestra los hechos de la última semana; los anteriores se buscan desde la columna Hecho.
-const SEMANA_MS = 7 * 24 * 60 * 60 * 1000
+// Los hechos de hace más de 2 días se archivan: quedan ocultos al final de Hecho hasta que se piden.
+const ARCHIVAR_MS = 2 * 24 * 60 * 60 * 1000
 // Filtro por tipo: "tipo:fix". Por etiqueta: su id.
 const PREFIJO_TIPO = "tipo:"
 
@@ -155,7 +157,7 @@ const ICONOS: Record<Estado, typeof Inbox> = { pendiente: Inbox, haciendo: Rotat
 const VACIO: Record<Estado, string> = {
   pendiente: "Agrega una tarea o arrastra una tarjeta a esta columna.",
   haciendo: "Arrastra una tarjeta o crea una nueva tarea para empezar.",
-  hecho: "Aquí se ve lo terminado en los últimos 7 días.",
+  hecho: "Aquí se ve lo terminado; a los 2 días se archiva.",
 }
 
 const fecha = new Intl.DateTimeFormat("es", { day: "numeric", month: "short" })
@@ -167,6 +169,15 @@ type Tarjeta = Pendiente & { name: string; column: string }
 const ESPERA_EVIDENCIA_MS = 2000
 
 const aTarjeta = (pendiente: Pendiente): Tarjeta => ({ ...pendiente, name: pendiente.texto, column: pendiente.estado })
+
+// Hecho va de lo último terminado a lo más viejo; lo que recién entra (todavía sin fecha), arriba. Las demás columnas
+// quedan en su orden.
+const porHechoReciente = (a: Tarjeta, b: Tarjeta) => (b.hecho_en ?? "\uffff").localeCompare(a.hecho_en ?? "\uffff")
+function conHechosRecientesPrimero(tarjetas: Tarjeta[]) {
+  const hechos = tarjetas.filter((tarjeta) => tarjeta.column === "hecho").sort(porHechoReciente)
+  let i = 0
+  return tarjetas.map((tarjeta) => (tarjeta.column === "hecho" ? hechos[i++] : tarjeta))
+}
 
 const firmaDelOrden = (tarjetas: Tarjeta[]) => tarjetas.map((tarjeta) => `${tarjeta.id}:${tarjeta.column}`).join(",")
 
@@ -387,8 +398,11 @@ export function Tablero({
   const [etiquetas, setEtiquetas] = useState<Etiqueta[]>([])
   // Pendientes recién creados sin tipo a los que la IA les está eligiendo uno.
   const [eligiendoTipo, setEligiendoTipo] = useState<ReadonlySet<string>>(() => new Set())
-  // Desde cuándo un hecho es "de la última semana"; se pone al día con cada recarga.
+  // Desde cuándo un hecho está archivado; se pone al día con cada recarga.
   const [ahora, setAhora] = useState(() => Date.now())
+  // Cuántos hechos archivados se ven al final de Hecho (0: ninguno, solo el botón para mostrarlos).
+  const [archivadosMostrados, setArchivadosMostrados] = useState(0)
+  const mostrarMasArchivados = useCallback(() => setArchivadosMostrados((actuales) => actuales + ARCHIVADOS_POR_VEZ), [])
   const [usuario, setUsuario] = useState<Usuario | null>(null)
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState("")
@@ -614,15 +628,15 @@ export function Tablero({
     [marcaFiltrada]
   )
 
-  // Los hechos de hace más de una semana salen del tablero (y de sus números); se buscan aparte.
-  const esAntiguo = useCallback(
-    (tarjeta: Tarjeta) => tarjeta.column === "hecho" && tarjeta.hecho_en !== null && Date.parse(tarjeta.hecho_en) < ahora - SEMANA_MS,
+  // Los hechos de hace más de 2 días se archivan: no cuentan en los números del tablero y en Hecho se ven solo si se piden.
+  const esArchivado = useCallback(
+    (tarjeta: Tarjeta) => tarjeta.column === "hecho" && tarjeta.hecho_en !== null && Date.parse(tarjeta.hecho_en) < ahora - ARCHIVAR_MS,
     [ahora]
   )
-  const recientes = useMemo(() => tarjetas.filter((tarjeta) => !esAntiguo(tarjeta)), [tarjetas, esAntiguo])
-  const antiguosVisibles = useMemo(
-    () => tarjetas.filter((tarjeta) => esAntiguo(tarjeta) && enOrganizacionYProyecto(tarjeta) && conPersona(tarjeta) && conMarca(tarjeta)),
-    [tarjetas, esAntiguo, enOrganizacionYProyecto, conPersona, conMarca]
+  const recientes = useMemo(() => tarjetas.filter((tarjeta) => !esArchivado(tarjeta)), [tarjetas, esArchivado])
+  const archivadosVisibles = useMemo(
+    () => tarjetas.filter((tarjeta) => esArchivado(tarjeta) && enOrganizacionYProyecto(tarjeta) && conPersona(tarjeta) && conMarca(tarjeta)),
+    [tarjetas, esArchivado, enOrganizacionYProyecto, conPersona, conMarca]
   )
 
   // Lo que queda con la organización, el proyecto y el tipo o etiqueta elegidos; de ahí salen los números de cada persona.
@@ -646,13 +660,19 @@ export function Tablero({
     },
     [proyectosPorId, organizacionesPorId, perfilesPorId, etiquetasPorId]
   )
-  const enColumnas = useMemo(
-    () => visibles.filter((tarjeta) => tarjeta.id === arrastrada || coincide(textoDe(tarjeta), busquedas[tarjeta.column] ?? "")),
-    [visibles, arrastrada, busquedas, textoDe]
+  const archivadosEnBusqueda = useMemo(
+    () => archivadosVisibles.filter((tarjeta) => coincide(textoDe(tarjeta), busquedas.hecho ?? "")).sort(porHechoReciente),
+    [archivadosVisibles, busquedas, textoDe]
   )
-  const antiguosEnBusqueda = useMemo(
-    () => antiguosVisibles.filter((tarjeta) => coincide(textoDe(tarjeta), busquedas.hecho ?? "")),
-    [antiguosVisibles, busquedas, textoDe]
+  // Los archivados que se pidieron van al final de Hecho, después de lo reciente.
+  const archivadosEnColumna = useMemo(() => archivadosEnBusqueda.slice(0, archivadosMostrados), [archivadosEnBusqueda, archivadosMostrados])
+  const enColumnas = useMemo(
+    () =>
+      conHechosRecientesPrimero([
+        ...visibles.filter((tarjeta) => tarjeta.id === arrastrada || coincide(textoDe(tarjeta), busquedas[tarjeta.column] ?? "")),
+        ...archivadosEnColumna,
+      ]),
+    [visibles, arrastrada, busquedas, textoDe, archivadosEnColumna]
   )
 
   const porOrganizacion = useMemo(() => contar(recientes, claveOrganizacion), [recientes, claveOrganizacion])
@@ -816,7 +836,7 @@ export function Tablero({
   }
 
   // El chat y los archivos del detalle avisan cuántos hay, para el contador de la tarjeta.
-  const cambiarConteo = useCallback((id: string, campo: "num_comentarios" | "num_archivos", cantidad: number) => {
+  const cambiarConteo = useCallback((id: string, campo: "num_comentarios" | "num_archivos" | "num_videos", cantidad: number) => {
     setTarjetas((actuales) =>
       actuales.some((t) => t.id === id && t[campo] !== cantidad)
         ? actuales.map((t) => (t.id === id ? { ...t, [campo]: cantidad } : t))
@@ -824,7 +844,13 @@ export function Tablero({
     )
   }, [])
   const cambiarCantidadComentarios = useCallback((id: string, cantidad: number) => cambiarConteo(id, "num_comentarios", cantidad), [cambiarConteo])
-  const cambiarCantidadArchivos = useCallback((id: string, cantidad: number) => cambiarConteo(id, "num_archivos", cantidad), [cambiarConteo])
+  const cambiarCantidadArchivos = useCallback(
+    (id: string, cantidad: number, videos: number) => {
+      cambiarConteo(id, "num_archivos", cantidad)
+      cambiarConteo(id, "num_videos", videos)
+    },
+    [cambiarConteo]
+  )
 
   // Vuelve a Por hacer, al final de la cola, con el nuevo responsable; el historial queda en el mismo pendiente.
   async function pasar(perfilId: string, nota: string) {
@@ -1504,7 +1530,9 @@ export function Tablero({
                 const cantidad = visibles.filter((tarjeta) => tarjeta.column === columna.id).length
                 const busqueda = busquedas[columna.id] ?? ""
                 const buscando = busqueda.trim() !== ""
-                const enPantalla = buscando ? enColumnas.filter((tarjeta) => tarjeta.column === columna.id).length : cantidad
+                const enLista = enColumnas.filter((tarjeta) => tarjeta.column === columna.id)
+                const archivadosAbajo = columna.id === "hecho" ? archivadosEnColumna.length : 0
+                const enPantalla = buscando ? enLista.length - archivadosAbajo : cantidad
                 const buscar = (texto: string) => setBusquedas((actuales) => ({ ...actuales, [columna.id]: texto }))
                 const Icono = ICONOS[columna.id]
                 return (
@@ -1554,7 +1582,7 @@ export function Tablero({
                                   alCerrarMenu.current = abrirHechosAnteriores
                                 }}
                               >
-                                <Search /> Buscar hechos anteriores
+                                <Search /> Buscar en archivados
                               </DropdownMenuItem>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
@@ -1592,203 +1620,7 @@ export function Tablero({
                         )}
                       </InputGroup>
                     </div>
-                    {/* Se ven las 5 primeras; las demás, con scroll dentro de la columna. */}
-                    <KanbanCards id={columna.id} visibles={5} className={enPantalla === 0 ? "p-0" : "gap-2.5 p-3"}>
-                      {(tarjeta: Tarjeta) => {
-                        const perfil = tarjeta.perfil_id ? perfilesPorId.get(tarjeta.perfil_id) : null
-                        const proyecto = tarjeta.proyecto_id ? proyectosPorId.get(tarjeta.proyecto_id) : null
-                        const organizacion = proyecto?.organizacion_id ? organizacionesPorId.get(proyecto.organizacion_id) : null
-                        const susEtiquetas = tarjeta.etiquetas.flatMap((id) => etiquetasPorId.get(id) ?? []).sort(porNombre)
-                        // El borde toma el color de su tipo; sin tipo, el de su primera etiqueta.
-                        const colorBorde = tipoDe(tarjeta.tipo)?.color ?? susEtiquetas[0]?.color
-                        const aviso = sinLeer.get(tarjeta.id)
-                        return (
-                          <KanbanCard
-                            column={columna.id}
-                            id={tarjeta.id}
-                            key={tarjeta.id}
-                            name={tarjeta.name}
-                            cardStyle={colorBorde ? ({ "--borde": colorBorde } as CSSProperties) : undefined}
-                            className={cn(
-                              "rounded-none transition-shadow",
-                              colorBorde ? "ring-(--borde)/70 hover:ring-2 hover:ring-(--borde)" : "ring-border hover:ring-primary/50"
-                            )}
-                          >
-                            <div
-                              className="flex flex-col gap-2"
-                              onClick={(event) => !arrastrando.current && esClicEnLaTarjeta(event) && setAbierto(tarjeta.id)}
-                            >
-                              <div className="flex items-start gap-1">
-                                {/* Con el teclado, Enter en la tarjeta la arrastra; este botón abre el detalle. */}
-                                <button
-                                  type="button"
-                                  className="m-0 flex-1 rounded-sm text-left text-sm font-medium break-words outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
-                                  aria-label={`Abrir "${tarjeta.texto}"`}
-                                  onKeyDown={detener}
-                                  onClick={() => !arrastrando.current && setAbierto(tarjeta.id)}
-                                >
-                                  {tarjeta.tipo ? (
-                                    <InsigniaTipo tipo={tarjeta.tipo} className="mr-1.5 align-[1px]" />
-                                  ) : (
-                                    eligiendoTipo.has(tarjeta.id) && <InsigniaEligiendo className="mr-1.5 align-[1px]" />
-                                  )}
-                                  {tarjeta.texto}
-                                </button>
-                                {/* Avisos sin leer de quien entró; una mención resalta. Se leen al abrir la tarjeta. */}
-                                {aviso && (
-                                  <span
-                                    role="img"
-                                    aria-label={descripcionAviso(aviso)}
-                                    title={descripcionAviso(aviso)}
-                                    className={cn(
-                                      "mt-px flex h-5 shrink-0 items-center gap-0.5 rounded-full px-1.5 text-[11px] leading-none font-semibold tabular-nums",
-                                      aviso.menciones > 0 ? "bg-primary text-primary-foreground shadow-sm shadow-primary/40" : "bg-primary/15 text-primary"
-                                    )}
-                                  >
-                                    {aviso.menciones > 0 ? <BellRing className="size-3" /> : <Bell className="size-3" />}
-                                    {aviso.menciones > 0 ? "@" : aviso.avisos > 1 && aviso.avisos}
-                                  </span>
-                                )}
-                                {tarjeta.column === "hecho" && (
-                                  <Button
-                                    variant="ghost"
-                                    size="icon-xs"
-                                    className="text-muted-foreground hover:text-primary"
-                                    aria-label={`Pasar "${tarjeta.texto}" a otra persona`}
-                                    title="Pasar a otra persona (vuelve a Por hacer)"
-                                    {...noArrastrar}
-                                    onClick={() => setPasando(tarjeta)}
-                                  >
-                                    <Forward />
-                                  </Button>
-                                )}
-                                <Button
-                                  variant="ghost"
-                                  size="icon-xs"
-                                  className="text-muted-foreground hover:text-destructive"
-                                  aria-label={`Borrar "${tarjeta.texto}"`}
-                                  {...noArrastrar}
-                                  onClick={() => borrar(tarjeta)}
-                                >
-                                  <Trash2 />
-                                </Button>
-                              </div>
-                              {tarjeta.resumen && (
-                                <p className="m-0 line-clamp-2 text-xs text-muted-foreground">{tarjeta.resumen}</p>
-                              )}
-                              {susEtiquetas.length > 0 && (
-                                <div className="flex flex-wrap gap-1">
-                                  {susEtiquetas.map((etiqueta) => (
-                                    <span
-                                      key={etiqueta.id}
-                                      className="inline-flex max-w-full items-center gap-1 border px-1.5 py-0.5 text-[11px] leading-none text-muted-foreground"
-                                    >
-                                      <PuntoEtiqueta etiqueta={etiqueta} className="size-1.5" />
-                                      <span className="truncate">{etiqueta.nombre}</span>
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-                              {tarjeta.column === "hecho" && (
-                                <Aprobacion
-                                  compacto
-                                  pendiente={tarjeta}
-                                  perfilesPorId={perfilesPorId}
-                                  yo={usuario?.perfil_id ?? null}
-                                  onAprobar={(aprueba) => aprobar(tarjeta.id, aprueba)}
-                                  botonProps={noArrastrar}
-                                />
-                              )}
-                              <div className="flex min-w-0 items-center gap-2">
-                                {proyecto && (
-                                  <Badge
-                                    variant="secondary"
-                                    className="min-w-0 shrink justify-start gap-1.5"
-                                    title={organizacion ? `${organizacion.nombre} › ${proyecto.nombre}` : proyecto.nombre}
-                                  >
-                                    {organizacion ? (
-                                      <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: organizacion.color }} />
-                                    ) : (
-                                      <Folder />
-                                    )}
-                                    <span className="truncate">
-                                      {organizacion && <span className="text-muted-foreground">{organizacion.nombre} › </span>}
-                                      {proyecto.nombre}
-                                    </span>
-                                    {organizacion && !organizacion.compartida && <Lock aria-label="Privado" />}
-                                  </Badge>
-                                )}
-                                {tarjeta.num_comentarios > 0 && (
-                                  <span
-                                    className="flex items-center gap-1 text-xs text-muted-foreground"
-                                    title={tarjeta.num_comentarios === 1 ? "1 mensaje" : `${tarjeta.num_comentarios} mensajes`}
-                                  >
-                                    <MessageSquare className="size-3.5" /> {tarjeta.num_comentarios}
-                                  </span>
-                                )}
-                                {tarjeta.num_archivos > 0 && (
-                                  <span
-                                    className="flex items-center gap-1 text-xs text-muted-foreground"
-                                    title={tarjeta.num_archivos === 1 ? "1 archivo" : `${tarjeta.num_archivos} archivos`}
-                                  >
-                                    <Paperclip className="size-3.5" /> {tarjeta.num_archivos}
-                                  </span>
-                                )}
-                                {tarjeta.num_videos > 0 && (
-                                  <span
-                                    className="flex items-center gap-1 text-xs text-muted-foreground"
-                                    title={tarjeta.num_videos === 1 ? "1 video" : `${tarjeta.num_videos} videos`}
-                                  >
-                                    <Clapperboard className="size-3.5" /> {tarjeta.num_videos}
-                                  </span>
-                                )}
-                                {tarjeta.num_imagenes > 0 && (
-                                  <span
-                                    className="flex items-center gap-1 text-xs text-muted-foreground"
-                                    title={tarjeta.num_imagenes === 1 ? "1 imagen" : `${tarjeta.num_imagenes} imágenes`}
-                                  >
-                                    <ImageIcon className="size-3.5" /> {tarjeta.num_imagenes}
-                                  </span>
-                                )}
-                                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                                  {fecha.format(new Date(tarjeta.creado_en))}
-                                </span>
-                                <DropdownMenu>
-                                  <DropdownMenuTrigger asChild>
-                                    <button
-                                      type="button"
-                                      className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                      aria-label={perfil ? `Asignado a ${perfil.nombre}; cambiar` : "Asignar a alguien"}
-                                      {...noArrastrar}
-                                    >
-                                      <PerfilAvatar perfil={perfil} size="sm" />
-                                    </button>
-                                  </DropdownMenuTrigger>
-                                  <DropdownMenuContent align="end" className="min-w-44">
-                                    <DropdownMenuLabel>Asignar a</DropdownMenuLabel>
-                                    <DropdownMenuRadioGroup
-                                      value={tarjeta.perfil_id ?? NADIE}
-                                      onValueChange={(valor) => cambiarPendiente(tarjeta.id, { perfil_id: valor === NADIE ? null : valor })}
-                                    >
-                                      {involucrados(perfiles, organizacion, tarjeta.perfil_id).map((opcion) => (
-                                        <DropdownMenuRadioItem key={opcion.id} value={opcion.id}>
-                                          <PerfilAvatar perfil={opcion} size="sm" /> {opcion.nombre}
-                                        </DropdownMenuRadioItem>
-                                      ))}
-                                      <DropdownMenuSeparator />
-                                      <DropdownMenuRadioItem value={NADIE}>
-                                        <PerfilAvatar perfil={null} size="sm" /> Sin asignar
-                                      </DropdownMenuRadioItem>
-                                    </DropdownMenuRadioGroup>
-                                  </DropdownMenuContent>
-                                </DropdownMenu>
-                              </div>
-                            </div>
-                          </KanbanCard>
-                        )
-                      }}
-                    </KanbanCards>
-                    {cantidad > 0 && enPantalla === 0 && (
+                    {cantidad > 0 && enPantalla === 0 && archivadosAbajo === 0 && (
                       <Empty className="m-3 mt-3 w-auto gap-3 rounded-none border border-dashed border-[color-mix(in_oklab,var(--tono)_22%,var(--color-border))] p-6">
                         <EmptyHeader>
                           <EmptyMedia variant="icon">
@@ -1804,7 +1636,7 @@ export function Tablero({
                         </EmptyContent>
                       </Empty>
                     )}
-                    {cantidad === 0 && (
+                    {cantidad === 0 && archivadosAbajo === 0 && (
                       <Empty className="m-3 w-auto gap-3 rounded-none border border-[color-mix(in_oklab,var(--tono)_22%,var(--color-border))] p-6">
                         <EmptyHeader>
                           <EmptyMedia>
@@ -1815,17 +1647,220 @@ export function Tablero({
                         </EmptyHeader>
                       </Empty>
                     )}
-                    {columna.id === "hecho" && antiguosEnBusqueda.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={abrirHechosAnteriores}
-                        className="m-3 mt-auto flex items-center justify-center gap-2 border border-dashed border-[color-mix(in_oklab,var(--tono)_30%,var(--color-border))] px-3 py-2.5 text-sm text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
-                      >
-                        <Search className="size-4" />
-                        {antiguosEnBusqueda.length === 1 ? "1 hecho anterior" : `${antiguosEnBusqueda.length} hechos anteriores`}
-                        {buscando && ` con «${busqueda.trim()}»`} · Buscar
-                      </button>
-                    )}
+                    {/* Se ven las 5 primeras; las demás, con scroll dentro de la columna. Al final de Hecho, sus archivados. */}
+                    <KanbanCards
+                      id={columna.id}
+                      visibles={5}
+                      className={enLista.length === 0 ? "p-0" : "gap-2.5 p-3"}
+                      pie={
+                        columna.id === "hecho" && (
+                          <ArchivadosAlPie
+                            total={archivadosEnBusqueda.length}
+                            mostrados={archivadosAbajo}
+                            busqueda={busqueda.trim()}
+                            vacia={enLista.length === 0}
+                            onMostrarMas={mostrarMasArchivados}
+                            onOcultar={() => setArchivadosMostrados(0)}
+                          />
+                        )
+                      }
+                    >
+                      {(tarjeta: Tarjeta) => {
+                        const perfil = tarjeta.perfil_id ? perfilesPorId.get(tarjeta.perfil_id) : null
+                        const proyecto = tarjeta.proyecto_id ? proyectosPorId.get(tarjeta.proyecto_id) : null
+                        const organizacion = proyecto?.organizacion_id ? organizacionesPorId.get(proyecto.organizacion_id) : null
+                        const susEtiquetas = tarjeta.etiquetas.flatMap((id) => etiquetasPorId.get(id) ?? []).sort(porNombre)
+                        // El borde toma el color de su tipo; sin tipo, el de su primera etiqueta.
+                        const colorBorde = tipoDe(tarjeta.tipo)?.color ?? susEtiquetas[0]?.color
+                        const aviso = sinLeer.get(tarjeta.id)
+                        return (
+                          <Fragment key={tarjeta.id}>
+                            {archivadosEnColumna[0]?.id === tarjeta.id && <SeparadorDeArchivados />}
+                            <KanbanCard
+                              column={columna.id}
+                              id={tarjeta.id}
+                              name={tarjeta.name}
+                              cardStyle={colorBorde ? ({ "--borde": colorBorde } as CSSProperties) : undefined}
+                              className={cn(
+                                "rounded-none transition-shadow",
+                                colorBorde ? "ring-(--borde)/70 hover:ring-2 hover:ring-(--borde)" : "ring-border hover:ring-primary/50"
+                              )}
+                            >
+                              <div
+                                className="flex flex-col gap-2"
+                                onClick={(event) => !arrastrando.current && esClicEnLaTarjeta(event) && setAbierto(tarjeta.id)}
+                              >
+                                <div className="flex items-start gap-1">
+                                  {/* Con el teclado, Enter en la tarjeta la arrastra; este botón abre el detalle. */}
+                                  <button
+                                    type="button"
+                                    className="m-0 flex-1 rounded-sm text-left text-sm font-medium break-words outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+                                    aria-label={`Abrir "${tarjeta.texto}"`}
+                                    onKeyDown={detener}
+                                    onClick={() => !arrastrando.current && setAbierto(tarjeta.id)}
+                                  >
+                                    {tarjeta.tipo ? (
+                                      <InsigniaTipo tipo={tarjeta.tipo} className="mr-1.5 align-[1px]" />
+                                    ) : (
+                                      eligiendoTipo.has(tarjeta.id) && <InsigniaEligiendo className="mr-1.5 align-[1px]" />
+                                    )}
+                                    {tarjeta.texto}
+                                  </button>
+                                  {/* Avisos sin leer de quien entró; una mención resalta. Se leen al abrir la tarjeta. */}
+                                  {aviso && (
+                                    <span
+                                      role="img"
+                                      aria-label={descripcionAviso(aviso)}
+                                      title={descripcionAviso(aviso)}
+                                      className={cn(
+                                        "mt-px flex h-5 shrink-0 items-center gap-0.5 rounded-full px-1.5 text-[11px] leading-none font-semibold tabular-nums",
+                                        aviso.menciones > 0 ? "bg-primary text-primary-foreground shadow-sm shadow-primary/40" : "bg-primary/15 text-primary"
+                                      )}
+                                    >
+                                      {aviso.menciones > 0 ? <BellRing className="size-3" /> : <Bell className="size-3" />}
+                                      {aviso.menciones > 0 ? "@" : aviso.avisos > 1 && aviso.avisos}
+                                    </span>
+                                  )}
+                                  {tarjeta.column === "hecho" && (
+                                    <Button
+                                      variant="ghost"
+                                      size="icon-xs"
+                                      className="text-muted-foreground hover:text-primary"
+                                      aria-label={`Pasar "${tarjeta.texto}" a otra persona`}
+                                      title="Pasar a otra persona (vuelve a Por hacer)"
+                                      {...noArrastrar}
+                                      onClick={() => setPasando(tarjeta)}
+                                    >
+                                      <Forward />
+                                    </Button>
+                                  )}
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-xs"
+                                    className="text-muted-foreground hover:text-destructive"
+                                    aria-label={`Borrar "${tarjeta.texto}"`}
+                                    {...noArrastrar}
+                                    onClick={() => borrar(tarjeta)}
+                                  >
+                                    <Trash2 />
+                                  </Button>
+                                </div>
+                                {tarjeta.resumen && (
+                                  <p className="m-0 line-clamp-2 text-xs text-muted-foreground">{tarjeta.resumen}</p>
+                                )}
+                                {susEtiquetas.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {susEtiquetas.map((etiqueta) => (
+                                      <span
+                                        key={etiqueta.id}
+                                        className="inline-flex max-w-full items-center gap-1 border px-1.5 py-0.5 text-[11px] leading-none text-muted-foreground"
+                                      >
+                                        <PuntoEtiqueta etiqueta={etiqueta} className="size-1.5" />
+                                        <span className="truncate">{etiqueta.nombre}</span>
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                {tarjeta.column === "hecho" && (
+                                  <Aprobacion
+                                    compacto
+                                    pendiente={tarjeta}
+                                    perfilesPorId={perfilesPorId}
+                                    yo={usuario?.perfil_id ?? null}
+                                    onAprobar={(aprueba) => aprobar(tarjeta.id, aprueba)}
+                                    botonProps={noArrastrar}
+                                  />
+                                )}
+                                <div className="flex min-w-0 items-center gap-2">
+                                  {proyecto && (
+                                    <Badge
+                                      variant="secondary"
+                                      className="min-w-0 shrink justify-start gap-1.5"
+                                      title={organizacion ? `${organizacion.nombre} › ${proyecto.nombre}` : proyecto.nombre}
+                                    >
+                                      {organizacion ? (
+                                        <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: organizacion.color }} />
+                                      ) : (
+                                        <Folder />
+                                      )}
+                                      <span className="truncate">
+                                        {organizacion && <span className="text-muted-foreground">{organizacion.nombre} › </span>}
+                                        {proyecto.nombre}
+                                      </span>
+                                      {organizacion && !organizacion.compartida && <Lock aria-label="Privado" />}
+                                    </Badge>
+                                  )}
+                                  {tarjeta.num_comentarios > 0 && (
+                                    <span
+                                      className="flex items-center gap-1 text-xs text-muted-foreground"
+                                      title={tarjeta.num_comentarios === 1 ? "1 mensaje" : `${tarjeta.num_comentarios} mensajes`}
+                                    >
+                                      <MessageSquare className="size-3.5" /> {tarjeta.num_comentarios}
+                                    </span>
+                                  )}
+                                  {tarjeta.num_archivos > 0 && (
+                                    <span
+                                      className="flex items-center gap-1 text-xs text-muted-foreground"
+                                      title={tarjeta.num_archivos === 1 ? "1 archivo" : `${tarjeta.num_archivos} archivos`}
+                                    >
+                                      <Paperclip className="size-3.5" /> {tarjeta.num_archivos}
+                                    </span>
+                                  )}
+                                  {tarjeta.num_videos > 0 && (
+                                    <span
+                                      className="flex items-center gap-1 text-xs text-muted-foreground"
+                                      title={tarjeta.num_videos === 1 ? "1 video" : `${tarjeta.num_videos} videos`}
+                                    >
+                                      <Clapperboard className="size-3.5" /> {tarjeta.num_videos}
+                                    </span>
+                                  )}
+                                  {tarjeta.num_imagenes > 0 && (
+                                    <span
+                                      className="flex items-center gap-1 text-xs text-muted-foreground"
+                                      title={tarjeta.num_imagenes === 1 ? "1 imagen" : `${tarjeta.num_imagenes} imágenes`}
+                                    >
+                                      <ImageIcon className="size-3.5" /> {tarjeta.num_imagenes}
+                                    </span>
+                                  )}
+                                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                                    {fecha.format(new Date(tarjeta.creado_en))}
+                                  </span>
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <button
+                                        type="button"
+                                        className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                        aria-label={perfil ? `Asignado a ${perfil.nombre}; cambiar` : "Asignar a alguien"}
+                                        {...noArrastrar}
+                                      >
+                                        <PerfilAvatar perfil={perfil} size="sm" />
+                                      </button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end" className="min-w-44">
+                                      <DropdownMenuLabel>Asignar a</DropdownMenuLabel>
+                                      <DropdownMenuRadioGroup
+                                        value={tarjeta.perfil_id ?? NADIE}
+                                        onValueChange={(valor) => cambiarPendiente(tarjeta.id, { perfil_id: valor === NADIE ? null : valor })}
+                                      >
+                                        {involucrados(perfiles, organizacion, tarjeta.perfil_id).map((opcion) => (
+                                          <DropdownMenuRadioItem key={opcion.id} value={opcion.id}>
+                                            <PerfilAvatar perfil={opcion} size="sm" /> {opcion.nombre}
+                                          </DropdownMenuRadioItem>
+                                        ))}
+                                        <DropdownMenuSeparator />
+                                        <DropdownMenuRadioItem value={NADIE}>
+                                          <PerfilAvatar perfil={null} size="sm" /> Sin asignar
+                                        </DropdownMenuRadioItem>
+                                      </DropdownMenuRadioGroup>
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+                                </div>
+                              </div>
+                            </KanbanCard>
+                          </Fragment>
+                        )
+                      }}
+                    </KanbanCards>
                   </KanbanBoard>
                 )
               }}
@@ -1836,7 +1871,7 @@ export function Tablero({
         <p className="m-0 flex items-center gap-4 rounded-none border border-dashed px-5 py-4 text-sm text-muted-foreground">
           <Keyboard className="size-6 shrink-0" />
           Arrastra las tarjetas entre columnas. Toca una tarjeta para abrir su detalle: descripción e imágenes (también se pegan con Ctrl+V o ⌘V).
-          Empieza con «fix:» o «feat:» para darle tipo. Hecho muestra los últimos 7 días; lo anterior se busca al pie de la columna.
+          Empieza con «fix:» o «feat:» para darle tipo. Hecho muestra primero lo último terminado; lo de hace más de 2 días se archiva y se ve al final de la columna.
         </p>
       </main>
 
@@ -1933,7 +1968,7 @@ export function Tablero({
         onAbiertoChange={setHechosAbiertos}
         busqueda={busquedaHechos}
         onBusquedaChange={setBusquedaHechos}
-        pendientes={antiguosVisibles}
+        pendientes={archivadosVisibles}
         filtrando={filtrando}
         perfilesPorId={perfilesPorId}
         etiquetasPorId={etiquetasPorId}

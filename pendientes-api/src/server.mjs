@@ -360,7 +360,7 @@ const MIGRACIONES = [
   (db) => {
     db.exec('ALTER TABLE comentarios ADD COLUMN respuesta_a TEXT');
   },
-  // Cuándo se terminó cada pendiente (el tablero solo muestra los hechos de la última semana), su tipo (feat, fix…),
+  // Cuándo se terminó cada pendiente (el tablero archiva los hechos viejos), su tipo (feat, fix…),
   // etiquetas de todo el equipo (el sprint, por ejemplo) y los ajustes del equipo, como la IA que crea pendientes. A lo que ya estaba
   // hecho se le pone la fecha en que pasó a Hecho según el historial, o la de su último cambio.
   (db) => {

@@ -162,6 +162,8 @@ export type KanbanCardsProps<T extends KanbanItemProps = KanbanItemProps> =
     id: string;
     // Cuántas tarjetas se ven enteras; las demás quedan con scroll dentro de la columna (se asoma un poco la siguiente).
     visibles?: number;
+    // Lo que va al final del scroll, después de las tarjetas.
+    pie?: ReactNode;
   };
 
 // Lo que se asoma de la tarjeta siguiente, para que se note que hay más abajo.
@@ -171,6 +173,7 @@ export const KanbanCards = <T extends KanbanItemProps = KanbanItemProps>({
   children,
   className,
   visibles,
+  pie,
   ...props
 }: KanbanCardsProps<T>) => {
   const { data } = useContext(KanbanContext) as KanbanContextProps<T>;
@@ -181,11 +184,16 @@ export const KanbanCards = <T extends KanbanItemProps = KanbanItemProps>({
   const claveItems = items.join();
 
   // El alto se mide en el DOM (las tarjetas miden distinto según su contenido) y se recalcula si alguna cambia de tamaño.
-  // Se usa offsetTop, que no cambia con las transformaciones de dnd-kit mientras se arrastra.
+  // Se usa offsetTop, que no cambia con las transformaciones de dnd-kit mientras se arrastra. Al cambiar las tarjetas no
+  // se suelta el alto antes de volver a medir: el scroll volvería arriba.
   useEffect(() => {
     const contenedor = lista.current;
     const viewport = raiz.current?.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]');
-    if (!visibles || !contenedor || !viewport) return;
+    if (!contenedor || !viewport) return;
+    if (!visibles) {
+      viewport.style.maxHeight = "";
+      return;
+    }
     const medir = () => {
       const siguiente = contenedor.children[visibles] as HTMLElement | undefined;
       viewport.style.maxHeight = siguiente ? `${siguiente.offsetTop + Math.min(ASOMO_PX, siguiente.offsetHeight / 2)}px` : "";
@@ -194,10 +202,7 @@ export const KanbanCards = <T extends KanbanItemProps = KanbanItemProps>({
     const observador = new ResizeObserver(medir);
     observador.observe(contenedor);
     for (const tarjeta of contenedor.children) observador.observe(tarjeta);
-    return () => {
-      observador.disconnect();
-      viewport.style.maxHeight = "";
-    };
+    return () => observador.disconnect();
   }, [visibles, claveItems]);
 
   return (
@@ -211,6 +216,7 @@ export const KanbanCards = <T extends KanbanItemProps = KanbanItemProps>({
           {filteredData.map(children)}
         </div>
       </SortableContext>
+      {pie}
     </ScrollArea>
   );
 };

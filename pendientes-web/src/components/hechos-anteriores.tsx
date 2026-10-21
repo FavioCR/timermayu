@@ -10,8 +10,8 @@ import { coincide } from "@/lib/buscar"
 const mes = new Intl.DateTimeFormat("es", { month: "long", year: "numeric" })
 const dia = new Intl.DateTimeFormat("es", { day: "numeric", month: "short" })
 
-// Los hechos de hace más de una semana no salen en el tablero: se buscan aquí (por título, descripción, proyecto,
-// persona, tipo o etiqueta) y se abren igual que una tarjeta.
+// Los hechos archivados (de hace más de 2 días) se buscan aquí (por título, descripción, proyecto, persona, tipo o
+// etiqueta) y se abren igual que una tarjeta.
 export function HechosAnteriores({
   abierto,
   onAbiertoChange,
@@ -49,15 +49,15 @@ export function HechosAnteriores({
     <CommandDialog
       open={abierto}
       onOpenChange={onAbiertoChange}
-      title="Hechos anteriores"
-      description="Lo terminado hace más de una semana."
+      title="Hechos archivados"
+      description="Lo terminado hace más de 2 días."
       className="sm:max-w-xl"
     >
       {/* Busca igual que el buscador de la columna: cada palabra, sin importar tildes. */}
       <Command filter={(valor, texto, palabras) => (coincide([valor, ...(palabras ?? [])].join(" "), texto) ? 1 : 0)}>
-        <CommandInput placeholder="Buscar en lo terminado hace más de una semana…" value={busqueda} onValueChange={onBusquedaChange} />
+        <CommandInput placeholder="Buscar en lo terminado hace más de 2 días…" value={busqueda} onValueChange={onBusquedaChange} />
         <CommandList className="max-h-[min(60svh,32rem)]">
-          <CommandEmpty>{pendientes.length ? "Nada con ese texto." : "No hay hechos de hace más de una semana."}</CommandEmpty>
+          <CommandEmpty>{pendientes.length ? "Nada con ese texto." : "No hay hechos archivados."}</CommandEmpty>
           {porMes.map(([nombre, lista]) => (
             <CommandGroup key={nombre} heading={`${nombre[0].toUpperCase()}${nombre.slice(1)}${filtrando ? " · con los filtros de arriba" : ""}`}>
               {lista.map((pendiente) => {

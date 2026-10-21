@@ -284,7 +284,8 @@ export function ArchivosPendiente({
   pendienteId: string
   usuario: Usuario | null
   version: string
-  onCantidad: (cantidad: number) => void
+  // Cuántos hay y cuántos son videos, para la tarjeta.
+  onCantidad: (cantidad: number, videos: number) => void
   onAbrirPendiente?: (id: string) => void
   onSalir: () => void
 }) {
@@ -327,7 +328,7 @@ export function ArchivosPendiente({
   }, [credenciales, pendienteId, version, onSalir])
 
   useEffect(() => {
-    if (archivos) avisarCantidad.current(archivos.length)
+    if (archivos) avisarCantidad.current(archivos.length, archivos.filter((archivo) => archivo.tipo.startsWith("video/")).length)
   }, [archivos])
 
   async function subir(lista: FileList | null) {

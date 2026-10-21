@@ -55,7 +55,7 @@ type Props = {
   onBorrarEtiqueta: (etiqueta: Etiqueta) => void
   onCambiar: (id: string, cambios: CambiosPendiente) => Promise<Pendiente | null>
   onCantidadComentarios: (id: string, cantidad: number) => void
-  onCantidadArchivos: (id: string, cantidad: number) => void
+  onCantidadArchivos: (id: string, cantidad: number, videos: number) => void
   onPasar: (pendiente: Pendiente) => void
   // Abre otro pendiente (uno donde también está un archivo de este).
   onAbrirPendiente: (id: string) => void
@@ -431,7 +431,7 @@ function Contenido({
               pendienteId={id}
               usuario={usuario}
               version={`${pendiente.actualizado_en}:${pendiente.num_comentarios}:${pendiente.num_archivos}`}
-              onCantidad={(cantidad) => onCantidadArchivos(id, cantidad)}
+              onCantidad={(cantidad, videos) => onCantidadArchivos(id, cantidad, videos)}
               onAbrirPendiente={onAbrirPendiente}
               onSalir={onSalir}
             />
