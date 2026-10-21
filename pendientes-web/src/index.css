@@ -190,3 +190,21 @@
   --bn-colors-editor-background: transparent;
   --bn-colors-editor-text: var(--foreground);
 }
+/* Las marcas de tiempo de la descripción ([00:51], [00:51–02:04]) abren el video ahí: se ven como enlace, con ▶ delante. */
+.bn-root.bn-container .marca-de-tiempo {
+  cursor: pointer;
+  border-radius: 0.25rem;
+  color: var(--primary);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.bn-root.bn-container .marca-de-tiempo:hover {
+  background-color: color-mix(in oklab, var(--primary) 12%, transparent);
+}
+.bn-root.bn-container .marca-de-tiempo::before {
+  content: "▶\FE0E";
+  display: inline-block;
+  margin-right: 0.2em;
+  font-size: 0.7em;
+  vertical-align: 0.12em;
+}

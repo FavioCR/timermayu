@@ -1,6 +1,6 @@
 import "@blocknote/shadcn/style.css"
 
-import { createContext, useContext, useMemo, useRef, useState, type MouseEvent } from "react"
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type MouseEvent } from "react"
 import {
   BlockNoteSchema,
   createFileBlockConfig,
@@ -18,6 +18,7 @@ import {
   FormattingToolbarController,
   getDefaultReactSlashMenuItems,
   getFormattingToolbarItems,
+  GridSuggestionMenuController,
   SuggestionMenuController,
   useComponentsContext,
   useCreateBlockNote,
@@ -25,16 +26,19 @@ import {
   type DefaultReactSuggestionItem,
 } from "@blocknote/react"
 import { BlockNoteView } from "@blocknote/shadcn"
-import { Sparkles } from "lucide-react"
+import { Clock, Sparkles } from "lucide-react"
+import { TextSelection, type Transaction } from "prosemirror-state"
 import { cn } from "cn"
 
-import { ChipArchivo } from "@/components/archivos"
+import { ChipArchivo, ICONOS } from "@/components/archivos"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { RedactarIA } from "@/components/redactar-ia"
 import { VisorImagenes, type ImagenDelVisor } from "@/components/visor-imagenes"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import type { OpcionesRedaccion, Perfil } from "@/lib/api"
-import { tipoPorNombre } from "@/lib/archivos"
+import { claseDeArchivo, tipoPorNombre } from "@/lib/archivos"
+import { medioDeMarca, tramoLegible, type Medio } from "@/lib/marcas-de-tiempo"
+import { claveMarcas, marcasDeTiempo } from "@/lib/marcas-en-editor"
 
 // Tocar un archivo de la descripción lo abre con la contraseña (un enlace directo no la lleva).
 const AbrirArchivo = createContext<(url: string, nombre: string) => void>(() => {})
@@ -180,6 +184,10 @@ function BarraDeFormato() {
   )
 }
 
+const SIN_MEDIOS: Medio[] = []
+
+const noDespuesDeUnNumero = (tr: Transaction) => !/\d$/.test(tr.doc.textBetween(Math.max(0, tr.selection.from - 1), tr.selection.from))
+
 const PISTA_DESCRIPCION =
   "Escribe una descripción: / para más bloques (/ia para escribir con IA), @ para mencionar, o pega una imagen o un archivo"
 
@@ -196,6 +204,8 @@ export default function EditorDescripcion({
   yo = null,
   redactar,
   pista = PISTA_DESCRIPCION,
+  medios = SIN_MEDIOS,
+  onReproducir,
 }: {
   inicial: (typeof schema.PartialBlock)[] | undefined
   oscuro: boolean
@@ -210,14 +220,62 @@ export default function EditorDescripcion({
   redactar?: (texto: string, opciones?: OpcionesRedaccion) => Promise<string>
   // Lo que se lee en una línea vacía.
   pista?: string
+  // Los videos y audios del pendiente: las marcas de tiempo escritas en el texto ([00:51], [00:51–02:04]) se tocan para
+  // verlos en ese momento. Sin ellos (o en las notas) las marcas son texto.
+  medios?: Medio[]
+  onReproducir?: (medio: Medio, desde: number, hasta: number | null) => void
 }) {
+  const [extensionMarcas] = useState(marcasDeTiempo)
   const editor = useCreateBlockNote({
     schema,
     initialContent: inicial,
     dictionary: { ...es, placeholders: { ...es.placeholders, default: pista } },
     uploadFile: subirArchivo,
     resolveFileUrl: resolverUrl,
+    extensions: [extensionMarcas],
   })
+
+  // Los adjuntos llegan (o se van) con el editor ya abierto: las marcas se resaltan, o dejan de hacerlo, enseguida.
+  const conMedios = medios.length > 0 && onReproducir !== undefined
+  useEffect(() => {
+    try {
+      const vista = editor.prosemirrorView
+      vista.dispatch(vista.state.tr.setMeta(claveMarcas, conMedios))
+    } catch {
+      // Todavía sin montar.
+    }
+  }, [editor, conMedios])
+
+  // Tocar una marca abre su video en ese momento; si hay varios y la marca no dice cuál, se elige.
+  const [eligiendo, setEligiendo] = useState<{ desde: number; hasta: number | null } | null>(null)
+  const cajaMarca = useRef(new DOMRect())
+  const anclaMarca = useRef({ getBoundingClientRect: () => cajaMarca.current })
+  function abrirMarca(event: MouseEvent) {
+    const marca = event.target instanceof Element ? event.target.closest<HTMLElement>(".marca-de-tiempo") : null
+    // Al seleccionar arrastrando sobre la marca no se abre.
+    if (!marca || !onReproducir || !editor.prosemirrorState.selection.empty) return false
+    const desde = Number(marca.dataset.desde)
+    const hasta = marca.dataset.hasta ? Number(marca.dataset.hasta) : null
+    const medio = medioDeMarca(medios, marca.dataset.nombre ?? null)
+    if (medio) {
+      onReproducir(medio, desde, hasta)
+    } else {
+      cajaMarca.current = marca.getBoundingClientRect()
+      setEligiendo({ desde, hasta })
+    }
+    return true
+  }
+
+  // «Marca de tiempo» en el menú de /: deja [00:00] (con el nombre del primero si hay varios) con el tiempo seleccionado
+  // para escribirlo encima.
+  function insertarMarca() {
+    const texto = medios.length > 1 ? `[00:00 · ${medios[0].nombre}]` : "[00:00]"
+    editor.insertInlineContent(texto)
+    const vista = editor.prosemirrorView
+    const inicio = vista.state.selection.from - texto.length + 1
+    vista.dispatch(vista.state.tr.setSelection(TextSelection.create(vista.state.doc, inicio, inicio + 5)))
+    editor.focus()
+  }
 
   const personas = useMemo(() => ({ porId: new Map(perfiles.map((perfil) => [perfil.id, perfil])), yo }), [perfiles, yo])
 
@@ -326,7 +384,20 @@ export default function EditorDescripcion({
           },
         ]
       : []
-    return filterSuggestionItems([...conIA, ...getDefaultReactSlashMenuItems(editor)], consulta)
+    const items = getDefaultReactSlashMenuItems(editor)
+    if (conMedios) {
+      // Junto a los demás de «Medios» (el menú agrupa los que van seguidos).
+      const despues = items.findLastIndex((item) => item.group === "Medios") + 1 || items.length
+      items.splice(despues, 0, {
+        title: "Marca de tiempo",
+        subtext: "Lleva a un momento de un video o audio adjunto",
+        aliases: ["marca", "minuto", "tiempo", "momento", "video", "audio"],
+        group: "Medios",
+        icon: <Clock size={18} />,
+        onItemClick: insertarMarca,
+      })
+    }
+    return filterSuggestionItems([...conIA, ...items], consulta)
   }
 
   // Al escribir @ salen los perfiles (menos uno mismo); elegir uno deja su mención y un espacio.
@@ -346,14 +417,17 @@ export default function EditorDescripcion({
       <Personas.Provider value={personas}>
         <Reescribir.Provider value={redactar ? abrirReescribir : null}>
           <BlockNoteView
-            onClick={agrandarImagen}
+            onClick={(event) => abrirMarca(event) || agrandarImagen(event)}
             editor={editor}
             theme={oscuro ? "dark" : "light"}
             slashMenu={false}
+            emojiPicker={false}
             formattingToolbar={false}
             onChange={() => onCambio(editor.document)}
           >
             <SuggestionMenuController triggerCharacter="/" getItems={itemsDeBarra} />
+            {/* Los emojis de «:», como siempre, salvo después de un número: 01:30 es un tiempo (o una hora), no un emoji. */}
+            <GridSuggestionMenuController triggerCharacter=":" columns={10} minQueryLength={2} shouldOpen={noDespuesDeUnNumero} />
             {perfiles.length > 0 && <SuggestionMenuController triggerCharacter="@" getItems={sugerencias} />}
             <FormattingToolbarController formattingToolbar={BarraDeFormato} />
           </BlockNoteView>
@@ -371,6 +445,30 @@ export default function EditorDescripcion({
             }}
           >
             {ia && redactar && <RedactarIA previo={ia.previo} seleccion={"seleccion" in ia} redactar={redactar} onUsar={usarRedaccion} />}
+          </PopoverContent>
+        </Popover>
+        <Popover open={eligiendo !== null} onOpenChange={(abierto) => !abierto && setEligiendo(null)}>
+          <PopoverAnchor virtualRef={anclaMarca} />
+          <PopoverContent side="bottom" align="start" className="w-72 gap-1 p-2">
+            <p className="m-0 px-2 pt-1 pb-1.5 text-xs text-muted-foreground">
+              ¿Cuál ver {eligiendo?.hasta === null ? "desde" : "en"} {eligiendo && tramoLegible(eligiendo.desde, eligiendo.hasta)}?
+            </p>
+            {medios.map((medio) => {
+              const Icono = ICONOS[claseDeArchivo(medio.nombre, medio.tipo)]
+              return (
+                <button
+                  key={medio.id}
+                  type="button"
+                  onClick={() => {
+                    setEligiendo(null)
+                    if (eligiendo) onReproducir?.(medio, eligiendo.desde, eligiendo.hasta)
+                  }}
+                  className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground"
+                >
+                  <Icono /> <span className="truncate">{medio.nombre}</span>
+                </button>
+              )
+            })}
           </PopoverContent>
         </Popover>
         <VisorImagenes

@@ -2,9 +2,15 @@ import { useSyncExternalStore } from "react"
 
 import type { Archivo } from "@/lib/api"
 
-// El video (o audio) que se está viendo. Se abre desde cualquier lado (los adjuntos, el chat, un archivo de la
-// descripción) y lo muestra un solo reproductor, el del tablero.
-export type Reproduccion = { credenciales: string; archivo: Pick<Archivo, "id" | "nombre" | "tipo"> & { tamano?: number } }
+// El video (o audio) que se está viendo. Se abre desde cualquier lado (los adjuntos, el chat, un archivo o una marca de
+// tiempo de la descripción) y lo muestra un solo reproductor, el del tablero. Desde una marca empieza en `desde` y, si
+// es un tramo, se detiene en `hasta` (segundos).
+export type Reproduccion = {
+  credenciales: string
+  archivo: Pick<Archivo, "id" | "nombre" | "tipo"> & { tamano?: number }
+  desde?: number
+  hasta?: number | null
+}
 
 let actual: Reproduccion | null = null
 const oyentes = new Set<() => void>()

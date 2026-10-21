@@ -31,6 +31,8 @@ import {
 import { enlaceWhatsApp } from "@/lib/actividad"
 import { abrirArchivo, PREFIJO_URL_ARCHIVO, tipoPorNombre, urlDeArchivo } from "@/lib/archivos"
 import { comprimirImagen } from "@/lib/comprimir-imagen"
+import type { Medio } from "@/lib/marcas-de-tiempo"
+import { reproducir } from "@/lib/reproductor"
 import { involucrados, organizacionDe, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
@@ -123,6 +125,8 @@ function Contenido({
   const [guardando, setGuardando] = useState(false)
   const [guardado, setGuardado] = useState(false)
   const [aviso, setAviso] = useState("")
+  // Los videos y audios del pendiente abierto (los avisa la lista de archivos), para las marcas de tiempo.
+  const [mediosDe, setMediosDe] = useState<{ id: string; lista: Medio[] }>({ id: "", lista: [] })
   const [confirmarBorrado, setConfirmarBorrado] = useState(false)
   const porGuardar = useRef<DocumentoDescripcion | null>(null)
   const temporizador = useRef<number | undefined>(undefined)
@@ -432,6 +436,7 @@ function Contenido({
               usuario={usuario}
               version={`${pendiente.actualizado_en}:${pendiente.num_comentarios}:${pendiente.num_archivos}`}
               onCantidad={(cantidad, videos) => onCantidadArchivos(id, cantidad, videos)}
+              onMedios={(lista) => setMediosDe({ id, lista })}
               onAbrirPendiente={onAbrirPendiente}
               onSalir={onSalir}
             />
@@ -452,6 +457,8 @@ function Contenido({
                 perfiles={perfiles}
                 yo={usuario?.perfil_id ?? null}
                 redactar={redactarDescripcion}
+                medios={mediosDe.id === id ? mediosDe.lista : undefined}
+                onReproducir={(medio, desde, hasta) => reproducir({ credenciales, archivo: medio, desde, hasta })}
               />
             </Suspense>
           ) : (

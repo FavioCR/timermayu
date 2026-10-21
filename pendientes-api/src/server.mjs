@@ -1576,8 +1576,9 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     },
 
     // Redacta mejor un borrador para el chat o la descripción de un pendiente que ve quien pregunta. Viajan el borrador,
-    // el título, el proyecto, el responsable, el principio de la descripción y, en el chat, los últimos mensajes; de las
-    // personas solo sus nombres (para escribir bien las @menciones), nunca correos ni teléfonos.
+    // el título, el proyecto, el responsable, el principio de la descripción, en el chat los últimos mensajes y en la
+    // descripción los nombres de sus videos y audios (para las marcas de tiempo); de las personas solo sus nombres (para
+    // escribir bien las @menciones), nunca correos ni teléfonos.
     async redactar(yo, { texto, donde, pendiente_id: pendienteId, ...extra }, bases) {
       const item = pendiente(yo, pendienteId);
       if (!item) return null;
@@ -1591,8 +1592,13 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         ? db.prepare(`SELECT autor, texto FROM comentarios WHERE pendiente_id = ? AND texto != '' ORDER BY creado_en DESC, rowid DESC LIMIT 6`)
           .all(pendienteId).reverse()
         : [];
+      const medios = donde === 'chat'
+        ? []
+        : db.prepare(`SELECT nombre FROM archivos WHERE pendiente_id = ? AND borrador = 0 AND subido IS NULL
+            AND (tipo LIKE 'video/%' OR tipo LIKE 'audio/%') ORDER BY creado_en, rowid`).all(pendienteId).map((archivo) => archivo.nombre);
       const sistema = instruccionesRedaccion({
         donde,
+        medios,
         personas: personas.map((p) => p.nombre),
         pendiente: [`«${item.texto}»`, proyecto && `proyecto ${proyecto}`, `estado ${item.estado}`, responsable && `responsable ${responsable}`]
           .filter(Boolean).join(', '),

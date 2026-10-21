@@ -20,7 +20,7 @@ import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { api, esNoAutorizado, MAX_ARCHIVO_BYTES, mensajeDeError, type Archivo, type ArchivoEncontrado, type Usuario } from "@/lib/api"
-import { abrirArchivo, claseDeArchivo, tamanoLegible, traeArchivos, urlDeArchivo, type ClaseDeArchivo } from "@/lib/archivos"
+import { abrirArchivo, claseDeArchivo, esMedio, tamanoLegible, traeArchivos, urlDeArchivo, type ClaseDeArchivo } from "@/lib/archivos"
 
 export const ICONOS: Record<ClaseDeArchivo, typeof File> = {
   imagen: FileImage,
@@ -277,6 +277,7 @@ export function ArchivosPendiente({
   usuario,
   version,
   onCantidad,
+  onMedios,
   onAbrirPendiente,
   onSalir,
 }: {
@@ -286,6 +287,8 @@ export function ArchivosPendiente({
   version: string
   // Cuántos hay y cuántos son videos, para la tarjeta.
   onCantidad: (cantidad: number, videos: number) => void
+  // Sus videos y audios, a los que llevan las marcas de tiempo de la descripción.
+  onMedios?: (medios: Archivo[]) => void
   onAbrirPendiente?: (id: string) => void
   onSalir: () => void
 }) {
@@ -297,8 +300,10 @@ export function ArchivosPendiente({
   const [error, setError] = useState("")
   const entrada = useRef<HTMLInputElement>(null)
   const avisarCantidad = useRef(onCantidad)
+  const avisarMedios = useRef(onMedios)
   useEffect(() => {
     avisarCantidad.current = onCantidad
+    avisarMedios.current = onMedios
   })
 
   const fallar = useCallback(
@@ -328,7 +333,9 @@ export function ArchivosPendiente({
   }, [credenciales, pendienteId, version, onSalir])
 
   useEffect(() => {
-    if (archivos) avisarCantidad.current(archivos.length, archivos.filter((archivo) => archivo.tipo.startsWith("video/")).length)
+    if (!archivos) return
+    avisarCantidad.current(archivos.length, archivos.filter((archivo) => archivo.tipo.startsWith("video/")).length)
+    avisarMedios.current?.(archivos.filter((archivo) => esMedio(archivo.tipo)))
   }, [archivos])
 
   async function subir(lista: FileList | null) {

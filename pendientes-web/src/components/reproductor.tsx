@@ -1,19 +1,27 @@
-import { useEffect, useState } from "react"
-import { Download, ExternalLink, FileWarning, LoaderCircle, X } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
+import { Check, Clock, Download, ExternalLink, FileWarning, LoaderCircle, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { api, mensajeDeError } from "@/lib/api"
 import { tamanoLegible } from "@/lib/archivos"
+import { tiempoLegible, tramoLegible } from "@/lib/marcas-de-tiempo"
 import { dejarDeReproducir, useReproduccion } from "@/lib/reproductor"
 
 const claseDeBoton = "text-white hover:bg-white/10 hover:text-white"
 
 // Videos y audios se ven aquí mismo sin bajarlos enteros: el <video> pide por partes un enlace firmado (no puede mandar la
 // contraseña), así que empieza enseguida y se puede adelantar. Si el navegador no sabe reproducirlo, queda para bajar.
+// Desde una marca de tiempo, el fragmento #t=desde,hasta lo hace empezar ahí (y detenerse al final del tramo).
+// «Copiar marca» copia el momento en que va, para pegarlo en la descripción.
 export function Reproductor() {
   const reproduccion = useReproduccion()
   const archivo = reproduccion?.archivo ?? null
+  const desde = reproduccion?.desde
+  const hasta = reproduccion?.hasta ?? null
+  const fragmento = desde === undefined ? "" : `#t=${desde}${hasta === null ? "" : `,${hasta}`}`
+  const elemento = useRef<HTMLMediaElement>(null)
+  const [copiada, setCopiada] = useState("")
   // Cada estado recuerda de qué archivo es: al abrir otro, lo del anterior ya no cuenta.
   const [enlace, setEnlace] = useState({ id: "", url: "" })
   const [fallo, setFallo] = useState({ id: "", mensaje: "" })
@@ -36,6 +44,18 @@ export function Reproductor() {
   const esAudio = archivo?.tipo.startsWith("audio/") ?? false
   const noSeReproduce = (id: string) => setFallo({ id, mensaje: "Este navegador no puede reproducir este archivo. Descárgalo para verlo." })
 
+  function copiarMarca() {
+    if (!archivo || !elemento.current) return
+    const marca = `[${tiempoLegible(elemento.current.currentTime)} · ${archivo.nombre}]`
+    navigator.clipboard
+      .writeText(marca)
+      .then(() => {
+        setCopiada(marca)
+        window.setTimeout(() => setCopiada((actual) => (actual === marca ? "" : actual)), 2500)
+      })
+      .catch(() => setCopiada(""))
+  }
+
   return (
     <Dialog open={archivo !== null} onOpenChange={(abierto) => !abierto && dejarDeReproducir()}>
       <DialogContent
@@ -47,12 +67,22 @@ export function Reproductor() {
             <DialogTitle className="truncate text-sm font-medium text-white">{archivo?.nombre}</DialogTitle>
             <DialogDescription className="text-xs text-white/60">
               {archivo?.tamano !== undefined ? tamanoLegible(archivo.tamano) : esAudio ? "Audio" : "Video"}
+              {desde !== undefined && ` · ${hasta === null ? "desde" : "tramo"} ${tramoLegible(desde, hasta)}`}
             </DialogDescription>
           </div>
           {url && (
             <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className={claseDeBoton}
+                onClick={copiarMarca}
+                title="Copia el momento en que va, para pegarlo en la descripción"
+              >
+                {copiada ? <Check /> : <Clock />} <span className="max-sm:sr-only">{copiada ? "Marca copiada" : "Copiar marca"}</span>
+              </Button>
               <Button asChild variant="ghost" size="sm" className={claseDeBoton}>
-                <a href={url} target="_blank" rel="noreferrer">
+                <a href={`${url}${fragmento}`} target="_blank" rel="noreferrer">
                   <ExternalLink /> <span className="max-sm:sr-only">Otra pestaña</span>
                 </a>
               </Button>
@@ -77,11 +107,24 @@ export function Reproductor() {
           ) : !url || !archivo ? (
             <LoaderCircle aria-label="Cargando" className="size-8 animate-spin text-white/70" />
           ) : esAudio ? (
-            <audio key={url} src={url} controls autoPlay className="w-full max-w-xl" onError={() => noSeReproduce(archivo.id)} />
+            <audio
+              key={`${url}${fragmento}`}
+              ref={(nodo) => {
+                elemento.current = nodo
+              }}
+              src={`${url}${fragmento}`}
+              controls
+              autoPlay
+              className="w-full max-w-xl"
+              onError={() => noSeReproduce(archivo.id)}
+            />
           ) : (
             <video
-              key={url}
-              src={url}
+              key={`${url}${fragmento}`}
+              ref={(nodo) => {
+                elemento.current = nodo
+              }}
+              src={`${url}${fragmento}`}
               controls
               autoPlay
               playsInline

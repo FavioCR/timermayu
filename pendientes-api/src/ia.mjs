@@ -94,6 +94,7 @@ export function instruccionesIA({ personas, proyectos, etiquetas, proyectoPorDef
     '- estado: "pendiente", salvo que el texto diga que ya se está haciendo ("haciendo") o que ya está terminado ("hecho").',
     '- Si vienen imágenes (capturas de pantalla, fotos de una pizarra o de un papel, conversaciones), saca también de ellas las tareas; en el detalle anota lo que se ve que haga falta para entenderlas.',
     '- imagenes: los números de las imágenes (vienen como «Imagen 1», «Imagen 2»…) que muestran esa tarea, para adjuntarlas al pendiente; lista vacía si no hay imágenes o ninguna es de esa tarea.',
+    `- ${MARCAS_DE_TIEMPO} Si el texto dice en qué minutos de una grabación (reunión, video, audio) se habla de la tarea, ponlos así en su detalle.`,
     `Hoy es ${hoy}.`,
     `Personas: ${personas.length ? personas.join(', ') : '(ninguna)'}`,
     `Proyectos: ${proyectos.length ? proyectos.join(' | ') : '(ninguno)'}`,
@@ -111,7 +112,10 @@ export function instruccionesTipo({ extra }) {
   ].join('\n');
 }
 
-export function instruccionesRedaccion({ donde, personas, pendiente, contexto }) {
+// Cómo se escriben las marcas de tiempo, que en la descripción se tocan para abrir el video o el audio en ese momento.
+const MARCAS_DE_TIEMPO = 'Un momento de un video o audio se marca entre corchetes: [mm:ss], o un tramo [mm:ss–mm:ss] (con horas, [h:mm:ss]).';
+
+export function instruccionesRedaccion({ donde, personas, pendiente, contexto, medios = [] }) {
   return [
     'Eres el asistente del tablero de pendientes de un equipo. Te pasan un borrador, o una indicación de lo que se quiere decir, y devuelves el texto bien redactado y listo para usar.',
     '- Escribe en el idioma del borrador, claro y directo, con buena ortografía. Conserva el sentido, los datos, los enlaces y los nombres; no agregues nada que el borrador no diga.',
@@ -120,8 +124,14 @@ export function instruccionesRedaccion({ donde, personas, pendiente, contexto })
     donde === 'chat'
       ? '- Es un mensaje del chat del pendiente: breve, en tono de conversación entre compañeros, texto plano sin Markdown.'
       : '- Es parte de la descripción del pendiente: usa Markdown sencillo (listas con -, pasos con 1., **negrita**) solo si ordena mejor la información; sin títulos salvo que el texto sea largo.',
+    ...(donde === 'chat'
+      ? []
+      : [
+          `- ${MARCAS_DE_TIEMPO} Al tocarla se abre el adjunto en ese momento. Si el pendiente tiene más de uno, agrega · y su nombre exacto: [00:51–02:04 · reunion.mp4]. Úsalas cuando el borrador hable de minutos o momentos de un video o audio, y conserva tal cual las que ya vengan.`,
+        ]),
     `Pendiente: ${pendiente}`,
     ...contexto,
+    ...(donde === 'chat' ? [] : [`Videos y audios adjuntos: ${medios.length ? medios.join(' | ') : '(ninguno todavía)'}`]),
     `Personas: ${personas.length ? personas.join(', ') : '(ninguna)'}`,
   ].join('\n');
 }

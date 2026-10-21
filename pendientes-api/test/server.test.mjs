@@ -1148,6 +1148,7 @@ test('IA: arma el pedido de cada proveedor y pasa los nombres que contesta a ids
     assert.match(sistema, /Mayugo › Otro \| Mayugo › Web/);
     assert.match(sistema, /si no, "Mayugo › Otro"/);
     assert.match(sistema, /Etiquetas: Sprint 12/);
+    assert.ok(sistema.includes('[mm:ss–mm:ss]'), 'los minutos de una grabación van como marcas');
     assert.ok(!sistema.includes('@'), 'no se mandan correos');
     if (id === 'gemini') {
       assert.equal(pedido.headers['x-goog-api-key'], clave);
@@ -1330,7 +1331,7 @@ test('IA: redacta mejor un borrador del chat o de la descripción, con el pendie
     const texto = cuerpo.input.includes('largo') ? 'x'.repeat(2500) : '@Junior, ¿puedes revisar el botón «Aceptar invitación»? Redirige a localhost.';
     return { json: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: JSON.stringify({ texto }) }] }] } };
   });
-  const { call, data, entrarComo } = await startServer(t, { basesIA: { gemini: proveedor.url } });
+  const { base, call, data, entrarComo } = await startServer(t, { basesIA: { gemini: proveedor.url } });
   const diego = await entrarComo('Diego');
   const favio = await entrarComo('Favio');
   const junior = await entrarComo('Junior');
@@ -1359,9 +1360,18 @@ test('IA: redacta mejor un borrador del chat o de la descripción, con el pendie
   // Nunca correos ni teléfonos.
   assert.ok(!/junior@example|88887777/.test(JSON.stringify(chat)));
 
-  // En la descripción puede usar Markdown y no van los mensajes del chat. Lo que vuelve se recorta: 2000 en el chat.
+  assert.ok(!chat.system_instruction.includes('[mm:ss]'), 'en el chat no hay marcas de tiempo');
+
+  // En la descripción puede usar Markdown, marcas de tiempo de sus videos (van sus nombres) y no van los mensajes del chat.
+  // Lo que vuelve se recorta: 2000 en el chat.
+  const VIDEO = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(12)]);
+  await fetch(`${base}/api/pendientes/${pendiente.id}/archivos`, {
+    method: 'POST', headers: { ...diego.headers, 'X-Nombre-Archivo': encodeURIComponent('Reunión con el cliente.mp4') }, body: VIDEO,
+  });
   await redactar(diego, { texto: 'pasos para probar', donde: 'descripcion', pendiente_id: pendiente.id });
   assert.ok(pedidos[1].system_instruction.includes('Markdown') && !pedidos[1].system_instruction.includes('Ya lo vi'));
+  assert.ok(pedidos[1].system_instruction.includes('[mm:ss–mm:ss]'));
+  assert.ok(pedidos[1].system_instruction.includes('Videos y audios adjuntos: Reunión con el cliente.mp4'));
   assert.equal((await diego.data('POST', '/ia/redactar', { texto: 'algo largo', donde: 'chat', pendiente_id: pendiente.id })).redaccion.texto.length, 2000);
   assert.equal((await diego.data('POST', '/ia/redactar', { texto: 'algo largo', donde: 'descripcion', pendiente_id: pendiente.id })).redaccion.texto.length, 2500);
 
