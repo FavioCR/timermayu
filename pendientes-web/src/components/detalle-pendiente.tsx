@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
-import { Forward, History, Lock, MessageCircle, MessageSquare, ScanEye, Trash2, Users } from "lucide-react"
+import { CheckCheck, Forward, History, Lock, MessageCircle, MessageSquare, ScanEye, Trash2, Users } from "lucide-react"
 
 import { Aprobacion } from "@/components/aprobacion"
 import { ArchivosPendiente } from "@/components/archivos"
@@ -67,6 +67,8 @@ type Props = {
   onRebotar: (pendiente: Pendiente) => void
   // Les pide a compañeros que lo revisen (desde el chat).
   onPedirRevision: (id: string, revisores: string[], nota: string) => Promise<boolean>
+  // Quien no puede cerrar su pedido aprobándolo (su responsable, o quien ya lo aprobó) lo da por revisado.
+  onMarcarRevisado: (id: string) => void
   onBorrar: (pendiente: Pendiente) => void
   onCerrar: () => void
   onSalir: () => void
@@ -116,6 +118,7 @@ function Contenido({
   onAprobar,
   onRebotar,
   onPedirRevision,
+  onMarcarRevisado,
   onBorrar,
   onSalir,
   enfocarChat = 0,
@@ -193,6 +196,19 @@ function Contenido({
       vigente = false
     }
   }, [credenciales, id, pendiente.actualizado_en, aplicarDescripcion])
+
+  // Lo que me piden revisar (o me rebotan) mientras lo tengo abierto ya lo estoy viendo: se le avisa al servidor, que lo
+  // marca leído al pedirlo. Al abrirlo, la primera carga ya lo hace.
+  const yoPerfil = usuario?.perfil_id ?? null
+  const sinLeer =
+    yoPerfil !== null &&
+    (pendiente.revisiones.some((r) => r.revisor_id === yoPerfil && !r.abierto_en) ||
+      (pendiente.perfil_id === yoPerfil && pendiente.rebotado_en !== null && !pendiente.rebote_visto_en))
+  const sinLeerVisto = useRef(sinLeer)
+  useEffect(() => {
+    if (sinLeer && !sinLeerVisto.current) api.detalle(credenciales, id).catch(() => {})
+    sinLeerVisto.current = sinLeer
+  }, [credenciales, id, sinLeer])
 
   const guardarDescripcion = useCallback(async () => {
     window.clearTimeout(temporizador.current)
@@ -284,9 +300,12 @@ function Contenido({
   const creador = pendiente.creado_por ? perfilesPorId.get(pendiente.creado_por) : undefined
   const proyecto = catalogo.proyectos.find((p) => p.id === pendiente.proyecto_id)
   const etiquetaProyecto = proyecto ? (organizacion ? `${organizacion.nombre} › ${proyecto.nombre}` : proyecto.nombre) : null
-  // A quién se le puede pedir que lo revise: a quien lo ve, menos quien pide y su responsable (lo privado no se revisa).
+  // A quién se le puede pedir que lo revise: a cualquiera menos a uno mismo (lo privado solo lo ve su dueño).
   const yo = usuario?.perfil_id ?? null
-  const revisores = privado ? [] : involucrados(perfiles, organizacion).filter((perfil) => perfil.id !== yo && perfil.id !== pendiente.perfil_id)
+  const revisores = privado ? [] : perfiles.filter((perfil) => perfil.id !== yo)
+  // Me pidieron revisarlo y no puedo cerrarlo aprobándolo: lo doy por revisado.
+  const darPorRevisado =
+    yo !== null && pendiente.revisiones.some((r) => r.revisor_id === yo) && (pendiente.perfil_id === yo || pendiente.aprobaciones.includes(yo))
 
   return (
     <div className="flex flex-col lg:h-full lg:flex-row">
@@ -367,6 +386,11 @@ function Contenido({
                         </span>
                       )
                     })}
+                    {darPorRevisado && (
+                      <Button variant="outline" size="xs" onClick={() => onMarcarRevisado(id)}>
+                        <CheckCheck /> Ya lo revisé
+                      </Button>
+                    )}
                   </dd>
                 </>
               )}

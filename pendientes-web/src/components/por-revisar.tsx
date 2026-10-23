@@ -9,7 +9,8 @@ import { haceCuanto } from "@/lib/actividad"
 import type { Pendiente, Perfil } from "@/lib/api"
 
 // La bandeja de lo que a quien entró le pidieron revisar, como la de un correo: lo que no abrió va en negrita con su
-// punto (y cuenta en el número), y todo sigue aquí hasta que lo aprueba o lo rebota.
+// punto (y cuenta en el número), y todo sigue aquí hasta que lo aprueba o lo rebota (o, si no puede aprobarlo, lo da
+// por revisado).
 export function PorRevisar({
   pendientes,
   yo,
@@ -63,7 +64,7 @@ export function PorRevisar({
         <ul className="m-0 max-h-[min(28rem,60svh)] list-none overflow-y-auto p-0">
           {pedidos.length === 0 && (
             <li className="px-6 py-8 text-center text-sm text-muted-foreground">
-              Nada por revisar. Cuando alguien te pida revisar un pendiente, aparece aquí hasta que lo apruebes o lo rebotes.
+              Nada por revisar. Cuando alguien te pida revisar un pendiente, aparece aquí hasta que lo revises.
             </li>
           )}
           {pedidos.map(({ pendiente, revision }) => {
@@ -88,7 +89,10 @@ export function PorRevisar({
                     <span className={cn("block text-sm break-words", nuevo ? "font-semibold" : "text-foreground/85")}>{pendiente.texto}</span>
                     <span className="mt-1 block text-xs text-muted-foreground/80">
                       {haceCuanto(revision.pedido_en)}
-                      {!nuevo && " · abierto: falta aprobarlo o rebotarlo"}
+                      {!nuevo &&
+                        (pendiente.perfil_id === yo || pendiente.aprobaciones.includes(yo)
+                          ? " · abierto: falta darlo por revisado"
+                          : " · abierto: falta aprobarlo o rebotarlo")}
                     </span>
                   </span>
                   {nuevo && <span className="mt-1.5 size-2 shrink-0 rounded-full bg-primary" aria-label="Sin abrir" />}

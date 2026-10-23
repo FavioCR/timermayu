@@ -15,8 +15,8 @@ export function PedirRevision({
   candidatos,
   onPedir,
 }: {
-  pendiente: Pick<Pendiente, "estado" | "aprobaciones" | "revisiones">
-  // Quienes pueden revisarlo: ni quien pide ni su responsable.
+  pendiente: Pick<Pendiente, "estado" | "perfil_id" | "aprobaciones" | "revisiones">
+  // Quienes pueden revisarlo: todos menos quien pide.
   candidatos: Perfil[]
   onPedir: (revisores: string[], nota: string) => Promise<boolean>
 }) {
@@ -55,19 +55,20 @@ export function PedirRevision({
           {candidatos.map((perfil) => {
             const aprobo = pendiente.aprobaciones.includes(perfil.id)
             const pedido = pendiente.revisiones.find((revision) => revision.revisor_id === perfil.id)
-            const detalle = aprobo
-              ? "ya lo aprobó"
-              : pedido
-                ? `pedido ${haceCuanto(pedido.pedido_en)}, ${pedido.abierto_en ? "ya lo abrió" : "sin abrir"}`
-                : !perfil.tiene_contrasena
-                  ? "aún no entra"
-                  : null
+            const detalle = pedido
+              ? `pedido ${haceCuanto(pedido.pedido_en)}, ${pedido.abierto_en ? "ya lo abrió" : "sin abrir"}`
+              : aprobo
+                ? "ya lo aprobó"
+                : perfil.id === pendiente.perfil_id
+                  ? "responsable"
+                  : !perfil.tiene_contrasena
+                    ? "aún no entra"
+                    : null
             return (
               <li key={perfil.id}>
-                <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent has-disabled:cursor-default has-disabled:opacity-55 has-disabled:hover:bg-transparent">
+                <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent">
                   <Checkbox
                     checked={elegidos.includes(perfil.id)}
-                    disabled={aprobo}
                     onCheckedChange={(marcado) => cambiar(perfil.id, marcado === true)}
                   />
                   <PerfilAvatar perfil={perfil} size="sm" />
@@ -92,7 +93,7 @@ export function PedirRevision({
         className="min-h-14 resize-none"
       />
       <p className="m-0 text-xs text-muted-foreground">
-        Queda un mensaje en el chat y le llega el aviso. Lo verá sin leer hasta que lo abra, y pendiente hasta que lo apruebe o lo rebote.
+        Queda un mensaje en el chat y le llega el aviso. Lo verá sin leer hasta que lo abra, y pendiente hasta que lo revise.
       </p>
       <Button type="submit" size="sm" disabled={elegidos.length === 0 || enviando} className="self-end">
         <ScanEye /> {enviando ? "Pidiendo…" : elegidos.length > 1 ? `Pedir a ${elegidos.length}` : "Pedir revisión"}

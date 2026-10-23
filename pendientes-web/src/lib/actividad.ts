@@ -71,6 +71,8 @@ export function describir(actividad: Actividad, { conTitulo = true, yo = null }:
     case "revision":
       if (yo && datos.revisores_ids?.includes(yo)) return conTitulo ? `te pidió revisar ${titulo}` : "te pidió revisarlo"
       return conTitulo ? `le pidió revisar ${titulo} a ${unirNombres(datos.revisores)}` : `le pidió revisarlo a ${unirNombres(datos.revisores)}`
+    case "revisado":
+      return conTitulo ? `revisó ${titulo}` : "lo revisó"
     case "borrado":
       return `borró ${titulo}`
   }

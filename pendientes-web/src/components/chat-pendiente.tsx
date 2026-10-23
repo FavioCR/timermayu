@@ -154,7 +154,7 @@ export function ChatPendiente({
   enfocar?: number
   // Para pedirle a un compañero que lo revise (botón y /revisar); sin perfil no se puede.
   revision?: {
-    pendiente: Pick<Pendiente, "estado" | "aprobaciones" | "revisiones">
+    pendiente: Pick<Pendiente, "estado" | "perfil_id" | "aprobaciones" | "revisiones">
     candidatos: Perfil[]
     onPedir: (revisores: string[], nota: string) => Promise<boolean>
   }

@@ -3,6 +3,7 @@ import {
   ArrowRightLeft,
   BadgeCheck,
   BadgeX,
+  CheckCheck,
   CircleCheck,
   FileText,
   Folder,
@@ -41,6 +42,7 @@ const ICONOS: Record<TipoActividad, typeof Plus> = {
   aprobacion_quitada: BadgeX,
   rebotado: TriangleAlert,
   revision: ScanEye,
+  revisado: CheckCheck,
 }
 
 function agruparPorDia(items: Actividad[]) {

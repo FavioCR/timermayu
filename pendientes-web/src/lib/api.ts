@@ -161,6 +161,7 @@ export type TipoActividad =
   | "aprobacion_quitada"
   | "rebotado"
   | "revision"
+  | "revisado"
 
 // Lo que se anota según el tipo: de/a en los cambios, extracto y menciones (ids de perfil) en los mensajes, etc.
 export type DatosActividad = {
@@ -286,7 +287,8 @@ const MENSAJES: Record<string, string> = {
   rebotar_lo_propio: "Lo que está a tu cargo lo revisa otra persona.",
   revision_con_perfil: "Para pedir una revisión, entra con tu perfil.",
   revision_solo_hechos: "Primero pásalo a Hecho: ahí se aprueba o se rebota.",
-  revisor_invalido: "Esa persona no puede revisarlo (ya lo aprobó, está a su cargo o no lo ve).",
+  revisor_invalido: "Esa persona no puede revisarlo: no lo ve.",
+  sin_revision: "Ya no tenías que revisarlo.",
   revisores_invalidos: "Elige a quién pedirle la revisión.",
   correo_duplicado: "Ese correo ya lo tiene otro perfil.",
   contrasena_invalida: "La contraseña debe tener al menos 8 caracteres.",
@@ -683,6 +685,9 @@ export const api = {
   // Les pide a compañeros que lo revisen: un mensaje en el chat que los menciona y el pedido «sin leer» para cada uno.
   pedirRevision: (credenciales: string, id: string, revisores: string[], nota: string) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "POST", `/${id}/revision`, { revisores, nota }).then((data) => data.pendiente),
+  // Quien no lo cierra aprobándolo (su responsable, o quien ya lo aprobó) lo da por revisado.
+  marcarRevisado: (credenciales: string, id: string) =>
+    pedir<{ pendiente: Pendiente }>(credenciales, "POST", `/${id}/revisado`).then((data) => data.pendiente),
   ordenar: (credenciales: string, items: { id: string; estado: Estado }[]) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "PUT", "/orden", { items }).then((data) => data.pendientes),
   subirImagen,

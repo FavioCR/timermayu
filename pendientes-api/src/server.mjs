@@ -171,6 +171,7 @@ const EVIDENCIA_PATH = new RegExp(`^/api/pendientes/${UUID}/evidencia$`);
 const APROBACION_PATH = new RegExp(`^/api/pendientes/${UUID}/aprobacion$`);
 const REBOTE_PATH = new RegExp(`^/api/pendientes/${UUID}/rebote$`);
 const REVISION_PATH = new RegExp(`^/api/pendientes/${UUID}/revision$`);
+const REVISADO_PATH = new RegExp(`^/api/pendientes/${UUID}/revisado$`);
 const ETIQUETA_PATH = new RegExp(`^/api/pendientes/etiquetas/${UUID}$`);
 const CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}$`);
 const NOTAS_DE_CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/notas$`);
@@ -188,7 +189,7 @@ const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH, TODOS_LOS_ARCHIVOS_PATH,
   TRAER_IMAGEN_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
-  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, APROBACION_PATH, REBOTE_PATH, REVISION_PATH, ETIQUETA_PATH,
+  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, APROBACION_PATH, REBOTE_PATH, REVISION_PATH, REVISADO_PATH, ETIQUETA_PATH,
   CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH, RECURSO_REPETIDO_PATH,
   PARTES_DE_ARCHIVO_PATH, ENLACE_DE_ARCHIVO_PATH, ARCHIVO_REPETIDO_PATH, REUSAR_ARCHIVO_PATH];
 // Las filas que apuntan a un archivo guardado por su contenido (DATA_DIR/blobs/<sha256>).
@@ -531,6 +532,10 @@ const MIGRACIONES = [
   // La última vez que cada perfil estuvo en línea (para «última conexión»).
   (db) => {
     db.exec('ALTER TABLE perfiles ADD COLUMN visto_en TEXT');
+  },
+  // La revisión se le puede pedir a cualquiera menos a uno mismo, también a su responsable: asignárselo ya no la cierra.
+  (db) => {
+    db.exec('DROP TRIGGER IF EXISTS revisiones_del_responsable');
   },
 ];
 
@@ -1983,6 +1988,21 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       });
     },
 
+    // Quien no puede cerrar el pedido aprobándolo (su responsable, o quien ya lo había aprobado) lo da por revisado; a
+    // quien lo pidió le llega el aviso. Si algo falta, lo rebota o lo vuelve a trabajar.
+    marcarRevisado(quien, id) {
+      const yo = quien.perfil_id;
+      const actual = pendiente(yo, id);
+      if (!actual) return null;
+      if (!yo) throw httpError(403, 'revision_con_perfil');
+      return transaction(db, () => {
+        const pedido = db.prepare('DELETE FROM revisiones WHERE pendiente_id = ? AND revisor_id = ? RETURNING pedido_por').get(id, yo);
+        if (!pedido) throw httpError(409, 'sin_revision');
+        registrar(quien, actual, 'revisado', null, [pedido.pedido_por]);
+        return pendiente(yo, id);
+      });
+    },
+
     desaprobar(quien, id) {
       const yo = quien.perfil_id;
       const actual = pendiente(yo, id);
@@ -2028,14 +2048,14 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
     // Le pide a compañeros que revisen un pendiente hecho: queda un mensaje en el chat que los menciona y a cada uno le
     // llega el aviso y el pedido «sin leer». Pedírselo otra vez lo vuelve a dejar sin leer. Lo pide un perfil (no la
-    // cuenta del equipo), a quienes pueden verlo y todavía no lo aprobaron, que no sean quien pide ni su responsable.
+    // cuenta del equipo) a cualquiera que pueda verlo menos a sí mismo: también a su responsable o a quien ya lo aprobó.
     pedirRevision(quien, id, { revisores, nota }) {
       const yo = quien.perfil_id;
       const actual = pendiente(yo, id);
       if (!actual) return null;
       if (!yo) throw httpError(403, 'revision_con_perfil');
       if (actual.estado !== 'hecho') throw httpError(409, 'revision_solo_hechos');
-      const valido = (revisor) => revisor !== yo && revisor !== actual.perfil_id && !actual.aprobaciones.includes(revisor) && perfil(revisor)
+      const valido = (revisor) => revisor !== yo && perfil(revisor)
         && db.prepare(`SELECT 1 FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`).get(id, revisor);
       if (!revisores.every(valido)) throw httpError(422, 'revisor_invalido');
       return transaction(db, () => {
@@ -2847,7 +2867,7 @@ export function createApp(options = {}) {
     if (pathname === API_PATH || pathname === ORDER_PATH) return { tipo: 'pendientes' };
     // Un pedido de revisión cambia el pendiente y deja un mensaje en su chat.
     if (deRuta(REVISION_PATH)) return [{ tipo: 'pendientes', pendiente_id: deRuta(REVISION_PATH) }, { tipo: 'comentarios', pendiente_id: deRuta(REVISION_PATH) }];
-    const pendienteId = deRuta(ITEM_PATH) ?? deRuta(TRASPASO_PATH) ?? deRuta(APROBACION_PATH) ?? deRuta(REBOTE_PATH);
+    const pendienteId = deRuta(ITEM_PATH) ?? deRuta(TRASPASO_PATH) ?? deRuta(APROBACION_PATH) ?? deRuta(REBOTE_PATH) ?? deRuta(REVISADO_PATH);
     if (pendienteId) return { tipo: 'pendientes', pendiente_id: pendienteId };
     if (deRuta(COMENTARIOS_PATH)) return { tipo: 'comentarios', pendiente_id: deRuta(COMENTARIOS_PATH) };
     if (deRuta(COMENTARIO_PATH)) return { tipo: 'comentarios', pendiente_id: repo.pendienteDeComentario(deRuta(COMENTARIO_PATH)) };
@@ -3226,6 +3246,8 @@ export function createApp(options = {}) {
       if (pendienteDeRevision && req.method === 'POST') {
         return enviar(200, 'pendiente', repo.pedirRevision(usuario, pendienteDeRevision, parseRevision(await readJson(req))));
       }
+      const pendienteRevisado = url.pathname.match(REVISADO_PATH)?.[1];
+      if (pendienteRevisado && req.method === 'POST') return enviar(200, 'pendiente', repo.marcarRevisado(usuario, pendienteRevisado));
       const pendienteDeRebote = url.pathname.match(REBOTE_PATH)?.[1];
       if (pendienteDeRebote && req.method === 'POST') {
         return enviar(200, 'pendiente', repo.rebotar(usuario, pendienteDeRebote, parseRebote(await readJson(req))));

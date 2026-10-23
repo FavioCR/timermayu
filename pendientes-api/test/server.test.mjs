@@ -2134,10 +2134,7 @@ test('revisiones: pedirle a un compañero que revise un pendiente hecho; queda s
   assert.equal((await diego.call('POST', ruta, { revisores: [] })).status, 422);
   assert.equal((await diego.call('POST', ruta, { revisores: 'Franklin' })).status, 422);
   assert.equal((await diego.call('POST', ruta, { revisores: [crypto.randomUUID()] })).status, 422);
-  assert.equal((await junior.call('POST', ruta, { revisores: [diego.perfil.id] })).status, 422, 'no a su responsable');
   assert.equal((await diego.call('POST', ruta, { revisores: [diego.perfil.id] })).status, 422, 'no a sí mismo');
-  await junior.data('POST', `/${pendiente.id}/aprobacion`);
-  assert.equal((await diego.call('POST', ruta, { revisores: [junior.perfil.id] })).status, 422, 'no a quien ya lo aprobó');
 
   // Junior se lo pide a Franklin: un mensaje en el chat que lo menciona, el aviso y el pedido sin leer.
   const pedido = (await junior.data('POST', ruta, { revisores: [franklin.perfil.id], nota: ' Prueba con Visa. ' })).pendiente;
@@ -2167,18 +2164,31 @@ test('revisiones: pedirle a un compañero que revise un pendiente hecho; queda s
   await franklin.data('POST', `/${pendiente.id}/aprobacion`);
   assert.deepEqual(await revisores(), [kenny.perfil.id]);
   assert.deepEqual(await avisos(junior, 'aprobado'), [], 'Junior ya no es quien lo pidió');
-  assert.deepEqual((await avisos(diego, 'aprobado')).map(([autor]) => autor), ['Franklin', 'Junior']);
+  assert.deepEqual((await avisos(diego, 'aprobado')).map(([autor]) => autor), ['Franklin']);
 
   // Rebotarlo los cierra todos (sale de Hecho) y le avisa a quienes lo pidieron.
   await kenny.data('POST', `/${pendiente.id}/rebote`, {});
   assert.deepEqual(await revisores(), []);
   assert.deepEqual((await avisos(diego, 'rebotado')).map(([autor]) => autor), ['Kenny']);
 
-  // Volver a trabajarlo también los cierra; y el de quien queda a cargo.
+  // A cualquiera menos a uno mismo: también a su responsable y a quien ya lo aprobó. Como no pueden cerrarlo aprobándolo,
+  // lo dan por revisado (y a quien lo pidió le llega el aviso). Quien no tiene el pedido no puede.
   await diego.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  await kenny.data('POST', `/${pendiente.id}/aprobacion`);
+  await junior.data('POST', ruta, { revisores: [diego.perfil.id, kenny.perfil.id] });
+  assert.deepEqual(await revisores(), [diego.perfil.id, kenny.perfil.id]);
+  assert.equal((await franklin.call('POST', `/${pendiente.id}/revisado`)).status, 409);
+  assert.equal((await call('POST', `/${pendiente.id}/revisado`)).status, 403);
+  assert.deepEqual((await diego.data('POST', `/${pendiente.id}/revisado`)).pendiente.revisiones.map((r) => r.revisor_id), [kenny.perfil.id]);
+  await kenny.data('POST', `/${pendiente.id}/revisado`);
+  assert.deepEqual(await revisores(), []);
+  assert.deepEqual(await avisos(junior, 'revisado'), [['Kenny', null], ['Diego', null]]);
+  assert.deepEqual(await avisos(favio, 'revisado'), [], 'solo a quien lo pidió');
+
+  // Volver a trabajarlo también los cierra; pasárselo a quien debía revisarlo, no.
   await diego.data('POST', ruta, { revisores: [kenny.perfil.id, junior.perfil.id] });
   await favio.data('PATCH', `/${pendiente.id}`, { perfil_id: kenny.perfil.id });
-  assert.deepEqual(await revisores(), [junior.perfil.id]);
+  assert.deepEqual(await revisores(), [kenny.perfil.id, junior.perfil.id]);
   await kenny.data('PUT', '/orden', { items: [{ id: pendiente.id, estado: 'haciendo' }] });
   assert.deepEqual(await revisores(), []);
 

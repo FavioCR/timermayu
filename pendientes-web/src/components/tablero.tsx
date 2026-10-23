@@ -894,7 +894,7 @@ export function Tablero({
         setTarjetas((actuales) => actuales.map((t) => (t.id === id ? aTarjeta(actualizado) : t)))
         const nombres = unirNombres(revisores.map((revisor) => perfilesPorId.get(revisor)?.nombre ?? "alguien"))
         toast.success(`Le pediste la revisión a ${nombres}`, {
-          description: `Lo ${revisores.length > 1 ? "verán" : "verá"} sin leer en «Por revisar» hasta abrirlo, y ahí sigue hasta que lo apruebe o lo rebote.`,
+          description: `Lo ${revisores.length > 1 ? "verán" : "verá"} sin leer en «Por revisar» hasta abrirlo, y ahí sigue hasta que lo revise.`,
         })
         return true
       } catch (err) {
@@ -1005,6 +1005,20 @@ export function Tablero({
       }
     },
     [credenciales, fallar, recargar, usuario?.perfil_id]
+  )
+
+  const marcarRevisado = useCallback(
+    async (id: string) => {
+      try {
+        const actualizado = await api.marcarRevisado(credenciales, id)
+        setTarjetas((actuales) => actuales.map((t) => (t.id === id ? aTarjeta(actualizado) : t)))
+        toast.success("Listo, lo diste por revisado", { description: "A quien te lo pidió le llega el aviso." })
+      } catch (err) {
+        fallar(err)
+        recargar()
+      }
+    },
+    [credenciales, fallar, recargar]
   )
 
   const cerrarDetalle = useCallback(() => {
@@ -2110,6 +2124,7 @@ export function Tablero({
         onPasar={setPasando}
         onRebotar={setRebotando}
         onPedirRevision={pedirRevision}
+        onMarcarRevisado={marcarRevisado}
         onAbrirPendiente={setAbierto}
         onAprobar={aprobar}
         onBorrar={borrar}

@@ -54,6 +54,8 @@ export function describir(actividad, yo) {
       return `rebotó ${titulo} a Haciendo`;
     case 'revision':
       return datos.revisores_ids?.includes(yo) ? `te pidió revisar ${titulo}` : `le pidió revisar ${titulo} a ${unir(datos.revisores)}`;
+    case 'revisado':
+      return `revisó ${titulo}`;
     case 'borrado':
       return `borró ${titulo}`;
     default:
