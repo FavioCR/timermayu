@@ -149,7 +149,7 @@ export function Notificaciones({
   }, [])
 
   // Cualquier cambio de otra persona puede traer un aviso nuevo.
-  useCambios((cambio) => cambio.tipo !== "ia" && cargar())
+  useCambios((cambio) => cambio.tipo !== "ia" && cambio.tipo !== "presencia" && cargar())
 
   useEffect(() => {
     cargar()

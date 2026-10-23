@@ -2193,6 +2193,36 @@ test('revisiones: pedirle a un compañero que revise un pendiente hecho; queda s
   assert.equal((await avisos(junior, 'revision')).length, antes - 1);
 });
 
+test('equipo: quién está en línea (con el tablero a la vista) y su última conexión', async (t) => {
+  const { call, data, entrarComo } = await startServer(t, { enLineaMs: 300 });
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const estado = async () => Object.fromEntries((await data('GET', '/equipo')).equipo
+    .map(({ perfil_id, en_linea, visto_en }) => [perfil_id, { en_linea, visto: Boolean(visto_en) }]));
+  assert.deepEqual((await estado())[favio.perfil.id], { en_linea: false, visto: false });
+
+  // La cuenta del equipo no es una persona; el aviso dice si está o se va.
+  assert.equal((await call('POST', '/yo/presencia', { activo: true })).status, 403);
+  assert.equal((await favio.call('POST', '/yo/presencia', { activo: 'si' })).status, 422);
+  const avisar = (quien, pestana, activo) => call('POST', '/yo/presencia', { activo }, { ...quien.headers, 'X-Cliente': pestana });
+  assert.equal((await avisar(favio, 'a', true)).status, 200);
+  assert.deepEqual((await estado())[favio.perfil.id], { en_linea: true, visto: true });
+  assert.deepEqual((await estado())[diego.perfil.id], { en_linea: false, visto: false });
+
+  // Con dos pestañas, cerrar una no lo saca; cerrar las dos sí, y queda su última conexión.
+  await avisar(favio, 'b', true);
+  await avisar(favio, 'a', false);
+  assert.equal((await estado())[favio.perfil.id].en_linea, true);
+  await avisar(favio, 'b', false);
+  assert.deepEqual((await estado())[favio.perfil.id], { en_linea: false, visto: true });
+
+  // Si deja de avisar, al rato ya no está en línea.
+  await avisar(diego, 'c', true);
+  assert.equal((await estado())[diego.perfil.id].en_linea, true);
+  await new Promise((listo) => setTimeout(listo, 350));
+  assert.deepEqual((await estado())[diego.perfil.id], { en_linea: false, visto: true });
+});
+
 test('evidencia: al tercer pendiente seguido que alguien termina sin escribir en su chat, se le recuerda', async (t) => {
   const { call, entrarComo } = await startServer(t);
   const diego = await entrarComo('Diego');

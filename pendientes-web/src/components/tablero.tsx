@@ -82,6 +82,7 @@ import {
   KanbanProvider,
 } from "@/components/kibo-ui/kanban"
 import { Notificaciones } from "@/components/notificaciones"
+import { Equipo } from "@/components/equipo"
 import { PasarDialog } from "@/components/pasar-dialog"
 import { PorRevisar } from "@/components/por-revisar"
 import { AvisoRebote, RebotarDialog } from "@/components/rebotar-dialog"
@@ -143,6 +144,7 @@ import { agrupar, conOrganizacion, conProyecto, involucrados, organizacionDe, SI
 import { conectarCambios, revisarConexion, useCambios } from "@/lib/cambios"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 import { instalar, useInstalacion } from "@/lib/instalar"
+import { usePresencia } from "@/lib/presencia"
 import { separarTipo, TIPOS, tipoDe } from "@/lib/tipos"
 
 const PerfilesDialog = lazy(() => import("@/components/perfiles-dialog").then((modulo) => ({ default: modulo.PerfilesDialog })))
@@ -575,7 +577,7 @@ export function Tablero({
   useCambios((cambio) => {
     // El aviso de un pendiente que esperaba su tipo es la respuesta de la IA: el tipo llega con la recarga.
     if (cambio.pendiente_id && eligiendoTipo.has(cambio.pendiente_id)) dejarDeElegir(cambio.pendiente_id, 1500)
-    if (cambio.tipo !== "ia") recargarPronto()
+    if (cambio.tipo !== "ia" && cambio.tipo !== "presencia") recargarPronto()
   })
 
   const dejarDeElegir = useCallback((id: string, enMs: number) => {
@@ -711,6 +713,7 @@ export function Tablero({
   const hayCatalogo = catalogo.organizaciones.length > 0 || catalogo.proyectos.length > 0
 
   const miPerfil = usuario?.perfil_id ? perfilesPorId.get(usuario.perfil_id) : null
+  usePresencia(credenciales, Boolean(usuario?.perfil_id))
   // Para el ejemplo del recordatorio de evidencia: quien creó el pendiente, o si fue uno mismo, otra persona del equipo.
   const creadorDelRecordado = recordatorio ? tarjetas.find((t) => t.id === recordatorio.pendiente.id)?.creado_por : null
   const otroDelEquipo =
@@ -1223,7 +1226,7 @@ export function Tablero({
   return (
     <div className="min-h-svh bg-background text-foreground">
       <header className="border-b">
-        <div className="mx-auto flex max-w-[100rem] items-center gap-3 px-4 py-4 md:px-6 lg:px-10">
+        <div className="mx-auto flex max-w-[100rem] items-center gap-2 px-4 py-4 sm:gap-3 md:px-6 lg:px-10">
           <span className="mr-1 flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-[0_0_22px_-2px] shadow-primary/60">
             <ClipboardList className="size-5" />
           </span>
@@ -1265,6 +1268,7 @@ export function Tablero({
                 </a>
               </Button>
             </div>
+            {usuario && <Equipo credenciales={credenciales} yo={usuario.perfil_id} perfiles={perfiles} />}
             {usuario?.perfil_id && (
               <PorRevisar pendientes={tarjetas} yo={usuario.perfil_id} perfilesPorId={perfilesPorId} onAbrir={abrirPendiente} />
             )}

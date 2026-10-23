@@ -204,6 +204,9 @@ export type Actividad = {
 
 export type Notificacion = { id: string; leida: boolean; actividad: Actividad }
 
+// Si alguien del equipo está en línea (con el tablero a la vista y en uso) y la última vez que lo estuvo.
+export type Presencia = { perfil_id: string; en_linea: boolean; visto_en: string | null }
+
 // Un pendiente con avisos sin leer: cuántos y cuántos son menciones (o respuestas a un mensaje tuyo).
 export type SinLeer = { pendiente_id: string; avisos: number; menciones: number }
 
@@ -729,6 +732,17 @@ export const api = {
     // Un enlace que sirve sin contraseña por unas horas: el <video> lo pide por partes.
     enlace: (credenciales: string, id: string) =>
       pedir<{ url: string }>(credenciales, "GET", `/archivos/${id}/enlace`).then((data) => data.url),
+  },
+  equipo: {
+    listar: (credenciales: string) => pedir<{ equipo: Presencia[] }>(credenciales, "GET", "/equipo").then((data) => data.equipo),
+    // Avisa si está en línea o se va. keepalive: llega aunque la pestaña se esté cerrando.
+    avisar: (credenciales: string, activo: boolean) =>
+      fetch(`${BASE}/yo/presencia`, {
+        method: "POST",
+        keepalive: true,
+        headers: { Authorization: `Basic ${credenciales}`, "X-Cliente": CLIENTE, "Content-Type": "application/json" },
+        body: JSON.stringify({ activo }),
+      }).then(() => undefined),
   },
   notificaciones: {
     listar: (credenciales: string) =>

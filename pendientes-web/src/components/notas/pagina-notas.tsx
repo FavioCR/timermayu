@@ -70,6 +70,7 @@ import { useSubidas } from "@/hooks/use-subidas"
 import { api, esNoAutorizado, mensajeDeError, type Usuario } from "@/lib/api"
 import { haceCuanto } from "@/lib/actividad"
 import { APARIENCIA_NORMAL, aplicarApariencia } from "@/lib/apariencia"
+import { usePresencia } from "@/lib/presencia"
 import {
   direccionDe,
   lugarDeLaDireccion,
@@ -117,6 +118,8 @@ export default function PaginaNotas({ credenciales, onSalir }: { credenciales: s
   const [borrandoNota, setBorrandoNota] = useState<Nota | null>(null)
   const [plegados, setPlegados] = useState(leerPlegados)
   const [aviso, setAviso] = useState("")
+  // Con sus notas abiertas también se está en línea.
+  usePresencia(credenciales, Boolean(usuario?.perfil_id))
 
   const salir = useCallback(() => onSalir(), [onSalir])
   const agregarRecurso = useCallback(

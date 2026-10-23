@@ -4,9 +4,9 @@ import { CLIENTE } from "@/lib/api"
 
 // Cambios en tiempo real: el servidor avisa por SSE (text/event-stream) qué cambió y cada parte del tablero vuelve a
 // pedir lo suyo. Se lee con fetch y no con EventSource porque la contraseña va en un encabezado.
-// "conectado" llega al reconectar, por si se perdió algo mientras tanto.
+// "conectado" llega al reconectar, por si se perdió algo mientras tanto; "presencia", cuando alguien entra o sale de línea.
 export type Cambio = {
-  tipo: "pendientes" | "comentarios" | "archivos" | "catalogo" | "ia" | "conectado"
+  tipo: "pendientes" | "comentarios" | "archivos" | "catalogo" | "ia" | "presencia" | "conectado"
   pendiente_id?: string | null
 }
 

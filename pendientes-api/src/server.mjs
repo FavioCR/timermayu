@@ -101,6 +101,9 @@ const MAX_CONEXIONES = 500;
 // no abrió, o uno que le pidieron revisar y no abrió, va destacado arriba en cada correo (y basta para mandarlo) hasta que lo abra.
 const REGLAS_CORREO = { hora: 9, zona: 'America/Lima', dias: 2, esperaMs: 60 * 60_000, antiguedadMs: 3 * 24 * 60 * 60_000 };
 const REVISAR_CORREOS_MS = 5 * 60_000;
+// Presencia: cada pestaña a la vista y en uso avisa cada minuto; quien no avisó en este tiempo ya no está en línea.
+const EN_LINEA_MS = 150_000;
+const REVISAR_PRESENCIA_MS = 30_000;
 const DIA_MS = 24 * 60 * 60_000;
 const URL_TABLERO = 'https://timer.practi.dev/pendientes/';
 // Al tercer pendiente seguido que alguien termina sin dejar un mensaje en su chat, el tablero le recuerda dejar la
@@ -128,6 +131,8 @@ const ORDER_PATH = '/api/pendientes/orden';
 const YO_PATH = '/api/pendientes/yo';
 const APARIENCIA_PATH = '/api/pendientes/yo/apariencia';
 const AVISOS_POR_CORREO_PATH = '/api/pendientes/yo/avisos-por-correo';
+const PRESENCIA_PATH = '/api/pendientes/yo/presencia';
+const EQUIPO_PATH = '/api/pendientes/equipo';
 const PERFILES_PATH = '/api/pendientes/perfiles';
 const ORGANIZACIONES_PATH = '/api/pendientes/organizaciones';
 const PROYECTOS_PATH = '/api/pendientes/proyectos';
@@ -179,7 +184,7 @@ const IA_TRABAJO_PATH = new RegExp(`^/api/pendientes/ia/sugerir/${UUID}$`);
 const RECURSO_REPETIDO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/recursos/repetido$`);
 // Lo que se guarda el resultado de un trabajo de la IA que nadie vino a buscar.
 const VIDA_TRABAJO_IA_MS = 10 * 60_000;
-const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_CORREO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
+const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_CORREO_PATH, PRESENCIA_PATH, EQUIPO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH, TODOS_LOS_ARCHIVOS_PATH,
   TRAER_IMAGEN_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
@@ -522,6 +527,10 @@ const MIGRACIONES = [
         BEGIN DELETE FROM revisiones WHERE pendiente_id = NEW.id AND revisor_id = NEW.perfil_id; END;
       ALTER TABLE comentarios ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
     `);
+  },
+  // La última vez que cada perfil estuvo en línea (para «última conexión»).
+  (db) => {
+    db.exec('ALTER TABLE perfiles ADD COLUMN visto_en TEXT');
   },
 ];
 
@@ -1607,6 +1616,10 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         .run(`apariencia:${yo ?? 'equipo'}`, JSON.stringify(apariencia));
       return apariencia;
     },
+
+    // Presencia: la última vez que cada perfil estuvo en línea.
+    guardarVisto: (perfilId, cuando) => db.prepare('UPDATE perfiles SET visto_en = ? WHERE id = ?').run(cuando, perfilId),
+    vistos: () => db.prepare('SELECT id, visto_en FROM perfiles').all().map((row) => ({ ...row })),
 
     // Si le llegan por correo los avisos que no vio. Encendido salvo que lo apague.
     avisosPorCorreo: (yo) => db.prepare('SELECT valor FROM ajustes WHERE clave = ?').get(`avisos_por_correo:${yo}`)?.valor !== 'no',
@@ -2788,6 +2801,37 @@ export function createApp(options = {}) {
     }
   }
 
+  // Presencia: quién tiene el tablero abierto, a la vista y en uso. Cada pestaña así avisa cada minuto (POST
+  // /yo/presencia) y, al dejar de estarlo, avisa que se va; la que deja de avisar caduca a los EN_LINEA_MS. Vive en
+  // memoria (al reiniciar, todos vuelven en menos de un minuto); visto_en guarda la última vez, para «última conexión».
+  // Cuando alguien entra o sale se avisa a todos.
+  const presentes = new Map(); // perfil_id → Map(pestaña → último aviso en ms)
+  const enLineaMs = options.enLineaMs ?? EN_LINEA_MS;
+  const enLinea = (perfilId, ahora = Date.now()) => [...(presentes.get(perfilId)?.values() ?? [])].some((ms) => ahora - ms < enLineaMs);
+  function marcarPresencia(perfilId, pestana, activo) {
+    const antes = enLinea(perfilId);
+    const pestanas = presentes.get(perfilId) ?? new Map();
+    if (activo) pestanas.set(pestana, Date.now());
+    else pestanas.delete(pestana);
+    if (pestanas.size > 0) presentes.set(perfilId, pestanas);
+    else presentes.delete(perfilId);
+    repo.guardarVisto(perfilId, new Date().toISOString());
+    if (enLinea(perfilId) !== antes) avisarCambio({ tipo: 'presencia' });
+  }
+  const caducar = setInterval(() => {
+    const ahora = Date.now();
+    let cambio = false;
+    for (const [perfilId, pestanas] of presentes) {
+      for (const [pestana, ms] of pestanas) if (ahora - ms >= enLineaMs) pestanas.delete(pestana);
+      if (pestanas.size === 0) {
+        presentes.delete(perfilId);
+        cambio = true;
+      }
+    }
+    if (cambio) avisarCambio({ tipo: 'presencia' });
+  }, REVISAR_PRESENCIA_MS);
+  caducar.unref();
+
   // El tipo que elige la IA llega después de crear el pendiente: se avisa a todos, también a la pestaña que lo creó
   // (que espera la respuesta para dejar de mostrar que la IA está eligiendo), haya salido bien o no.
   function elegirTipo(id) {
@@ -2992,6 +3036,19 @@ export function createApp(options = {}) {
         const { activo } = await readJson(req);
         if (typeof activo !== 'boolean') throw httpError(422, 'activo_invalido');
         return json(res, 200, { activo: repo.guardarAvisosPorCorreo(yo, activo) });
+      }
+      // Quien entró con su perfil avisa si está en línea (cada minuto) o si se va. La cuenta del equipo no es una persona.
+      if (url.pathname === PRESENCIA_PATH && req.method === 'POST') {
+        if (!yo) throw httpError(403, 'presencia_con_perfil');
+        const { activo } = await readJson(req);
+        if (typeof activo !== 'boolean') throw httpError(422, 'activo_invalido');
+        marcarPresencia(yo, String(req.headers['x-cliente'] ?? '').slice(0, 64), activo);
+        return json(res, 200, { ok: true });
+      }
+      // Quién está en línea y cuándo estuvo cada uno por última vez.
+      if (url.pathname === EQUIPO_PATH && req.method === 'GET') {
+        const ahora = Date.now();
+        return json(res, 200, { equipo: repo.vistos().map(({ id, visto_en }) => ({ perfil_id: id, en_linea: enLinea(id, ahora), visto_en })) });
       }
       if (url.pathname === APARIENCIA_PATH && req.method === 'PUT') {
         return json(res, 200, { apariencia: repo.guardarApariencia(yo, parseApariencia(await readJson(req))) });
@@ -3269,6 +3326,7 @@ export function createApp(options = {}) {
   server.close = (callback) => {
     clearInterval(latido);
     clearInterval(revisarCorreos);
+    clearInterval(caducar);
     for (const conexion of conexiones) conexion.res.end();
     return cerrar(callback);
   };
