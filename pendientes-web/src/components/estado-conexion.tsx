@@ -65,7 +65,7 @@ export function EstadoConexion() {
         <button
           type="button"
           aria-label={`Tiempo real: ${textos.corto}`}
-          className="inline-flex h-8 items-center gap-2 rounded-full px-2 text-sm text-muted-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50 min-[400px]:border min-[400px]:px-3"
+          className="inline-flex h-8 shrink-0 items-center gap-2 rounded-full px-2 whitespace-nowrap text-sm text-muted-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50 sm:border sm:px-3"
         >
           <span className="relative flex size-2.5">
             {estado === "en-vivo" && <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-500 opacity-60" />}
@@ -78,7 +78,7 @@ export function EstadoConexion() {
               )}
             />
           </span>
-          <span className="hidden min-[400px]:inline">{textos.corto}</span>
+          <span className="hidden sm:inline">{textos.corto}</span>
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-72 text-sm">

@@ -81,6 +81,7 @@ import {
   KanbanHeader,
   KanbanProvider,
 } from "@/components/kibo-ui/kanban"
+import { MisPendientes } from "@/components/mis-pendientes"
 import { Notificaciones } from "@/components/notificaciones"
 import { Equipo } from "@/components/equipo"
 import { PasarDialog } from "@/components/pasar-dialog"
@@ -713,6 +714,11 @@ export function Tablero({
   const hayCatalogo = catalogo.organizaciones.length > 0 || catalogo.proyectos.length > 0
 
   const miPerfil = usuario?.perfil_id ? perfilesPorId.get(usuario.perfil_id) : null
+  // Lo que quien entró tiene en Por hacer, en todo el tablero: sin filtros, en el orden de la columna.
+  const misPorHacer = useMemo(
+    () => (usuario?.perfil_id ? tarjetas.filter((tarjeta) => tarjeta.column === "pendiente" && tarjeta.perfil_id === usuario.perfil_id) : []),
+    [tarjetas, usuario?.perfil_id]
+  )
   usePresencia(credenciales, Boolean(usuario?.perfil_id))
   // Para el ejemplo del recordatorio de evidencia: quien creó el pendiente, o si fue uno mismo, otra persona del equipo.
   const creadorDelRecordado = recordatorio ? tarjetas.find((t) => t.id === recordatorio.pendiente.id)?.creado_por : null
@@ -1240,20 +1246,21 @@ export function Tablero({
   return (
     <div className="min-h-svh bg-background text-foreground">
       <header className="border-b">
-        <div className="mx-auto flex max-w-[100rem] items-center gap-2 px-4 py-4 sm:gap-3 md:px-6 lg:px-10">
-          <span className="mr-1 flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-[0_0_22px_-2px] shadow-primary/60">
+        <div className="mx-auto flex max-w-[100rem] items-center gap-1.5 px-4 py-4 sm:gap-3 md:px-6 lg:px-10">
+          <span className="mr-1 flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary sm:size-10 text-primary-foreground shadow-[0_0_22px_-2px] shadow-primary/60">
             <ClipboardList className="size-5" />
           </span>
-          <h1 className="text-2xl font-bold tracking-tight">Pendientes</h1>
+          {/* En los celulares más angostos el título queda solo para lectores de pantalla: el logo ya lo dice. */}
+          <h1 className="min-w-0 truncate text-lg font-bold tracking-tight max-[379px]:sr-only sm:text-2xl">Pendientes</h1>
           {!cargando && (
-            <span className="hidden rounded-full bg-muted px-3 py-1 text-sm text-muted-foreground min-[400px]:inline">
+            <span className="hidden shrink-0 rounded-full bg-muted px-3 py-1 text-sm whitespace-nowrap text-muted-foreground sm:inline">
               {abiertos} {abiertos === 1 ? "abierto" : "abiertos"}
             </span>
           )}
           <EstadoConexion />
-          {/* En pantallas angostas solo quedan la campana y la cuenta; lo demás va en el menú de la cuenta. */}
-          <div className="ml-auto flex items-center gap-1">
-            <div className="hidden items-center gap-1 md:flex">
+          {/* Hasta pantallas de laptop solo quedan los íconos y la cuenta; lo demás va en el menú de la cuenta. */}
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <div className="hidden items-center gap-1 lg:flex">
               {/* Solo cuando el navegador puede instalarlo con un clic; si no, queda en el menú de la cuenta. */}
               {instalacion.directa && !instalacion.instalada && (
                 <Button variant="ghost" onClick={instalarApp}>
@@ -1282,6 +1289,14 @@ export function Tablero({
                 </a>
               </Button>
             </div>
+            {usuario?.perfil_id && (
+              <MisPendientes
+                pendientes={misPorHacer}
+                proyectosPorId={proyectosPorId}
+                organizacionesPorId={organizacionesPorId}
+                onAbrir={abrirPendiente}
+              />
+            )}
             {usuario && <Equipo credenciales={credenciales} yo={usuario.perfil_id} perfiles={perfiles} />}
             {usuario?.perfil_id && (
               <PorRevisar pendientes={tarjetas} yo={usuario.perfil_id} perfilesPorId={perfilesPorId} onAbrir={abrirPendiente} />
@@ -1311,28 +1326,28 @@ export function Tablero({
                   {usuario?.perfil_id ? `Entraste como ${usuario.nombre}` : "Entraste con la cuenta del equipo"}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem className="md:hidden" onSelect={() => setVentana("proyectos")}>
+                <DropdownMenuItem className="lg:hidden" onSelect={() => setVentana("proyectos")}>
                   <FolderKanban /> Proyectos
                 </DropdownMenuItem>
-                <DropdownMenuItem className="md:hidden" onSelect={() => setVentana("perfiles")}>
+                <DropdownMenuItem className="lg:hidden" onSelect={() => setVentana("perfiles")}>
                   <Users /> Perfiles
                 </DropdownMenuItem>
-                <DropdownMenuItem className="md:hidden" onSelect={() => setVentana("actividad")}>
+                <DropdownMenuItem className="lg:hidden" onSelect={() => setVentana("actividad")}>
                   <History /> Actividad
                 </DropdownMenuItem>
                 {usuario?.notas && (
-                  <DropdownMenuItem className="md:hidden" asChild>
+                  <DropdownMenuItem className="lg:hidden" asChild>
                     <a href="/pendientes/notas">
                       <NotebookPen /> Notas
                     </a>
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem className="md:hidden" asChild>
+                <DropdownMenuItem className="lg:hidden" asChild>
                   <a href="/">
                     <Timer /> Timer
                   </a>
                 </DropdownMenuItem>
-                <DropdownMenuSeparator className="md:hidden" />
+                <DropdownMenuSeparator className="lg:hidden" />
                 <DropdownMenuItem onSelect={() => setVentana("ia")}>
                   <Sparkles /> Inteligencia artificial
                 </DropdownMenuItem>

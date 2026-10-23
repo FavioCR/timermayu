@@ -8,7 +8,7 @@ import type { Perfil } from "@/lib/api"
 import { ultimaConexion, useEquipo } from "@/lib/presencia"
 
 // Quién del equipo está en línea (con el tablero o sus notas a la vista y en uso) y, de los demás, su última conexión.
-// En el encabezado se ven las caras de quienes están en línea (en el celular, cuántos son).
+// En el encabezado se ven las caras de quienes están en línea (en pantallas más chicas, cuántos son).
 export function Equipo({ credenciales, yo, perfiles }: { credenciales: string; yo: string | null; perfiles: Perfil[] }) {
   const equipo = useEquipo(credenciales)
   const enLinea = (perfil: Perfil) => perfil.id === yo || equipo.get(perfil.id)?.en_linea === true
@@ -26,17 +26,17 @@ export function Equipo({ credenciales, yo, perfiles }: { credenciales: string; y
         <Button
           variant="ghost"
           size="icon"
-          className={cn("relative", otros.length > 0 && "sm:w-auto sm:px-1.5")}
+          className={cn("relative", otros.length > 0 && "xl:w-auto xl:px-1.5")}
           aria-label={`Equipo: ${otros.length ? `${otros.length} en línea` : "nadie más en línea"}`}
           title="Equipo"
         >
-          <UsersRound className={cn(otros.length > 0 && "sm:hidden")} />
+          <UsersRound className={cn(otros.length > 0 && "xl:hidden")} />
           {otros.length > 0 && (
             <>
-              <span className="absolute top-1 right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-600 px-1 text-[10px] leading-none font-semibold text-white tabular-nums sm:hidden">
+              <span className="absolute top-1 right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-600 px-1 text-[10px] leading-none font-semibold text-white tabular-nums xl:hidden">
                 {otros.length > 9 ? "9+" : otros.length}
               </span>
-              <span className="hidden items-center -space-x-1.5 sm:flex">
+              <span className="hidden items-center -space-x-1.5 xl:flex">
                 {otros.slice(0, 3).map((perfil) => (
                   <PerfilAvatar key={perfil.id} perfil={perfil} size="sm" className="size-6 ring-2 ring-background" />
                 ))}
@@ -46,7 +46,7 @@ export function Equipo({ credenciales, yo, perfiles }: { credenciales: string; y
                   </span>
                 )}
               </span>
-              <span className="absolute right-0.5 bottom-0.5 hidden size-2.5 rounded-full bg-emerald-500 ring-2 ring-background sm:block" aria-hidden />
+              <span className="absolute right-0.5 bottom-0.5 hidden size-2.5 rounded-full bg-emerald-500 ring-2 ring-background xl:block" aria-hidden />
             </>
           )}
         </Button>
