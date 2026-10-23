@@ -2047,6 +2047,72 @@ test('aprobaciones: otros perfiles aprueban un pendiente hecho; se pierden si vu
   assert.deepEqual((await favio.data('POST', `/${pendiente.id}/traspaso`, { perfil_id: diego.perfil.id })).pendiente.aprobaciones, []);
 });
 
+test('rebotes: quien revisa un pendiente hecho lo devuelve a Haciendo, primero y marcado hasta que vuelva a Hecho', async (t) => {
+  const { call, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const junior = await entrarComo('Junior');
+  await favio.data('POST', '', { texto: 'Ya en Haciendo', perfil_id: diego.perfil.id, estado: 'haciendo' });
+  const { pendiente } = await favio.data('POST', '', { texto: 'Pago con tarjeta', perfil_id: diego.perfil.id });
+  const ruta = `/${pendiente.id}/rebote`;
+  const leer = async (quien = diego) => (await quien.data('GET')).pendientes.find((p) => p.id === pendiente.id);
+  assert.equal(pendiente.rebotado_en, null);
+
+  // Solo lo que está en Hecho, y no lo rebota su responsable ni la cuenta del equipo.
+  assert.equal((await junior.call('POST', ruta, {})).status, 409);
+  await diego.data('POST', `/${pendiente.id}/comentarios`, { texto: 'Listo, ya cobra.' });
+  await diego.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  await junior.data('POST', `/${pendiente.id}/aprobacion`);
+  assert.equal((await diego.call('POST', ruta, {})).status, 409);
+  assert.equal((await call('POST', ruta, {})).status, 403);
+  assert.equal((await junior.call('POST', `/${crypto.randomUUID()}/rebote`, {})).status, 404);
+  assert.equal((await junior.call('POST', ruta, { nota: 5 })).status, 422);
+  assert.equal((await junior.call('POST', ruta, { nota: 'x'.repeat(501) })).status, 422);
+
+  const rebotado = (await junior.data('POST', ruta, { nota: '  Falla con tarjetas Visa.  ' })).pendiente;
+  assert.equal(rebotado.estado, 'haciendo');
+  assert.equal(rebotado.hecho_en, null);
+  assert.deepEqual(rebotado.aprobaciones, []);
+  assert.equal(rebotado.rebotado_por, junior.perfil.id);
+  assert.equal(rebotado.rebote_nota, 'Falla con tarjetas Visa.');
+  assert.ok(rebotado.rebotado_en);
+  assert.equal(rebotado.rebote_visto_en, null);
+  // Queda primero en Haciendo.
+  assert.equal((await diego.data('GET')).pendientes.filter((p) => p.estado === 'haciendo')[0].id, pendiente.id);
+  // Ya no está en Hecho: no se rebota dos veces.
+  assert.equal((await favio.call('POST', ruta, {})).status, 409);
+
+  // Se avisa a su responsable y a quien lo creó, con la nota.
+  const avisos = async (quien) => (await quien.data('GET', '/notificaciones')).notificaciones
+    .filter((n) => n.actividad.tipo === 'rebotado').map((n) => [n.actividad.autor, n.actividad.datos?.nota]);
+  assert.deepEqual(await avisos(diego), [['Junior', 'Falla con tarjetas Visa.']]);
+  assert.deepEqual(await avisos(favio), [['Junior', 'Falla con tarjetas Visa.']]);
+  assert.deepEqual(await avisos(junior), []);
+
+  // Lo que escribió antes del rebote no es la evidencia de lo que termine después.
+  await diego.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  assert.equal((await diego.data('GET', `/${pendiente.id}/evidencia`)).evidencia.sin_evidencia[0]?.id, pendiente.id);
+  // Al volver a Hecho deja de estar rebotado.
+  const terminado = await leer();
+  assert.deepEqual([terminado.rebotado_en, terminado.rebotado_por, terminado.rebote_nota, terminado.rebote_visto_en], [null, null, null, null]);
+
+  // Lo ve su responsable al abrirlo, no otro. Si se lo dan a otra persona, ella todavía no lo vio.
+  await junior.data('POST', ruta, {});
+  assert.equal((await leer()).rebote_nota, null);
+  await favio.data('GET', `/${pendiente.id}`);
+  assert.equal((await leer()).rebote_visto_en, null);
+  const visto = (await diego.data('GET', `/${pendiente.id}`)).pendiente.rebote_visto_en;
+  assert.ok(visto);
+  await diego.data('GET', `/${pendiente.id}`);
+  assert.equal((await leer()).rebote_visto_en, visto, 'abrirlo otra vez no cambia cuándo lo vio');
+  assert.equal((await diego.data('PATCH', `/${pendiente.id}`, { perfil_id: favio.perfil.id })).pendiente.rebote_visto_en, null);
+  assert.ok((await leer()).rebotado_en, 'sigue rebotado con su nuevo responsable');
+
+  // Arrastrarlo a Hecho también le quita la marca.
+  await favio.data('PUT', '/orden', { items: [{ id: pendiente.id, estado: 'hecho' }] });
+  assert.equal((await leer()).rebotado_en, null);
+});
+
 test('evidencia: al tercer pendiente seguido que alguien termina sin escribir en su chat, se le recuerda', async (t) => {
   const { call, entrarComo } = await startServer(t);
   const diego = await entrarComo('Diego');
@@ -2225,6 +2291,56 @@ test('avisos por correo: esperan una hora sin verse y lo de más de 3 días ya n
   assert.equal(enviados.length, 0);
   await otro.server.mandarAvisosPorCorreo(enDias(1));
   assert.equal(enviados.length, 1);
+});
+
+test('avisos por correo: un rebotado que su responsable no abrió va destacado en cada correo hasta que lo abra', async (t) => {
+  const enviados = [];
+  const correo = { enviar: async (mensaje) => enviados.push(mensaje) };
+  const reglasCorreo = { zona: 'UTC', antiguedadMs: 30 * 24 * 60 * 60_000 };
+  const { server, entrarComo } = await startServer(t, { correo, reglasCorreo, urlTablero: 'https://tablero.ejemplo/pendientes/' });
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  await favio.call('PATCH', `/perfiles/${favio.perfil.id}`, { correo: 'favio@ejemplo.com' });
+  const vuelta = (momento) => server.mandarAvisosPorCorreo(momento);
+  const { pendiente } = await diego.data('POST', '', { texto: 'Pago <Visa>', perfil_id: favio.perfil.id });
+  await favio.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  await diego.data('POST', `/${pendiente.id}/rebote`, { nota: 'Falla con tarjetas Visa.' });
+
+  // Primero el rebotado, destacado; su aviso no se repite en la lista de lo que no vio.
+  await vuelta(enDias(1));
+  assert.equal(enviados.length, 1);
+  assert.equal(enviados[0].subject, '⚠️ Rebotaron «Pago <Visa>» y todavía no lo abres');
+  const { text, html } = enviados[0];
+  for (const parte of ['⚠️ Rebotado sin abrir', '• «Pago <Visa>», lo rebotó Diego', '> Falla con tarjetas Visa.', `?p=${pendiente.id}`,
+    'Diego creó «Pago <Visa>» y te lo asignó', 'Lo rebotado se repite en cada resumen']) {
+    assert.ok(text.includes(parte), parte);
+  }
+  assert.ok(text.indexOf('Rebotado sin abrir') < text.indexOf('te lo asignó'));
+  assert.ok(!text.includes('rebotó «'));
+  assert.ok(html.includes('Pago &lt;Visa&gt;') && !html.includes('<Visa>'));
+
+  // Aunque ya vio todos sus avisos, se le recuerda en cada correo (como mucho cada 2 días) mientras no lo abra.
+  await favio.call('POST', '/notificaciones/leidas', {});
+  await vuelta(enDias(2));
+  assert.equal(enviados.length, 1);
+  await vuelta(enDias(3));
+  assert.equal(enviados.length, 2);
+  assert.equal(enviados[1].subject, '⚠️ Rebotaron «Pago <Visa>» y todavía no lo abres');
+  assert.ok(!enviados[1].text.includes('Esto pasó en Pendientes'));
+
+  // Con dos, el asunto los cuenta.
+  const otro = (await diego.data('POST', '', { texto: 'Exportar reporte', perfil_id: favio.perfil.id })).pendiente;
+  await favio.data('PATCH', `/${otro.id}`, { estado: 'hecho' });
+  await diego.data('POST', `/${otro.id}/rebote`, {});
+  await favio.call('POST', '/notificaciones/leidas', {});
+  await vuelta(enDias(5));
+  assert.equal(enviados[2].subject, '⚠️ Tienes 2 pendientes rebotados sin abrir');
+
+  // Abiertos, ya no llegan.
+  await favio.data('GET', `/${pendiente.id}`);
+  await favio.data('GET', `/${otro.id}`);
+  await vuelta(enDias(7));
+  assert.equal(enviados.length, 3);
 });
 
 test('avisos por correo: sin configurar no se mandan ni aparecen', async (t) => {

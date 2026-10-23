@@ -63,12 +63,14 @@ export function describir(actividad: Actividad, { conTitulo = true, yo = null }:
       return conTitulo ? `aprobó ${titulo}` : "aprobó la funcionalidad"
     case "aprobacion_quitada":
       return conTitulo ? `quitó su aprobación de ${titulo}` : "quitó su aprobación"
+    case "rebotado":
+      return conTitulo ? `rebotó ${titulo} a Haciendo` : "lo rebotó a Haciendo"
     case "borrado":
       return `borró ${titulo}`
   }
 }
 
-// Lo que se muestra debajo de la frase: el texto del mensaje (y sus archivos) o la nota de un traspaso.
+// Lo que se muestra debajo de la frase: el texto del mensaje (y sus archivos) o la nota de un traspaso o un rebote.
 export function detalleDe(actividad: Actividad) {
   const datos = actividad.datos ?? {}
   const archivos = datos.adjuntos?.length ? `📎 ${datos.adjuntos.join(", ")}` : null

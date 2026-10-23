@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Bell, BellRing, CheckCheck, UsersRound, Volume2, VolumeX } from "lucide-react"
+import { Bell, BellRing, CheckCheck, TriangleAlert, UsersRound, Volume2, VolumeX } from "lucide-react"
 import { cn } from "cn"
 import { toast } from "sonner"
 
@@ -21,7 +21,8 @@ type Permiso = NotificationPermission | "sin_soporte"
 const permisoActual = (): Permiso => ("Notification" in window ? Notification.permission : "sin_soporte")
 
 // La campana de quien entró con su perfil. Avisa por tres cosas: te asignan algo, te mencionan con @ (en un mensaje o en
-// una descripción; responder a tu mensaje cuenta como mencionarte) o alguien más cambia un pendiente que creaste.
+// una descripción; responder a tu mensaje cuenta como mencionarte) o alguien más cambia un pendiente que creaste. Un
+// rebote (revisaron algo tuyo en Hecho y no lo aprobaron) resalta con el signo de atención.
 // Con la pestaña en segundo plano y permiso del navegador, también avisa con una notificación del sistema.
 // Además dice qué pendientes tienen avisos sin leer (para la campana de su tarjeta) y, al abrir uno, los lee.
 export function Notificaciones({
@@ -248,12 +249,13 @@ export function Notificaciones({
         <ul className="m-0 max-h-[min(28rem,60svh)] list-none overflow-y-auto p-0">
           {lista.length === 0 && (
             <li className="px-6 py-8 text-center text-sm text-muted-foreground">
-              Sin avisos por ahora. Aquí verás lo que te asignen, cuando te mencionen con @ y lo que otros cambien en lo que creaste.
+              Sin avisos por ahora. Aquí verás lo que te asignen o te reboten, cuando te mencionen con @ y lo que otros cambien en lo que creaste.
             </li>
           )}
           {lista.map((notificacion) => {
             const { actividad } = notificacion
             const autor = actividad.perfil_id ? perfilesPorId.get(actividad.perfil_id) : null
+            const rebote = actividad.tipo === "rebotado"
             return (
               <li key={notificacion.id} className="border-b last:border-b-0">
                 <button
@@ -261,7 +263,7 @@ export function Notificaciones({
                   onClick={() => abrir(notificacion)}
                   className={cn(
                     "flex w-full gap-3 px-4 py-3 text-left outline-none hover:bg-accent focus-visible:bg-accent",
-                    !notificacion.leida && "bg-primary/8"
+                    !notificacion.leida && (rebote ? "bg-destructive/8" : "bg-primary/8")
                   )}
                 >
                   {autor ? (
@@ -272,7 +274,8 @@ export function Notificaciones({
                     </span>
                   )}
                   <span className="min-w-0 flex-1">
-                    <span className="block text-sm">
+                    <span className={cn("block text-sm", rebote && "text-destructive")}>
+                      {rebote && <TriangleAlert className="mr-1 inline size-3.5 -translate-y-px" aria-label="Rebotado:" />}
                       <span className="font-medium">{actividad.autor}</span> {describir(actividad, { yo })}
                     </span>
                     {detalleDe(actividad) && (
@@ -280,7 +283,9 @@ export function Notificaciones({
                     )}
                     <span className="mt-1 block text-xs text-muted-foreground/80">{haceCuanto(actividad.creado_en)}</span>
                   </span>
-                  {!notificacion.leida && <span className="mt-1.5 size-2 shrink-0 rounded-full bg-primary" aria-label="Sin leer" />}
+                  {!notificacion.leida && (
+                    <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", rebote ? "bg-destructive" : "bg-primary")} aria-label="Sin leer" />
+                  )}
                 </button>
               </li>
             )

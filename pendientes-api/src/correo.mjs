@@ -48,6 +48,8 @@ export function describir(actividad, yo) {
       return `aprobó ${titulo}`;
     case 'aprobacion_quitada':
       return `quitó su aprobación de ${titulo}`;
+    case 'rebotado':
+      return `rebotó ${titulo} a Haciendo`;
     case 'borrado':
       return `borró ${titulo}`;
     default:
@@ -76,24 +78,50 @@ const escapar = (texto) => String(texto).replace(/[&<>"']/g, (c) => ({ '&': '&am
 // Como mucho estos en el correo; del resto se dice cuántos hay.
 const MAX_EN_CORREO = 20;
 
-// El correo para `perfil` con sus `avisos` (actividad, de la más vieja a la más nueva): asunto, texto y HTML.
-export function armarResumen({ perfil, avisos, urlTablero, ahora = Date.now() }) {
-  const enlace = (actividad) => actividad.pendiente_id && `${urlTablero}?p=${actividad.pendiente_id}`;
+// El correo para `perfil` con sus `avisos` (actividad, de la más vieja a la más nueva) y los pendientes a su cargo que
+// rebotaron y todavía no abrió (`rebotados`: id, texto, por, nota, rebotado_en): asunto, texto y HTML. Los rebotados van
+// primero y destacados; su aviso de rebote no se repite en la lista.
+export function armarResumen({ perfil, avisos, rebotados = [], urlTablero, ahora = Date.now() }) {
+  const enlace = (pendienteId) => pendienteId && `${urlTablero}?p=${pendienteId}`;
   const frase = (actividad) => `${actividad.autor ?? 'Alguien'} ${describir(actividad, perfil.id)}`;
-  const mostrados = avisos.slice(-MAX_EN_CORREO).reverse();
-  const resto = avisos.length - mostrados.length;
-  const asunto = avisos.length === 1 ? frase(avisos[0]) : `Tienes ${avisos.length} avisos sin ver en Pendientes`;
-  const pie = 'Este resumen llega a las 9 de la mañana, como mucho cada 2 días, con los avisos que no viste. Para no recibir estos correos, apágalos en el menú de tu cuenta, en «Avisos por correo».';
+  const destacados = new Set(rebotados.map((rebotado) => rebotado.id));
+  const lista = avisos.filter((actividad) => !(actividad.tipo === 'rebotado' && destacados.has(actividad.pendiente_id)));
+  const mostrados = lista.slice(-MAX_EN_CORREO).reverse();
+  const resto = lista.length - mostrados.length;
+  const asunto = rebotados.length > 0
+    ? rebotados.length === 1 ? `⚠️ Rebotaron «${rebotados[0].texto}» y todavía no lo abres` : `⚠️ Tienes ${rebotados.length} pendientes rebotados sin abrir`
+    : lista.length === 1 ? frase(lista[0]) : `Tienes ${lista.length} avisos sin ver en Pendientes`;
+  const uno = rebotados.length === 1;
+  const tituloRebotes = uno ? '⚠️ Rebotado sin abrir' : '⚠️ Rebotados sin abrir';
+  const explicacion = uno
+    ? 'Lo revisaron, no lo aprobaron y volvió a Haciendo. Ábrelo para ver qué falta:'
+    : 'Los revisaron, no los aprobaron y volvieron a Haciendo. Ábrelos para ver qué falta:';
+  const quienRebote = (rebotado) => `lo rebotó ${rebotado.por ?? 'alguien'} ${haceCuanto(rebotado.rebotado_en, ahora)}`;
+  const introAvisos = lista.length === 1 ? 'Esto pasó en Pendientes y todavía no lo viste:' : 'Esto pasó en Pendientes y todavía no lo viste (lo más nuevo primero):';
+  const pie = [
+    'Este resumen llega a las 9 de la mañana, como mucho cada 2 días, con los avisos que no viste.',
+    rebotados.length > 0 && 'Lo rebotado se repite en cada resumen hasta que lo abras.',
+    'Para no recibir estos correos, apágalos en el menú de tu cuenta, en «Avisos por correo».',
+  ].filter(Boolean).join(' ');
 
   const texto = [
     `Hola, ${perfil.nombre}:`,
     '',
-    avisos.length === 1 ? 'Esto pasó en Pendientes y todavía no lo viste:' : 'Esto pasó en Pendientes y todavía no lo viste (lo más nuevo primero):',
-    '',
+    ...(rebotados.length > 0 ? [
+      `${tituloRebotes}. ${explicacion}`,
+      '',
+      ...rebotados.flatMap((rebotado) => [
+        `• «${rebotado.texto}», ${quienRebote(rebotado)}`,
+        ...(rebotado.nota ? rebotado.nota.split('\n').map((linea) => `  > ${linea}`) : []),
+        ...(enlace(rebotado.id) ? [`  ${enlace(rebotado.id)}`] : []),
+        '',
+      ]),
+    ] : []),
+    ...(lista.length > 0 ? [introAvisos, ''] : []),
     ...mostrados.flatMap((actividad) => [
       `• ${frase(actividad)} (${haceCuanto(actividad.creado_en, ahora)})`,
       ...(detalleDe(actividad) ? detalleDe(actividad).split('\n').map((linea) => `  > ${linea}`) : []),
-      ...(enlace(actividad) ? [`  ${enlace(actividad)}`] : []),
+      ...(enlace(actividad.pendiente_id) ? [`  ${enlace(actividad.pendiente_id)}`] : []),
       '',
     ]),
     ...(resto > 0 ? [`Y ${resto === 1 ? 'un aviso más' : `${resto} avisos más`} en el tablero.`, ''] : []),
@@ -103,8 +131,24 @@ export function armarResumen({ perfil, avisos, urlTablero, ahora = Date.now() })
     pie,
   ].join('\n');
 
+  const filaRebote = (rebotado) => {
+    const url = enlace(rebotado.id);
+    const titulo = url ? `<a href="${escapar(url)}" style="color:#7f1d1d;text-decoration:none">«${escapar(rebotado.texto)}»</a>` : `«${escapar(rebotado.texto)}»`;
+    return `<tr><td style="padding:8px 0;border-top:1px solid #fecaca">
+      <div style="font-size:15px;line-height:1.4;font-weight:600">${titulo}</div>
+      ${rebotado.nota ? `<div style="margin-top:6px;padding-left:10px;border-left:3px solid #fca5a5;color:#7f1d1d;font-size:14px;white-space:pre-line">${escapar(rebotado.nota)}</div>` : ''}
+      <div style="margin-top:4px;color:#991b1b;font-size:12px">${escapar(quienRebote(rebotado))}</div>
+    </td></tr>`;
+  };
+  const cajaRebotes = rebotados.length === 0 ? '' : `<tr><td style="padding:8px 0 16px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fef2f2;border:1px solid #fecaca;border-left:4px solid #dc2626;border-radius:8px;padding:12px 14px">
+      <tr><td style="font-size:16px;font-weight:700;color:#b91c1c">${escapar(tituloRebotes)}</td></tr>
+      <tr><td style="font-size:14px;color:#991b1b;padding:4px 0 8px">${escapar(explicacion)}</td></tr>
+      ${rebotados.map(filaRebote).join('')}
+    </table>
+  </td></tr>`;
   const filas = mostrados.map((actividad) => {
-    const url = enlace(actividad);
+    const url = enlace(actividad.pendiente_id);
     const titulo = url ? `<a href="${escapar(url)}" style="color:#111827;text-decoration:none">${escapar(frase(actividad))}</a>` : escapar(frase(actividad));
     const detalle = detalleDe(actividad);
     return `<tr><td style="padding:12px 0;border-bottom:1px solid #e5e7eb">
@@ -116,8 +160,9 @@ export function armarResumen({ perfil, avisos, urlTablero, ahora = Date.now() })
   const html = `<!doctype html><html lang="es"><body style="margin:0;background:#f3f4f6;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 12px"><tr><td align="center">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:12px;padding:24px">
-      <tr><td style="font-size:16px;padding-bottom:4px">Hola, ${escapar(perfil.nombre)}:</td></tr>
-      <tr><td style="font-size:14px;color:#4b5563;padding-bottom:8px">Esto pasó en Pendientes y todavía no lo viste${avisos.length > 1 ? ' (lo más nuevo primero)' : ''}:</td></tr>
+      <tr><td style="font-size:16px;padding-bottom:${rebotados.length > 0 ? 12 : 4}px">Hola, ${escapar(perfil.nombre)}:</td></tr>
+      ${cajaRebotes}
+      ${lista.length > 0 ? `<tr><td style="font-size:14px;color:#4b5563;padding-bottom:8px">${escapar(introAvisos)}</td></tr>` : ''}
       ${filas}
       ${resto > 0 ? `<tr><td style="padding-top:12px;font-size:14px;color:#4b5563">Y ${resto === 1 ? 'un aviso más' : `${resto} avisos más`} en el tablero.</td></tr>` : ''}
       <tr><td style="padding-top:20px"><a href="${escapar(urlTablero)}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 16px;border-radius:8px">Abrir el tablero</a></td></tr>

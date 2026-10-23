@@ -1,5 +1,5 @@
 import type { HTMLAttributes } from "react"
-import { BadgeCheck, Check } from "lucide-react"
+import { BadgeCheck, Check, Undo2 } from "lucide-react"
 import { cn } from "cn"
 
 import { PerfilAvatar } from "@/components/perfil-avatar"
@@ -9,13 +9,15 @@ import type { Pendiente, Perfil } from "@/lib/api"
 // "Favio", "Favio y Kenny", "Favio, Kenny y Junior".
 const lista = new Intl.ListFormat("es", { type: "conjunction" })
 
-// Quiénes aprobaron un pendiente hecho y el check para aprobar su funcionalidad (o quitar la aprobación propia).
-// La aprueban otros perfiles: su responsable no (es su trabajo) ni la cuenta del equipo (no se sabría quién).
+// Quiénes aprobaron un pendiente hecho y el check para aprobar su funcionalidad (o quitar la aprobación propia); al lado,
+// «Rebotar» si al revisarlo no está bien. Lo revisan otros perfiles: su responsable no (es su trabajo) ni la cuenta del
+// equipo (no se sabría quién).
 export function Aprobacion({
   pendiente,
   perfilesPorId,
   yo,
   onAprobar,
+  onRebotar,
   compacto = false,
   botonProps,
 }: {
@@ -23,6 +25,8 @@ export function Aprobacion({
   perfilesPorId: Map<string, Perfil>
   yo: string | null
   onAprobar: (aprobar: boolean) => void
+  // Abre el diálogo para devolverlo a Haciendo con lo que falta.
+  onRebotar: () => void
   // En la tarjeta: más chico, con el texto corto.
   compacto?: boolean
   // En la tarjeta, para que tocar el botón no empiece a arrastrarla.
@@ -75,6 +79,19 @@ export function Aprobacion({
         <span className="min-w-0 truncate text-muted-foreground" title={aprobadores.length > 0 ? `Aprobado por ${nombres}` : undefined}>
           {resumen}
         </span>
+      )}
+      {puedo && (
+        <Button
+          variant="ghost"
+          size={compacto ? "xs" : "sm"}
+          aria-label={`Rebotar "${pendiente.texto}" a Haciendo`}
+          title="No está bien: devolverlo a Haciendo con lo que falta"
+          className="ml-auto shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+          {...botonProps}
+          onClick={onRebotar}
+        >
+          <Undo2 /> Rebotar
+        </Button>
       )}
     </div>
   )

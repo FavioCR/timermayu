@@ -28,6 +28,12 @@ export type Pendiente = {
   actualizado_en: string
   // Cuándo pasó a Hecho; null si no está hecho. El tablero solo muestra los hechos de la última semana.
   hecho_en: string | null
+  // Si alguien lo revisó en Hecho y no lo aprobó: cuándo, quién y qué falta. Vuelve a Haciendo marcado hasta que regrese
+  // a Hecho. rebote_visto_en: cuándo lo abrió su responsable (hasta entonces se le recuerda por correo).
+  rebotado_en: string | null
+  rebotado_por: string | null
+  rebote_nota: string | null
+  rebote_visto_en: string | null
 }
 
 // Solo el detalle trae la descripción: el documento del editor en JSON.
@@ -147,6 +153,7 @@ export type TipoActividad =
   | "tipo"
   | "aprobado"
   | "aprobacion_quitada"
+  | "rebotado"
 
 // Lo que se anota según el tipo: de/a en los cambios, extracto y menciones (ids de perfil) en los mensajes, etc.
 export type DatosActividad = {
@@ -259,6 +266,9 @@ const MENSAJES: Record<string, string> = {
   aprobar_con_perfil: "Para aprobar, entra con tu perfil.",
   aprobar_solo_hechos: "Solo se aprueba lo que está en Hecho.",
   aprobar_lo_propio: "Lo que está a tu cargo lo aprueba otra persona.",
+  rebotar_con_perfil: "Para rebotar, entra con tu perfil.",
+  rebotar_solo_hechos: "Solo se rebota lo que está en Hecho.",
+  rebotar_lo_propio: "Lo que está a tu cargo lo revisa otra persona.",
   correo_duplicado: "Ese correo ya lo tiene otro perfil.",
   contrasena_invalida: "La contraseña debe tener al menos 8 caracteres.",
   solo_el_mismo: "Ese perfil ya tiene contraseña: solo esa persona puede cambiarlo.",
@@ -648,6 +658,9 @@ export const api = {
     pedir<{ pendiente: Pendiente }>(credenciales, "POST", `/${id}/aprobacion`).then((data) => data.pendiente),
   desaprobar: (credenciales: string, id: string) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "DELETE", `/${id}/aprobacion`).then((data) => data.pendiente),
+  // Revisado y no aprobado: vuelve a Haciendo, primero y marcado, con una nota de lo que falta.
+  rebotar: (credenciales: string, id: string, nota: string) =>
+    pedir<{ pendiente: Pendiente }>(credenciales, "POST", `/${id}/rebote`, { nota }).then((data) => data.pendiente),
   ordenar: (credenciales: string, items: { id: string; estado: Estado }[]) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "PUT", "/orden", { items }).then((data) => data.pendientes),
   subirImagen,

@@ -97,7 +97,8 @@ const LATIDO_MS = 9000;
 const MAX_CONEXIONES = 500;
 // Avisos por correo, como pidió el usuario: a las 9 de la mañana (hora de Lima, la del equipo) le llega un resumen de lo
 // que no vio a quien tenga avisos de hace más de una hora sin ver, como mucho uno cada 2 días por persona. Lo de más de
-// 3 días ya no se manda: al encenderlo no le llega a nadie todo lo atrasado.
+// 3 días ya no se manda: al encenderlo no le llega a nadie todo lo atrasado. Un pendiente que rebotó y su responsable
+// no abrió va destacado arriba en cada correo (y basta para mandarlo) hasta que lo abra.
 const REGLAS_CORREO = { hora: 9, zona: 'America/Lima', dias: 2, esperaMs: 60 * 60_000, antiguedadMs: 3 * 24 * 60 * 60_000 };
 const REVISAR_CORREOS_MS = 5 * 60_000;
 const DIA_MS = 24 * 60 * 60_000;
@@ -163,6 +164,7 @@ const REUSAR_ARCHIVO_PATH = new RegExp(`^/api/pendientes/${UUID}/archivos/reusar
 const TRASPASO_PATH = new RegExp(`^/api/pendientes/${UUID}/traspaso$`);
 const EVIDENCIA_PATH = new RegExp(`^/api/pendientes/${UUID}/evidencia$`);
 const APROBACION_PATH = new RegExp(`^/api/pendientes/${UUID}/aprobacion$`);
+const REBOTE_PATH = new RegExp(`^/api/pendientes/${UUID}/rebote$`);
 const ETIQUETA_PATH = new RegExp(`^/api/pendientes/etiquetas/${UUID}$`);
 const CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}$`);
 const NOTAS_DE_CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/notas$`);
@@ -180,13 +182,14 @@ const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH, TODOS_LOS_ARCHIVOS_PATH,
   TRAER_IMAGEN_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
-  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, APROBACION_PATH, ETIQUETA_PATH,
+  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, APROBACION_PATH, REBOTE_PATH, ETIQUETA_PATH,
   CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH, RECURSO_REPETIDO_PATH,
   PARTES_DE_ARCHIVO_PATH, ENLACE_DE_ARCHIVO_PATH, ARCHIVO_REPETIDO_PATH, REUSAR_ARCHIVO_PATH];
 // Las filas que apuntan a un archivo guardado por su contenido (DATA_DIR/blobs/<sha256>).
 const TABLAS_CON_BLOB = ['imagenes', 'archivos', 'nota_imagenes', 'recursos'];
 const SHA256 = /^[0-9a-f]{64}$/;
 const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en, hecho_en,
+  rebotado_en, rebotado_por, rebote_nota, rebote_visto_en,
   (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios,
   (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0 AND a.subido IS NULL) AS num_archivos,
   (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0 AND a.subido IS NULL AND a.tipo LIKE 'video/%') AS num_videos,
@@ -476,6 +479,23 @@ const MIGRACIONES = [
   // Mientras tanto viven en subidas/<id>.parcial, sin sha256, y no se listan ni se cuentan.
   (db) => {
     db.exec('ALTER TABLE archivos ADD COLUMN subido INTEGER');
+  },
+  // Rebotes: quien revisa un pendiente hecho y no lo aprueba lo devuelve a Haciendo con una nota de lo que falta. Queda
+  // marcado (y primero en su columna) hasta que vuelve a Hecho. rebote_visto_en: cuándo lo abrió su responsable; hasta
+  // entonces se le recuerda en cada correo de avisos. Si cambia de responsable, el nuevo todavía no lo vio.
+  (db) => {
+    db.exec(`
+      ALTER TABLE pendientes ADD COLUMN rebotado_en TEXT;
+      ALTER TABLE pendientes ADD COLUMN rebotado_por TEXT REFERENCES perfiles(id) ON DELETE SET NULL;
+      ALTER TABLE pendientes ADD COLUMN rebote_nota TEXT;
+      ALTER TABLE pendientes ADD COLUMN rebote_visto_en TEXT;
+      CREATE TRIGGER rebote_al_volver_a_hecho AFTER UPDATE OF estado ON pendientes
+        WHEN NEW.estado = 'hecho' AND NEW.rebotado_en IS NOT NULL
+        BEGIN UPDATE pendientes SET rebotado_en = NULL, rebotado_por = NULL, rebote_nota = NULL, rebote_visto_en = NULL WHERE id = NEW.id; END;
+      CREATE TRIGGER rebote_con_otro_responsable AFTER UPDATE OF perfil_id ON pendientes
+        WHEN NEW.rebotado_en IS NOT NULL AND NEW.perfil_id IS NOT OLD.perfil_id
+        BEGIN UPDATE pendientes SET rebote_visto_en = NULL WHERE id = NEW.id; END;
+    `);
   },
 ];
 
@@ -847,6 +867,14 @@ export function parseTraspaso(input) {
   if (input.nota !== undefined && input.nota !== null && typeof input.nota !== 'string') throw httpError(422, 'nota_invalida');
   if (nota.length > MAX_NOTA) throw httpError(422, 'nota_invalida');
   return { perfil_id: input.perfil_id, nota: nota || null };
+}
+
+// Rebotar un pendiente hecho: si se quiere, con una nota de lo que falta.
+export function parseRebote(input) {
+  if (input.nota !== undefined && input.nota !== null && typeof input.nota !== 'string') throw httpError(422, 'nota_invalida');
+  const nota = input.nota?.trim() ?? '';
+  if (nota.length > MAX_NOTA) throw httpError(422, 'nota_invalida');
+  return { nota: nota || null };
 }
 
 // Sin ids marca todos los avisos como leídos.
@@ -1553,29 +1581,46 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     // A quién le toca un correo y con qué: a quien tiene correo, no lo apagó y no recibió ninguno desde `desde`, si su
     // aviso sin ver más viejo lleva más de `esperaMs`. Van todos los que no vio ni le llegaron ya por correo (de los últimos
     // `antiguedadMs`), del más viejo al más nuevo. Solo lo que puede ver, como en la campana.
+    // Aparte van los pendientes a su cargo que rebotaron hace más de `esperaMs` y todavía no abrió: esos se repiten en
+    // cada correo (y bastan para mandarlo) hasta que los abra.
     avisosParaCorreo({ ahora, desde, esperaMs, antiguedadMs }) {
       const hace = (ms) => new Date(ahora - ms).toISOString();
+      const desdeIso = new Date(desde).toISOString();
       const perfiles = db.prepare(`SELECT id, nombre, correo FROM perfiles p WHERE coalesce(correo, '') != ''
         AND NOT EXISTS (SELECT 1 FROM ajustes WHERE clave = 'avisos_por_correo:' || p.id AND valor = 'no')
-        AND NOT EXISTS (SELECT 1 FROM notificaciones WHERE perfil_id = p.id AND correo_en >= ?)`).all(new Date(desde).toISOString());
+        AND NOT EXISTS (SELECT 1 FROM ajustes WHERE clave = 'ultimo_correo:' || p.id AND valor >= ?)
+        AND NOT EXISTS (SELECT 1 FROM notificaciones WHERE perfil_id = p.id AND correo_en >= ?)`).all(desdeIso, desdeIso);
       const sinVer = db.prepare(`SELECT n.id AS notificacion_id, n.creado_en AS avisado_en, a.id, a.pendiente_id, a.texto_pendiente,
           a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en
         FROM notificaciones n JOIN actividad a ON a.id = n.actividad_id
         WHERE n.perfil_id = ? AND n.leida_en IS NULL AND n.correo_en IS NULL AND n.creado_en > ? AND ${ACTIVIDAD_VISIBLE}
         ORDER BY n.creado_en, n.rowid`);
+      const rebotados = db.prepare(`SELECT id, texto, rebotado_en, rebote_nota AS nota, (SELECT nombre FROM perfiles WHERE id = rebotado_por) AS por
+        FROM pendientes WHERE perfil_id = ? AND rebotado_en IS NOT NULL AND rebote_visto_en IS NULL AND rebotado_en <= ? AND ${PENDIENTE_VISIBLE}
+        ORDER BY rebotado_en, rowid`);
       return perfiles
-        .map((perfil) => ({ perfil: { ...perfil }, avisos: sinVer.all(perfil.id, hace(antiguedadMs), perfil.id, perfil.id) }))
-        .filter(({ avisos }) => avisos.length > 0 && avisos[0].avisado_en <= hace(esperaMs))
-        .map(({ perfil, avisos }) => ({
+        .map((perfil) => ({
+          perfil: { ...perfil },
+          avisos: sinVer.all(perfil.id, hace(antiguedadMs), perfil.id, perfil.id),
+          rebotados: rebotados.all(perfil.id, hace(esperaMs), perfil.id).map((row) => ({ ...row })),
+        }))
+        .filter(({ avisos, rebotados }) => rebotados.length > 0 || (avisos.length > 0 && avisos[0].avisado_en <= hace(esperaMs)))
+        .map(({ perfil, avisos, rebotados }) => ({
           perfil,
           ids: avisos.map((aviso) => aviso.notificacion_id),
           avisos: avisos.map(({ notificacion_id: _id, avisado_en: _en, ...actividad }) => actividadFila(actividad)),
+          rebotados,
         }));
     },
 
-    marcarAvisosEnviados(ids, ahora) {
+    // Le llegó el correo a `perfilId` con los avisos `ids`: no se repiten, y hasta dentro de unos días no recibe otro.
+    marcarAvisosEnviados(perfilId, ids, ahora) {
       const marcar = db.prepare('UPDATE notificaciones SET correo_en = ? WHERE id = ?');
-      transaction(db, () => ids.forEach((id) => marcar.run(new Date(ahora).toISOString(), id)));
+      transaction(db, () => {
+        ids.forEach((id) => marcar.run(new Date(ahora).toISOString(), id));
+        db.prepare('INSERT INTO ajustes (clave, valor) VALUES (?, ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor')
+          .run(`ultimo_correo:${perfilId}`, new Date(ahora).toISOString());
+      });
     },
 
     // La IA del equipo. Las claves solo salen de aquí hacia el proveedor elegido.
@@ -1889,6 +1934,31 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       });
     },
 
+    // Quien revisa un pendiente hecho y no lo aprueba lo rebota: vuelve a Haciendo, primero en la columna, marcado hasta
+    // que vuelva a Hecho. Como al aprobar, no lo rebota su responsable ni la cuenta del equipo. Se avisa al responsable
+    // y a quien lo creó; las aprobaciones se pierden al salir de Hecho.
+    rebotar(quien, id, { nota }) {
+      const yo = quien.perfil_id;
+      const actual = pendiente(yo, id);
+      if (!actual) return null;
+      if (!yo) throw httpError(403, 'rebotar_con_perfil');
+      if (actual.estado !== 'hecho') throw httpError(409, 'rebotar_solo_hechos');
+      if (actual.perfil_id === yo) throw httpError(409, 'rebotar_lo_propio');
+      return transaction(db, () => {
+        const ahora = new Date().toISOString();
+        db.prepare(`UPDATE pendientes SET estado = 'haciendo', hecho_en = NULL, posicion = ?, rebotado_en = ?, rebotado_por = ?, rebote_nota = ?,
+          rebote_visto_en = NULL, actualizado_en = ? WHERE id = ?`).run(arriba(), ahora, yo, nota, ahora, id);
+        registrar(quien, actual, 'rebotado', nota && { nota }, [actual.perfil_id, actual.creado_por]);
+        return pendiente(yo, id);
+      });
+    },
+
+    // Su responsable abrió el pendiente rebotado: ya no se le recuerda por correo.
+    verRebote(yo, id) {
+      if (yo) db.prepare('UPDATE pendientes SET rebote_visto_en = ? WHERE id = ? AND perfil_id = ? AND rebotado_en IS NOT NULL AND rebote_visto_en IS NULL')
+        .run(new Date().toISOString(), id, yo);
+    },
+
     ordenar(quien, orden) {
       const yo = quien.perfil_id;
       const now = new Date().toISOString();
@@ -2134,7 +2204,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
 
     // Después de pasar un pendiente a Hecho: los que `yo` terminó seguidos sin evidencia, del último hacia atrás. Cuenta lo
     // que está en Hecho a su cargo y pasó él mismo a Hecho; tiene evidencia si escribió en su chat desde que lo empezó (la
-    // última vez que pasó a Haciendo, que salió de Hecho o que se lo asignaron; si no, desde que se creó). Se recuerda
+    // última vez que pasó a Haciendo, que salió de Hecho (también si lo rebotaron) o que se lo asignaron; si no, desde que se creó). Se recuerda
     // cuando el recién terminado es el tercero seguido, o uno más después de esos.
     evidencia(yo, pendienteId) {
       if (!pendiente(yo, pendienteId)) return null;
@@ -2144,7 +2214,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       const quienTermino = db.prepare(`SELECT perfil_id FROM actividad WHERE pendiente_id = ? AND tipo = 'estado'
         AND json_extract(datos, '$.a') = 'hecho' ORDER BY creado_en DESC, rowid DESC LIMIT 1`);
       const empezado = db.prepare(`SELECT MAX(creado_en) AS desde FROM actividad WHERE pendiente_id = ? AND (
-        (tipo = 'estado' AND (json_extract(datos, '$.a') = 'haciendo' OR json_extract(datos, '$.de') = 'hecho'))
+        (tipo = 'estado' AND (json_extract(datos, '$.a') = 'haciendo' OR json_extract(datos, '$.de') = 'hecho')) OR tipo = 'rebotado'
         OR (tipo IN ('asignado', 'traspaso') AND json_extract(datos, '$.a_id') = ?))`);
       const escribio = db.prepare('SELECT 1 FROM comentarios WHERE pendiente_id = ? AND perfil_id = ? AND creado_en >= ? LIMIT 1');
       const sinEvidencia = [];
@@ -2595,10 +2665,10 @@ export function createApp(options = {}) {
       const pendientes = repo.avisosParaCorreo({
         ahora, desde: medianoche - (reglasCorreo.dias - 1) * DIA_MS, esperaMs: reglasCorreo.esperaMs, antiguedadMs: reglasCorreo.antiguedadMs,
       });
-      for (const { perfil, ids, avisos } of pendientes) {
+      for (const { perfil, ids, avisos, rebotados } of pendientes) {
         try {
-          await correo.enviar({ to: perfil.correo, ...armarResumen({ perfil, avisos, urlTablero, ahora }) });
-          repo.marcarAvisosEnviados(ids, ahora);
+          await correo.enviar({ to: perfil.correo, ...armarResumen({ perfil, avisos, rebotados, urlTablero, ahora }) });
+          repo.marcarAvisosEnviados(perfil.id, ids, ahora);
         } catch (error) {
           // Se vuelve a intentar en la próxima vuelta.
           console.error(`No se pudo mandar el correo de avisos a ${perfil.nombre}: ${error.message}`);
@@ -2642,7 +2712,7 @@ export function createApp(options = {}) {
     if (method === 'GET') return null;
     const deRuta = (ruta) => pathname.match(ruta)?.[1];
     if (pathname === API_PATH || pathname === ORDER_PATH) return { tipo: 'pendientes' };
-    const pendienteId = deRuta(ITEM_PATH) ?? deRuta(TRASPASO_PATH) ?? deRuta(APROBACION_PATH);
+    const pendienteId = deRuta(ITEM_PATH) ?? deRuta(TRASPASO_PATH) ?? deRuta(APROBACION_PATH) ?? deRuta(REBOTE_PATH);
     if (pendienteId) return { tipo: 'pendientes', pendiente_id: pendienteId };
     if (deRuta(COMENTARIOS_PATH)) return { tipo: 'comentarios', pendiente_id: deRuta(COMENTARIOS_PATH) };
     if (deRuta(COMENTARIO_PATH)) return { tipo: 'comentarios', pendiente_id: repo.pendienteDeComentario(deRuta(COMENTARIO_PATH)) };
@@ -3004,6 +3074,10 @@ export function createApp(options = {}) {
       const pendienteDeAprobacion = url.pathname.match(APROBACION_PATH)?.[1];
       if (pendienteDeAprobacion && req.method === 'POST') return enviar(200, 'pendiente', repo.aprobar(usuario, pendienteDeAprobacion));
       if (pendienteDeAprobacion && req.method === 'DELETE') return enviar(200, 'pendiente', repo.desaprobar(usuario, pendienteDeAprobacion));
+      const pendienteDeRebote = url.pathname.match(REBOTE_PATH)?.[1];
+      if (pendienteDeRebote && req.method === 'POST') {
+        return enviar(200, 'pendiente', repo.rebotar(usuario, pendienteDeRebote, parseRebote(await readJson(req))));
+      }
 
       if (url.pathname === PERFILES_PATH && req.method === 'GET') return json(res, 200, { perfiles: repo.listarPerfiles() });
       // El nombre de la cuenta del equipo no puede ser un perfil: al entrar no se sabría cuál es.
@@ -3078,7 +3152,11 @@ export function createApp(options = {}) {
       }
 
       const id = url.pathname.match(ITEM_PATH)?.[1];
-      if (id && req.method === 'GET') return enviar(200, 'pendiente', repo.detallePendiente(yo, id));
+      if (id && req.method === 'GET') {
+        // Abrirlo es verlo: si estaba rebotado y es su responsable, deja de recordársele por correo.
+        repo.verRebote(yo, id);
+        return enviar(200, 'pendiente', repo.detallePendiente(yo, id));
+      }
       if (id && req.method === 'PATCH') {
         return enviar(200, 'pendiente', await repo.actualizarPendiente(usuario, id, parsePendiente(await readJson(req), { partial: true })));
       }
@@ -3125,7 +3203,10 @@ if (isMain && process.argv[2] === 'quitar-contrasena') {
       creado_en: new Date(ahora - minutos * 60_000).toISOString(),
     });
     const avisos = [ejemplo('asignado', { a: 'ti', a_id: 'prueba' }, 90), ejemplo('comentario', { menciones: ['prueba'], extracto: 'Si te llegó, el correo funciona.' }, 70)];
-    correo.enviar({ to: process.argv[3], ...armarResumen({ perfil: { id: 'prueba', nombre: 'prueba' }, avisos, urlTablero: process.env.URL_TABLERO ?? URL_TABLERO, ahora }) })
+    const rebotados = [{ id: null, texto: 'Correo de prueba', por: 'Pendientes', nota: 'Así se ve un pendiente rebotado que todavía no abres.',
+      rebotado_en: new Date(ahora - 26 * 60 * 60_000).toISOString() }];
+    const perfil = { id: 'prueba', nombre: 'prueba' };
+    correo.enviar({ to: process.argv[3], ...armarResumen({ perfil, avisos, rebotados, urlTablero: process.env.URL_TABLERO ?? URL_TABLERO, ahora }) })
       .then((info) => console.log(`Enviado (${info.messageId}).`), (error) => {
         console.error(`No se pudo mandar: ${error.message}`);
         process.exitCode = 1;

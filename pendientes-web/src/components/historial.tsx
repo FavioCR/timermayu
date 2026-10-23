@@ -15,6 +15,7 @@ import {
   Sparkles,
   Tag,
   Trash2,
+  TriangleAlert,
   UserRound,
 } from "lucide-react"
 
@@ -37,6 +38,7 @@ const ICONOS: Record<TipoActividad, typeof Plus> = {
   tipo: GitCommitHorizontal,
   aprobado: BadgeCheck,
   aprobacion_quitada: BadgeX,
+  rebotado: TriangleAlert,
 }
 
 function agruparPorDia(items: Actividad[]) {
@@ -74,7 +76,12 @@ export function ListaActividad({
             {lista.map((actividad) => {
               const Icono =
                 actividad.tipo === "estado" && actividad.datos?.a === "hecho" ? CircleCheck : actividad.datos?.ia ? Sparkles : ICONOS[actividad.tipo]
-              const color = actividad.tipo === "estado" ? COLUMNAS.find((columna) => columna.id === actividad.datos?.a)?.color : undefined
+              const color =
+                actividad.tipo === "estado"
+                  ? COLUMNAS.find((columna) => columna.id === actividad.datos?.a)?.color
+                  : actividad.tipo === "rebotado"
+                    ? "var(--destructive)"
+                    : undefined
               const abrible = onAbrir && actividad.pendiente_id && abribles?.has(actividad.pendiente_id)
               const detalle = detalleDe(actividad)
               const frase = (

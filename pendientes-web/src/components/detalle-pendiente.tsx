@@ -9,6 +9,7 @@ import { EtiquetasSelector } from "@/components/etiquetas-selector"
 import { HistorialPendiente } from "@/components/historial"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { ProyectoCombobox } from "@/components/proyecto-combobox"
+import { AvisoRebote } from "@/components/rebotar-dialog"
 import { TipoSelect } from "@/components/tipo-select"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -62,6 +63,8 @@ type Props = {
   // Abre otro pendiente (uno donde también está un archivo de este).
   onAbrirPendiente: (id: string) => void
   onAprobar: (id: string, aprueba: boolean) => void
+  // Revisado y no aprobado: abre el diálogo para devolverlo a Haciendo.
+  onRebotar: (pendiente: Pendiente) => void
   onBorrar: (pendiente: Pendiente) => void
   onCerrar: () => void
   onSalir: () => void
@@ -109,6 +112,7 @@ function Contenido({
   onPasar,
   onAbrirPendiente,
   onAprobar,
+  onRebotar,
   onBorrar,
   onSalir,
   enfocarChat = 0,
@@ -306,6 +310,7 @@ function Contenido({
       </SheetHeader>
 
       <div className="flex flex-col gap-6 px-4 pb-6">
+        <AvisoRebote pendiente={pendiente} por={pendiente.rebotado_por ? (perfilesPorId.get(pendiente.rebotado_por) ?? null) : null} />
         <dl className="grid grid-cols-[6.5rem_1fr] items-center gap-x-3 gap-y-2 text-sm">
           <dt className="text-muted-foreground">Estado</dt>
           <dd className="flex flex-wrap items-center gap-2">
@@ -338,6 +343,7 @@ function Contenido({
                   perfilesPorId={perfilesPorId}
                   yo={usuario?.perfil_id ?? null}
                   onAprobar={(aprueba) => onAprobar(id, aprueba)}
+                  onRebotar={() => onRebotar(pendiente)}
                 />
               </dd>
             </>

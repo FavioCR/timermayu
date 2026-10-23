@@ -82,6 +82,7 @@ import {
 } from "@/components/kibo-ui/kanban"
 import { Notificaciones } from "@/components/notificaciones"
 import { PasarDialog } from "@/components/pasar-dialog"
+import { AvisoRebote, RebotarDialog } from "@/components/rebotar-dialog"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { RecordatorioEvidencia, type Recordatorio } from "@/components/recordatorio-evidencia"
 import type { CambiosPerfil } from "@/components/perfiles-dialog"
@@ -169,14 +170,24 @@ const ESPERA_EVIDENCIA_MS = 2000
 
 const aTarjeta = (pendiente: Pendiente): Tarjeta => ({ ...pendiente, name: pendiente.texto, column: pendiente.estado })
 
-// Hecho va de lo último terminado a lo más viejo; lo que recién entra (todavía sin fecha), arriba. Las demás columnas
-// quedan en su orden.
+// Hecho va de lo último terminado a lo más viejo; lo que recién entra (todavía sin fecha), arriba. En las demás columnas
+// lo rebotado va primero; el resto queda en su orden.
 const porHechoReciente = (a: Tarjeta, b: Tarjeta) => (b.hecho_en ?? "\uffff").localeCompare(a.hecho_en ?? "\uffff")
-function conHechosRecientesPrimero(tarjetas: Tarjeta[]) {
-  const hechos = tarjetas.filter((tarjeta) => tarjeta.column === "hecho").sort(porHechoReciente)
-  let i = 0
-  return tarjetas.map((tarjeta) => (tarjeta.column === "hecho" ? hechos[i++] : tarjeta))
+const primeroRebotados = (a: Tarjeta, b: Tarjeta) => Number(b.rebotado_en !== null) - Number(a.rebotado_en !== null)
+function enSuOrden(tarjetas: Tarjeta[]) {
+  const columnas = new Map<string, Tarjeta[]>()
+  for (const tarjeta of tarjetas) columnas.set(tarjeta.column, [...(columnas.get(tarjeta.column) ?? []), tarjeta])
+  for (const [columna, lista] of columnas) lista.sort(columna === "hecho" ? porHechoReciente : primeroRebotados)
+  const usadas = new Map<string, number>()
+  return tarjetas.map((tarjeta) => {
+    const i = usadas.get(tarjeta.column) ?? 0
+    usadas.set(tarjeta.column, i + 1)
+    return columnas.get(tarjeta.column)![i]
+  })
 }
+
+// Al volver a Hecho deja de estar rebotado (el servidor hace lo mismo).
+const SIN_REBOTE = { rebotado_en: null, rebotado_por: null, rebote_nota: null, rebote_visto_en: null } satisfies Partial<Pendiente>
 
 const firmaDelOrden = (tarjetas: Tarjeta[]) => tarjetas.map((tarjeta) => `${tarjeta.id}:${tarjeta.column}`).join(",")
 
@@ -438,6 +449,7 @@ export function Tablero({
   const [sinLeer, setSinLeer] = useState<Map<string, SinLeer>>(() => new Map())
   // El pendiente hecho que se está pasando a otra persona.
   const [pasando, setPasando] = useState<Pendiente | null>(null)
+  const [rebotando, setRebotando] = useState<Pendiente | null>(null)
   const [recordatorio, setRecordatorio] = useState<Recordatorio | null>(null)
   // Abrir un pendiente con el campo del chat listo para escribir (`vez` cambia con cada pedido).
   const [chatEnfocado, setChatEnfocado] = useState<{ id: string; vez: number } | null>(null)
@@ -667,7 +679,7 @@ export function Tablero({
   const archivadosEnColumna = useMemo(() => archivadosEnBusqueda.slice(0, archivadosMostrados), [archivadosEnBusqueda, archivadosMostrados])
   const enColumnas = useMemo(
     () =>
-      conHechosRecientesPrimero([
+      enSuOrden([
         ...visibles.filter((tarjeta) => tarjeta.id === arrastrada || coincide(textoDe(tarjeta), busquedas[tarjeta.column] ?? "")),
         ...archivadosEnColumna,
       ]),
@@ -869,6 +881,25 @@ export function Tablero({
     }
   }
 
+  // Revisado y no aprobado: vuelve a Haciendo, primero en la columna y marcado hasta que vuelva a Hecho.
+  async function rebotar(nota: string) {
+    if (!rebotando) return false
+    try {
+      const rebotado = await api.rebotar(credenciales, rebotando.id, nota)
+      setTarjetas((actuales) => [aTarjeta(rebotado), ...actuales.filter((t) => t.id !== rebotado.id)])
+      setRebotando(null)
+      setError("")
+      const responsable = rebotado.perfil_id ? perfilesPorId.get(rebotado.perfil_id) : undefined
+      toast.success(`«${rebotado.texto}» volvió a Haciendo`, {
+        description: responsable ? `Rebotado: ${responsable.nombre} recibe el aviso.` : "Rebotado: queda primero en Haciendo.",
+      })
+      return true
+    } catch (err) {
+      fallar(err)
+      return false
+    }
+  }
+
   // Al pasar a Hecho algo a su cargo, dos segundos después pregunta si ya van tres seguidos sin un mensaje final en el chat
   // (lo decide el servidor): entonces le recuerda dejar la evidencia.
   const revisarEvidencia = useCallback(
@@ -900,7 +931,11 @@ export function Tablero({
     async (id: string, cambios: CambiosPendiente) => {
       const { descripcion: _descripcion, ...enLaTarjeta } = cambios
       const fecha = (t: Tarjeta) =>
-        cambios.estado && cambios.estado !== t.estado ? { hecho_en: cambios.estado === "hecho" ? new Date().toISOString() : null } : {}
+        cambios.estado && cambios.estado !== t.estado
+          ? cambios.estado === "hecho"
+            ? { hecho_en: new Date().toISOString(), ...SIN_REBOTE }
+            : { hecho_en: null }
+          : {}
       setTarjetas((actuales) => {
         const antes = actuales.find((t) => t.id === id)
         if (!antes) return actuales
@@ -1105,12 +1140,16 @@ export function Tablero({
   }
 
   // El tablero nunca tiene todo (los hechos viejos no están): su nuevo orden se acomoda en la lista completa.
-  // Lo que cambia de columna anota (o borra) cuándo se terminó, como hará el servidor.
+  // Lo que cambia de columna anota (o borra) cuándo se terminó y, si llega a Hecho, deja de estar rebotado, como hará el servidor.
   function cambiarTablero(nuevas: Tarjeta[]) {
     const columnaAntes = new Map(ultimas.current.map((tarjeta) => [tarjeta.id, tarjeta.column]))
     const momento = new Date().toISOString()
     const conFecha = nuevas.map((tarjeta) =>
-      columnaAntes.get(tarjeta.id) === tarjeta.column ? tarjeta : { ...tarjeta, hecho_en: tarjeta.column === "hecho" ? momento : null }
+      columnaAntes.get(tarjeta.id) === tarjeta.column
+        ? tarjeta
+        : tarjeta.column === "hecho"
+          ? { ...tarjeta, hecho_en: momento, ...SIN_REBOTE }
+          : { ...tarjeta, hecho_en: null }
     )
     const todas = mezclar(ultimas.current, conFecha)
     ultimas.current = todas
@@ -1672,6 +1711,7 @@ export function Tablero({
                         // El borde toma el color de su tipo; sin tipo, el de su primera etiqueta.
                         const colorBorde = tipoDe(tarjeta.tipo)?.color ?? susEtiquetas[0]?.color
                         const aviso = sinLeer.get(tarjeta.id)
+                        const rebotada = tarjeta.rebotado_en !== null
                         return (
                           <Fragment key={tarjeta.id}>
                             {archivadosEnColumna[0]?.id === tarjeta.id && <SeparadorDeArchivados />}
@@ -1682,7 +1722,12 @@ export function Tablero({
                               cardStyle={colorBorde ? ({ "--borde": colorBorde } as CSSProperties) : undefined}
                               className={cn(
                                 "rounded-none transition-shadow",
-                                colorBorde ? "ring-(--borde)/70 hover:ring-2 hover:ring-(--borde)" : "ring-border hover:ring-primary/50"
+                                // Rebotada: el borde de atención en vez del de su tipo.
+                                rebotada
+                                  ? "ring-2 ring-destructive/70 hover:ring-destructive"
+                                  : colorBorde
+                                    ? "ring-(--borde)/70 hover:ring-2 hover:ring-(--borde)"
+                                    : "ring-border hover:ring-primary/50"
                               )}
                             >
                               <div
@@ -1744,6 +1789,13 @@ export function Tablero({
                                     <Trash2 />
                                   </Button>
                                 </div>
+                                {rebotada && (
+                                  <AvisoRebote
+                                    compacto
+                                    pendiente={tarjeta}
+                                    por={tarjeta.rebotado_por ? (perfilesPorId.get(tarjeta.rebotado_por) ?? null) : null}
+                                  />
+                                )}
                                 {tarjeta.resumen && (
                                   <p className="m-0 line-clamp-2 text-xs text-muted-foreground">{tarjeta.resumen}</p>
                                 )}
@@ -1767,6 +1819,7 @@ export function Tablero({
                                     perfilesPorId={perfilesPorId}
                                     yo={usuario?.perfil_id ?? null}
                                     onAprobar={(aprueba) => aprobar(tarjeta.id, aprueba)}
+                                    onRebotar={() => setRebotando(tarjeta)}
                                     botonProps={noArrastrar}
                                   />
                                 )}
@@ -1983,6 +2036,12 @@ export function Tablero({
         onAbrir={abrirPendiente}
         onSalir={onSalir}
       />
+      <RebotarDialog
+        pendiente={rebotando}
+        responsable={rebotando?.perfil_id ? (perfilesPorId.get(rebotando.perfil_id) ?? null) : null}
+        onCerrar={() => setRebotando(null)}
+        onRebotar={rebotar}
+      />
       <PasarDialog
         pendiente={pasando}
         personas={pasando ? involucrados(perfiles, organizacionDe(catalogo, pasando.proyecto_id)) : []}
@@ -2004,6 +2063,7 @@ export function Tablero({
         onCantidadComentarios={cambiarCantidadComentarios}
         onCantidadArchivos={cambiarCantidadArchivos}
         onPasar={setPasando}
+        onRebotar={setRebotando}
         onAbrirPendiente={setAbierto}
         onAprobar={aprobar}
         onBorrar={borrar}
