@@ -80,7 +80,8 @@ export function RecordatorioEvidencia({
   return (
     <Dialog open={recordatorio !== null} onOpenChange={(abierto) => !abierto && onCerrar()}>
       <DialogContent
-        className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-lg"
+        // Una sola columna que no pasa del ancho del modal: sin esto, los títulos largos de la lista (en una línea) lo ensanchan.
+        className="max-h-[calc(100svh-2rem)] grid-cols-[minmax(0,1fr)] overflow-y-auto sm:max-w-lg"
         // El foco va a lo que se espera que haga: escribir la evidencia (no al primero de la lista).
         onOpenAutoFocus={(event) => {
           event.preventDefault()
