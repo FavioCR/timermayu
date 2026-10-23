@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
-import { CheckCheck, Forward, History, Lock, MessageCircle, MessageSquare, ScanEye, Trash2, Users } from "lucide-react"
+import { Check, CheckCheck, Forward, History, Link2, Lock, MessageCircle, MessageSquare, ScanEye, Trash2, Users } from "lucide-react"
+import { toast } from "sonner"
 
 import { Aprobacion } from "@/components/aprobacion"
 import { ArchivosPendiente } from "@/components/archivos"
@@ -29,7 +30,7 @@ import {
   type Proyecto,
   type Usuario,
 } from "@/lib/api"
-import { enlaceWhatsApp } from "@/lib/actividad"
+import { enlaceDePendiente, enlaceWhatsApp } from "@/lib/actividad"
 import { abrirArchivo, PREFIJO_URL_ARCHIVO, tipoPorNombre, urlDeArchivo } from "@/lib/archivos"
 import { comprimirImagen } from "@/lib/comprimir-imagen"
 import type { Medio } from "@/lib/marcas-de-tiempo"
@@ -74,6 +75,34 @@ type Props = {
   onSalir: () => void
   // Cambia (>0) cuando hay que mostrar el chat con el campo listo para escribir (desde el recordatorio de evidencia).
   enfocarChat?: number
+}
+
+// Copia el enlace que abre este pendiente (?p=<id>), para pasarlo por WhatsApp o donde sea.
+function CopiarEnlace({ id }: { id: string }) {
+  const [copiado, setCopiado] = useState(false)
+  useEffect(() => {
+    if (!copiado) return
+    const espera = window.setTimeout(() => setCopiado(false), 2000)
+    return () => window.clearTimeout(espera)
+  }, [copiado])
+  return (
+    <Button
+      variant="ghost"
+      size="xs"
+      className="-my-1 -ml-2 text-muted-foreground"
+      aria-label={copiado ? "Enlace copiado" : "Copiar enlace"}
+      title="Copiar el enlace de este pendiente"
+      onClick={() =>
+        navigator.clipboard
+          .writeText(enlaceDePendiente(id))
+          .then(() => setCopiado(true))
+          .catch(() => toast.error("No se pudo copiar el enlace"))
+      }
+    >
+      {copiado ? <Check className="text-emerald-600 dark:text-emerald-400" /> : <Link2 />}
+      {copiado ? "Copiado" : "Copiar enlace"}
+    </Button>
+  )
 }
 
 // Página de un pendiente al estilo Notion: propiedades arriba y la descripción con imágenes debajo;
@@ -327,11 +356,14 @@ function Contenido({
           }}
           onBlur={(event) => guardarTitulo(event.currentTarget.value.replace(/\s+/g, " "))}
         />
-        <SheetDescription>
-          Creado el {fechaLarga.format(new Date(pendiente.creado_en))}
-          {creador && ` por ${creador.nombre}`}
-          {estadoGuardado && ` · ${estadoGuardado}`}
-        </SheetDescription>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <SheetDescription>
+            Creado el {fechaLarga.format(new Date(pendiente.creado_en))}
+            {creador && ` por ${creador.nombre}`}
+            {estadoGuardado && ` · ${estadoGuardado}`}
+          </SheetDescription>
+          <CopiarEnlace id={id} />
+        </div>
       </SheetHeader>
 
       <div className="flex flex-col gap-6 px-4 pb-6">
