@@ -1,6 +1,9 @@
 import type { Actividad, Perfil } from "@/lib/api"
 import { COLUMNAS } from "@/lib/estados"
 
+// "Favio", "Favio y Kenny", "Favio, Kenny y Junior".
+export const unirNombres = (nombres: string[] = []) => new Intl.ListFormat("es", { type: "conjunction" }).format(nombres)
+
 const nombreDeEstado = (estado: string | null | undefined) => COLUMNAS.find((columna) => columna.id === estado)?.name ?? estado ?? ""
 
 // Lo que hizo el autor, para poner después de su nombre: "Diego" + " movió «Facturación» a Haciendo".
@@ -65,12 +68,16 @@ export function describir(actividad: Actividad, { conTitulo = true, yo = null }:
       return conTitulo ? `quitó su aprobación de ${titulo}` : "quitó su aprobación"
     case "rebotado":
       return conTitulo ? `rebotó ${titulo} a Haciendo` : "lo rebotó a Haciendo"
+    case "revision":
+      if (yo && datos.revisores_ids?.includes(yo)) return conTitulo ? `te pidió revisar ${titulo}` : "te pidió revisarlo"
+      return conTitulo ? `le pidió revisar ${titulo} a ${unirNombres(datos.revisores)}` : `le pidió revisarlo a ${unirNombres(datos.revisores)}`
     case "borrado":
       return `borró ${titulo}`
   }
 }
 
-// Lo que se muestra debajo de la frase: el texto del mensaje (y sus archivos) o la nota de un traspaso o un rebote.
+// Lo que se muestra debajo de la frase: el texto del mensaje (y sus archivos) o la nota de un traspaso, un rebote o un pedido
+// de revisión.
 export function detalleDe(actividad: Actividad) {
   const datos = actividad.datos ?? {}
   const archivos = datos.adjuntos?.length ? `📎 ${datos.adjuntos.join(", ")}` : null

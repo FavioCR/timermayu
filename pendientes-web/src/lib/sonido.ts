@@ -72,8 +72,8 @@ export async function sonarAviso() {
   return true
 }
 
-// Suena cuando te asignan algo (al crearlo, al reasignarlo o al pasártelo), te mencionan en un chat o una descripción, o
-// rebotan algo tuyo.
+// Suena cuando te asignan algo (al crearlo, al reasignarlo o al pasártelo), te mencionan en un chat o una descripción,
+// rebotan algo tuyo o te piden revisar algo.
 export function esParaSonar(notificacion: Notificacion, yo: string) {
   const { tipo, datos } = notificacion.actividad
   if (tipo === "creado") return datos?.asignado_id === yo
@@ -81,5 +81,6 @@ export function esParaSonar(notificacion: Notificacion, yo: string) {
   if (tipo === "comentario" || tipo === "descripcion") return Boolean(datos?.menciones?.includes(yo))
   // Un rebote siempre: le llega a quien lo tiene a cargo y a quien lo creó.
   if (tipo === "rebotado") return true
+  if (tipo === "revision") return Boolean(datos?.revisores_ids?.includes(yo))
   return false
 }

@@ -2113,6 +2113,86 @@ test('rebotes: quien revisa un pendiente hecho lo devuelve a Haciendo, primero y
   assert.equal((await leer()).rebotado_en, null);
 });
 
+test('revisiones: pedirle a un compañero que revise un pendiente hecho; queda sin leer hasta abrirlo y abierto hasta aprobarlo o rebotarlo', async (t) => {
+  const { call, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const junior = await entrarComo('Junior');
+  for (const nombre of ['Franklin', 'Kenny']) assert.equal((await call('POST', '/perfiles', { nombre })).status, 201);
+  const franklin = await entrarComo('Franklin');
+  const kenny = await entrarComo('Kenny');
+  const { pendiente } = await favio.data('POST', '', { texto: 'Pago con tarjeta', perfil_id: diego.perfil.id });
+  const ruta = `/${pendiente.id}/revision`;
+  const leer = async (quien = diego) => (await quien.data('GET')).pendientes.find((p) => p.id === pendiente.id);
+  const revisores = async () => (await leer()).revisiones.map((r) => r.revisor_id);
+  assert.deepEqual(pendiente.revisiones, []);
+
+  // Solo lo que está en Hecho, lo pide un perfil y a quien puede revisarlo.
+  assert.equal((await diego.call('POST', ruta, { revisores: [franklin.perfil.id] })).status, 409);
+  await diego.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  assert.equal((await call('POST', ruta, { revisores: [franklin.perfil.id] })).status, 403);
+  assert.equal((await diego.call('POST', ruta, { revisores: [] })).status, 422);
+  assert.equal((await diego.call('POST', ruta, { revisores: 'Franklin' })).status, 422);
+  assert.equal((await diego.call('POST', ruta, { revisores: [crypto.randomUUID()] })).status, 422);
+  assert.equal((await junior.call('POST', ruta, { revisores: [diego.perfil.id] })).status, 422, 'no a su responsable');
+  assert.equal((await diego.call('POST', ruta, { revisores: [diego.perfil.id] })).status, 422, 'no a sí mismo');
+  await junior.data('POST', `/${pendiente.id}/aprobacion`);
+  assert.equal((await diego.call('POST', ruta, { revisores: [junior.perfil.id] })).status, 422, 'no a quien ya lo aprobó');
+
+  // Junior se lo pide a Franklin: un mensaje en el chat que lo menciona, el aviso y el pedido sin leer.
+  const pedido = (await junior.data('POST', ruta, { revisores: [franklin.perfil.id], nota: ' Prueba con Visa. ' })).pendiente;
+  assert.deepEqual(pedido.revisiones.map(({ revisor_id, pedido_por, abierto_en }) => ({ revisor_id, pedido_por, abierto_en })),
+    [{ revisor_id: franklin.perfil.id, pedido_por: junior.perfil.id, abierto_en: null }]);
+  assert.equal(pedido.num_comentarios, 1);
+  const [mensaje] = (await diego.data('GET', `/${pendiente.id}/comentarios`)).comentarios;
+  assert.deepEqual([mensaje.autor, mensaje.texto, mensaje.revision], ['Junior', '@Franklin ¿lo revisas?\nPrueba con Visa.', true]);
+  const avisos = async (quien, tipo) => (await quien.data('GET', '/notificaciones')).notificaciones
+    .filter((n) => n.actividad.tipo === tipo).map((n) => [n.actividad.autor, n.actividad.datos?.nota ?? null]);
+  assert.deepEqual(await avisos(franklin, 'revision'), [['Junior', 'Prueba con Visa.']]);
+  assert.deepEqual(await avisos(diego, 'revision'), [], 'solo a quien se lo piden');
+  assert.deepEqual((await franklin.data('GET', '/notificaciones')).notificaciones[0].actividad.datos.revisores, ['Franklin']);
+
+  // Lo abre otro: sigue sin leer. Lo abre Franklin: leído, pero sigue pedido.
+  await kenny.data('GET', `/${pendiente.id}`);
+  assert.equal((await leer()).revisiones[0].abierto_en, null);
+  await franklin.data('GET', `/${pendiente.id}`);
+  assert.ok((await leer()).revisiones[0].abierto_en);
+  // Pedírselo otra vez lo deja sin leer de nuevo (y a dos, en plural).
+  await diego.data('POST', ruta, { revisores: [franklin.perfil.id, kenny.perfil.id] });
+  assert.deepEqual((await leer()).revisiones.map((r) => [r.revisor_id, r.pedido_por, r.abierto_en]),
+    [[franklin.perfil.id, diego.perfil.id, null], [kenny.perfil.id, diego.perfil.id, null]]);
+  assert.equal((await diego.data('GET', `/${pendiente.id}/comentarios`)).comentarios.at(-1).texto, '@Franklin @Kenny ¿lo revisan?');
+
+  // Aprobarlo cierra su pedido y le avisa a quien lo pidió.
+  await franklin.data('POST', `/${pendiente.id}/aprobacion`);
+  assert.deepEqual(await revisores(), [kenny.perfil.id]);
+  assert.deepEqual(await avisos(junior, 'aprobado'), [], 'Junior ya no es quien lo pidió');
+  assert.deepEqual((await avisos(diego, 'aprobado')).map(([autor]) => autor), ['Franklin', 'Junior']);
+
+  // Rebotarlo los cierra todos (sale de Hecho) y le avisa a quienes lo pidieron.
+  await kenny.data('POST', `/${pendiente.id}/rebote`, {});
+  assert.deepEqual(await revisores(), []);
+  assert.deepEqual((await avisos(diego, 'rebotado')).map(([autor]) => autor), ['Kenny']);
+
+  // Volver a trabajarlo también los cierra; y el de quien queda a cargo.
+  await diego.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  await diego.data('POST', ruta, { revisores: [kenny.perfil.id, junior.perfil.id] });
+  await favio.data('PATCH', `/${pendiente.id}`, { perfil_id: kenny.perfil.id });
+  assert.deepEqual(await revisores(), [junior.perfil.id]);
+  await kenny.data('PUT', '/orden', { items: [{ id: pendiente.id, estado: 'haciendo' }] });
+  assert.deepEqual(await revisores(), []);
+
+  // Borrar el mensaje del pedido lo cancela, con su aviso.
+  await kenny.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
+  await diego.data('POST', ruta, { revisores: [junior.perfil.id] });
+  const pedidoMensaje = (await diego.data('GET', `/${pendiente.id}/comentarios`)).comentarios.at(-1);
+  const antes = (await avisos(junior, 'revision')).length;
+  assert.equal((await junior.call('DELETE', `/comentarios/${pedidoMensaje.id}`)).status, 403);
+  assert.equal((await diego.call('DELETE', `/comentarios/${pedidoMensaje.id}`)).status, 200);
+  assert.deepEqual(await revisores(), []);
+  assert.equal((await avisos(junior, 'revision')).length, antes - 1);
+});
+
 test('evidencia: al tercer pendiente seguido que alguien termina sin escribir en su chat, se le recuerda', async (t) => {
   const { call, entrarComo } = await startServer(t);
   const diego = await entrarComo('Diego');
@@ -2341,6 +2421,35 @@ test('avisos por correo: un rebotado que su responsable no abrió va destacado e
   await favio.data('GET', `/${otro.id}`);
   await vuelta(enDias(7));
   assert.equal(enviados.length, 3);
+});
+
+test('avisos por correo: lo que te pidieron revisar y no abriste va en su caja en cada correo hasta que lo abras', async (t) => {
+  const enviados = [];
+  const correo = { enviar: async (mensaje) => enviados.push(mensaje) };
+  const reglasCorreo = { zona: 'UTC', antiguedadMs: 30 * 24 * 60 * 60_000 };
+  const { server, entrarComo } = await startServer(t, { correo, reglasCorreo, urlTablero: 'https://tablero.ejemplo/pendientes/' });
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  await favio.call('PATCH', `/perfiles/${favio.perfil.id}`, { correo: 'favio@ejemplo.com' });
+  const vuelta = (momento) => server.mandarAvisosPorCorreo(momento);
+  const { pendiente } = await diego.data('POST', '', { texto: 'Login con Google', perfil_id: diego.perfil.id, estado: 'hecho' });
+  await diego.data('POST', `/${pendiente.id}/revision`, { revisores: [favio.perfil.id] });
+
+  await vuelta(enDias(1));
+  assert.equal(enviados.length, 1);
+  assert.equal(enviados[0].subject, '🔍 Diego te pidió revisar «Login con Google»');
+  for (const parte of ['🔍 Te pidieron revisar', '• «Login con Google», te lo pidió Diego', `?p=${pendiente.id}`, 'Lo que te pidieron revisar se repite']) {
+    assert.ok(enviados[0].text.includes(parte), parte);
+  }
+  assert.ok(!enviados[0].text.includes('te pidió revisar «'), 'su aviso no se repite en la lista');
+
+  // Leer la campana no basta: llega otra vez hasta que lo abra.
+  await favio.call('POST', '/notificaciones/leidas', {});
+  await vuelta(enDias(3));
+  assert.equal(enviados.length, 2);
+  await favio.data('GET', `/${pendiente.id}`);
+  await vuelta(enDias(5));
+  assert.equal(enviados.length, 2);
 });
 
 test('avisos por correo: sin configurar no se mandan ni aparecen', async (t) => {

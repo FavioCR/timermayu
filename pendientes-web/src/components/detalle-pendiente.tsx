@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
-import { Forward, History, Lock, MessageCircle, MessageSquare, Trash2, Users } from "lucide-react"
+import { Forward, History, Lock, MessageCircle, MessageSquare, ScanEye, Trash2, Users } from "lucide-react"
 
 import { Aprobacion } from "@/components/aprobacion"
 import { ArchivosPendiente } from "@/components/archivos"
@@ -65,6 +65,8 @@ type Props = {
   onAprobar: (id: string, aprueba: boolean) => void
   // Revisado y no aprobado: abre el diálogo para devolverlo a Haciendo.
   onRebotar: (pendiente: Pendiente) => void
+  // Les pide a compañeros que lo revisen (desde el chat).
+  onPedirRevision: (id: string, revisores: string[], nota: string) => Promise<boolean>
   onBorrar: (pendiente: Pendiente) => void
   onCerrar: () => void
   onSalir: () => void
@@ -113,6 +115,7 @@ function Contenido({
   onAbrirPendiente,
   onAprobar,
   onRebotar,
+  onPedirRevision,
   onBorrar,
   onSalir,
   enfocarChat = 0,
@@ -281,6 +284,9 @@ function Contenido({
   const creador = pendiente.creado_por ? perfilesPorId.get(pendiente.creado_por) : undefined
   const proyecto = catalogo.proyectos.find((p) => p.id === pendiente.proyecto_id)
   const etiquetaProyecto = proyecto ? (organizacion ? `${organizacion.nombre} › ${proyecto.nombre}` : proyecto.nombre) : null
+  // A quién se le puede pedir que lo revise: a quien lo ve, menos quien pide y su responsable (lo privado no se revisa).
+  const yo = usuario?.perfil_id ?? null
+  const revisores = privado ? [] : involucrados(perfiles, organizacion).filter((perfil) => perfil.id !== yo && perfil.id !== pendiente.perfil_id)
 
   return (
     <div className="flex flex-col lg:h-full lg:flex-row">
@@ -346,6 +352,24 @@ function Contenido({
                   onRebotar={() => onRebotar(pendiente)}
                 />
               </dd>
+              {pendiente.revisiones.length > 0 && (
+                <>
+                  <dt className="text-muted-foreground">Revisión</dt>
+                  <dd className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <ScanEye className="size-4 text-primary" aria-hidden />
+                    {pendiente.revisiones.map((revision) => {
+                      const revisor = perfilesPorId.get(revision.revisor_id)
+                      return (
+                        <span key={revision.revisor_id} className="flex items-center gap-1.5">
+                          <PerfilAvatar perfil={revisor} size="xs" />
+                          {revisor?.nombre ?? "Alguien"}
+                          <span className="text-xs text-muted-foreground">{revision.abierto_en ? "lo abrió" : "sin abrir"}</span>
+                        </span>
+                      )
+                    })}
+                  </dd>
+                </>
+              )}
             </>
           )}
 
@@ -526,6 +550,11 @@ function Contenido({
               onCantidad={(cantidad) => onCantidadComentarios(id, cantidad)}
               onSalir={onSalir}
               enfocar={enfocarChat}
+              revision={
+                yo
+                  ? { pendiente, candidatos: revisores, onPedir: (elegidos, nota) => onPedirRevision(id, elegidos, nota) }
+                  : undefined
+              }
             />
           </TabsContent>
           <TabsContent value="historial" className="min-h-0 overflow-y-auto p-4">

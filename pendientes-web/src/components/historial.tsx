@@ -12,6 +12,7 @@ import {
   Paperclip,
   Pencil,
   Plus,
+  ScanEye,
   Sparkles,
   Tag,
   Trash2,
@@ -39,6 +40,7 @@ const ICONOS: Record<TipoActividad, typeof Plus> = {
   aprobado: BadgeCheck,
   aprobacion_quitada: BadgeX,
   rebotado: TriangleAlert,
+  revision: ScanEye,
 }
 
 function agruparPorDia(items: Actividad[]) {

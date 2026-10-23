@@ -1,16 +1,27 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type TouchEvent } from "react"
-import { Paperclip, Reply, SendHorizontal, Trash2, X } from "lucide-react"
+import { Paperclip, Reply, ScanEye, SendHorizontal, Trash2, X } from "lucide-react"
 import { cn } from "cn"
 
 import { ChipArchivo, esImagenVisible, MiniaturaArchivo } from "@/components/archivos"
 import { VisorImagenes } from "@/components/visor-imagenes"
+import { PedirRevision } from "@/components/pedir-revision"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { RedactarIA } from "@/components/redactar-ia"
 import { Button } from "@/components/ui/button"
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { Textarea } from "@/components/ui/textarea"
-import { api, esNoAutorizado, MAX_ARCHIVO_BYTES, mensajeDeError, type Archivo, type Comentario, type Perfil, type Usuario } from "@/lib/api"
+import {
+  api,
+  esNoAutorizado,
+  MAX_ARCHIVO_BYTES,
+  mensajeDeError,
+  type Archivo,
+  type Comentario,
+  type Pendiente,
+  type Perfil,
+  type Usuario,
+} from "@/lib/api"
 import { fechaCompleta, haceCuanto } from "@/lib/actividad"
 import { useCambios } from "@/lib/cambios"
 import { abrirArchivo, traeArchivos, urlDeArchivo } from "@/lib/archivos"
@@ -131,6 +142,7 @@ export function ChatPendiente({
   onCantidad,
   onSalir,
   enfocar = 0,
+  revision,
 }: {
   credenciales: string
   pendienteId: string
@@ -140,6 +152,12 @@ export function ChatPendiente({
   onSalir: () => void
   // Cambia (>0) cuando hay que dejar el campo listo para escribir.
   enfocar?: number
+  // Para pedirle a un compañero que lo revise (botón y /revisar); sin perfil no se puede.
+  revision?: {
+    pendiente: Pick<Pendiente, "estado" | "aprobaciones" | "revisiones">
+    candidatos: Perfil[]
+    onPedir: (revisores: string[], nota: string) => Promise<boolean>
+  }
 }) {
   const [comentarios, setComentarios] = useState<Comentario[] | null>(null)
   const [texto, setTexto] = useState("")
@@ -151,6 +169,7 @@ export function ChatPendiente({
   const [elegido, setElegido] = useState(0)
   // /ia abierto: dónde estaba escrito (ahí va lo que redacte la IA) y lo que ya había en el mensaje.
   const [ia, setIa] = useState<{ posicion: number; previo: string } | null>(null)
+  const [pidiendoRevision, setPidiendoRevision] = useState(false)
   const [adjuntos, setAdjuntos] = useState<Adjunto[]>([])
   const [encima, setEncima] = useState(false)
   const [respondiendo, setRespondiendo] = useState<Comentario | null>(null)
@@ -259,9 +278,16 @@ export function ChatPendiente({
     setMencion({ inicio: fin - consulta.length - 1, fin, consulta })
   }
 
-  // Escribir /ia (al principio o después de un espacio) lo borra y abre el campo de la IA en ese lugar.
+  // Escribir /ia (al principio o después de un espacio) lo borra y abre el campo de la IA en ese lugar; /revisar lo borra y
+  // abre el pedido de revisión.
   function revisarIA(elemento: HTMLTextAreaElement) {
     const cursor = elemento.selectionStart
+    if (revision && cursor === elemento.selectionEnd && /(^|\s)\/revisar$/i.test(elemento.value.slice(0, cursor))) {
+      setTexto(elemento.value.slice(0, cursor - 8) + elemento.value.slice(cursor))
+      setMencion(null)
+      setPidiendoRevision(true)
+      return true
+    }
     if (cursor !== elemento.selectionEnd || !/(^|\s)\/ia$/i.test(elemento.value.slice(0, cursor))) return false
     const sinComando = elemento.value.slice(0, cursor - 3) + elemento.value.slice(cursor)
     setTexto(sinComando)
@@ -286,6 +312,16 @@ export function ChatPendiente({
     cursorTrasIA.current = Math.min(reemplaza ? redactado.length : ia.posicion + redactado.length, nuevo.length)
     setTexto(nuevo)
     setIa(null)
+  }
+
+  async function pedirRevision(revisores: string[], nota: string) {
+    if (!revision) return false
+    const listo = await revision.onPedir(revisores, nota)
+    if (listo) {
+      setPidiendoRevision(false)
+      cargar()
+    }
+    return listo
   }
 
   function mencionar(perfil: Perfil) {
@@ -447,6 +483,11 @@ export function ChatPendiente({
                   <div className={cn("flex max-w-[85%] min-w-0 flex-col gap-1", mio && "items-end")}>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       {!mio && <span className="font-medium text-foreground">{comentario.autor}</span>}
+                      {comentario.revision && (
+                        <span className="flex items-center gap-1 font-medium text-primary">
+                          <ScanEye className="size-3.5" /> Pidió revisión
+                        </span>
+                      )}
                       <time dateTime={comentario.creado_en} title={fechaCompleta.format(new Date(comentario.creado_en))}>
                         {haceCuanto(comentario.creado_en)}
                       </time>
@@ -606,6 +647,20 @@ export function ChatPendiente({
               >
                 <Paperclip />
               </Button>
+              {revision && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0 text-muted-foreground"
+                  aria-label="Pedir revisión"
+                  title="Pedir revisión: le avisa a un compañero hasta que lo apruebe o lo rebote (también con /revisar)"
+                  aria-expanded={pidiendoRevision}
+                  onClick={() => setPidiendoRevision((abierto) => !abierto)}
+                >
+                  <ScanEye />
+                </Button>
+              )}
               <input
                 ref={entrada}
                 type="file"
@@ -622,7 +677,7 @@ export function ChatPendiente({
                 aria-label="Mensaje"
                 aria-autocomplete="list"
                 aria-controls={sugerencias.length > 0 ? idSugerencias : undefined}
-                placeholder="Escribe un mensaje… (@ para mencionar, /ia para redactar con IA)"
+                placeholder={`Escribe un mensaje… (@ para mencionar, /ia para redactar con IA${revision ? ", /revisar para pedir revisión" : ""})`}
                 value={texto}
                 onChange={(event) => {
                   setTexto(event.target.value)
@@ -701,6 +756,23 @@ export function ChatPendiente({
           </Command>
         </PopoverContent>
       </Popover>
+      {/* El pedido de revisión también sale encima del mensaje. */}
+      {revision && (
+        <Popover open={pidiendoRevision} onOpenChange={setPidiendoRevision}>
+          <PopoverAnchor virtualRef={anclaMensaje} />
+          <PopoverContent
+            side="top"
+            align="start"
+            className="w-[min(22rem,calc(100vw-2rem))] p-3"
+            onCloseAutoFocus={(event) => {
+              event.preventDefault()
+              campo.current?.focus()
+            }}
+          >
+            <PedirRevision pendiente={revision.pendiente} candidatos={revision.candidatos} onPedir={pedirRevision} />
+          </PopoverContent>
+        </Popover>
+      )}
       {/* El campo de /ia sale encima del mensaje; al cerrarlo, el foco vuelve al mensaje. */}
       <Popover open={ia !== null} onOpenChange={(abierto) => !abierto && setIa(null)}>
         <PopoverAnchor virtualRef={anclaMensaje} />

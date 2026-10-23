@@ -2,6 +2,8 @@
 import nodemailer from 'nodemailer';
 
 const ESTADOS = { pendiente: 'Por hacer', haciendo: 'Haciendo', hecho: 'Hecho' };
+// "Favio", "Favio y Kenny", "Favio, Kenny y Junior".
+const unir = (nombres = []) => new Intl.ListFormat('es', { type: 'conjunction' }).format(nombres);
 
 // Lo mismo que dice la campana del tablero (lib/actividad.ts), siempre con el título y en segunda persona para `yo`:
 // "Diego" + " te asignó «Facturación»".
@@ -50,6 +52,8 @@ export function describir(actividad, yo) {
       return `quitó su aprobación de ${titulo}`;
     case 'rebotado':
       return `rebotó ${titulo} a Haciendo`;
+    case 'revision':
+      return datos.revisores_ids?.includes(yo) ? `te pidió revisar ${titulo}` : `le pidió revisar ${titulo} a ${unir(datos.revisores)}`;
     case 'borrado':
       return `borró ${titulo}`;
     default:
@@ -78,45 +82,68 @@ const escapar = (texto) => String(texto).replace(/[&<>"']/g, (c) => ({ '&': '&am
 // Como mucho estos en el correo; del resto se dice cuántos hay.
 const MAX_EN_CORREO = 20;
 
-// El correo para `perfil` con sus `avisos` (actividad, de la más vieja a la más nueva) y los pendientes a su cargo que
-// rebotaron y todavía no abrió (`rebotados`: id, texto, por, nota, rebotado_en): asunto, texto y HTML. Los rebotados van
-// primero y destacados; su aviso de rebote no se repite en la lista.
-export function armarResumen({ perfil, avisos, rebotados = [], urlTablero, ahora = Date.now() }) {
+// Los colores de cada caja destacada del correo.
+const ROJO = { fondo: '#fef2f2', borde: '#fecaca', acento: '#dc2626', titulo: '#b91c1c', texto: '#991b1b', enlace: '#7f1d1d', cita: '#fca5a5' };
+const AZUL = { fondo: '#eff6ff', borde: '#bfdbfe', acento: '#2563eb', titulo: '#1d4ed8', texto: '#1e40af', enlace: '#1e3a8a', cita: '#93c5fd' };
+
+// El correo para `perfil` con sus `avisos` (actividad, de la más vieja a la más nueva), los pendientes a su cargo que
+// rebotaron y todavía no abrió (`rebotados`: id, texto, por, nota, rebotado_en) y los que le pidieron revisar y todavía no
+// abrió (`porRevisar`: id, texto, por, pedido_en): asunto, texto y HTML. Rebotados y pedidos van primero, cada uno en su
+// caja; su aviso no se repite en la lista.
+export function armarResumen({ perfil, avisos, rebotados = [], porRevisar = [], urlTablero, ahora = Date.now() }) {
   const enlace = (pendienteId) => pendienteId && `${urlTablero}?p=${pendienteId}`;
   const frase = (actividad) => `${actividad.autor ?? 'Alguien'} ${describir(actividad, perfil.id)}`;
-  const destacados = new Set(rebotados.map((rebotado) => rebotado.id));
-  const lista = avisos.filter((actividad) => !(actividad.tipo === 'rebotado' && destacados.has(actividad.pendiente_id)));
+  const enCaja = { rebotado: new Set(rebotados.map((item) => item.id)), revision: new Set(porRevisar.map((item) => item.id)) };
+  const lista = avisos.filter((actividad) => !enCaja[actividad.tipo]?.has(actividad.pendiente_id));
   const mostrados = lista.slice(-MAX_EN_CORREO).reverse();
   const resto = lista.length - mostrados.length;
   const asunto = rebotados.length > 0
     ? rebotados.length === 1 ? `⚠️ Rebotaron «${rebotados[0].texto}» y todavía no lo abres` : `⚠️ Tienes ${rebotados.length} pendientes rebotados sin abrir`
-    : lista.length === 1 ? frase(lista[0]) : `Tienes ${lista.length} avisos sin ver en Pendientes`;
-  const uno = rebotados.length === 1;
-  const tituloRebotes = uno ? '⚠️ Rebotado sin abrir' : '⚠️ Rebotados sin abrir';
-  const explicacion = uno
-    ? 'Lo revisaron, no lo aprobaron y volvió a Haciendo. Ábrelo para ver qué falta:'
-    : 'Los revisaron, no los aprobaron y volvieron a Haciendo. Ábrelos para ver qué falta:';
-  const quienRebote = (rebotado) => `lo rebotó ${rebotado.por ?? 'alguien'} ${haceCuanto(rebotado.rebotado_en, ahora)}`;
+    : porRevisar.length > 0
+      ? porRevisar.length === 1 ? `🔍 ${porRevisar[0].por ?? 'Alguien'} te pidió revisar «${porRevisar[0].texto}»` : `🔍 Tienes ${porRevisar.length} pendientes por revisar`
+      : lista.length === 1 ? frase(lista[0]) : `Tienes ${lista.length} avisos sin ver en Pendientes`;
+  const cajas = [
+    rebotados.length > 0 && {
+      titulo: rebotados.length === 1 ? '⚠️ Rebotado sin abrir' : '⚠️ Rebotados sin abrir',
+      explicacion: rebotados.length === 1
+        ? 'Lo revisaron, no lo aprobaron y volvió a Haciendo. Ábrelo para ver qué falta:'
+        : 'Los revisaron, no los aprobaron y volvieron a Haciendo. Ábrelos para ver qué falta:',
+      colores: ROJO,
+      items: rebotados.map((item) => ({ ...item, pie: `lo rebotó ${item.por ?? 'alguien'} ${haceCuanto(item.rebotado_en, ahora)}` })),
+    },
+    porRevisar.length > 0 && {
+      titulo: '🔍 Te pidieron revisar',
+      explicacion: porRevisar.length === 1
+        ? 'Ábrelo y apruébalo, o recházalo con «Rebotar» si falta algo:'
+        : 'Ábrelos y apruébalos, o recházalos con «Rebotar» si falta algo:',
+      colores: AZUL,
+      items: porRevisar.map((item) => ({ ...item, nota: null, pie: `te lo pidió ${item.por ?? 'alguien'} ${haceCuanto(item.pedido_en, ahora)}` })),
+    },
+  ].filter(Boolean);
   const introAvisos = lista.length === 1 ? 'Esto pasó en Pendientes y todavía no lo viste:' : 'Esto pasó en Pendientes y todavía no lo viste (lo más nuevo primero):';
+  const repetidos = rebotados.length > 0 && porRevisar.length > 0
+    ? 'Lo rebotado y lo que te pidieron revisar se repiten en cada resumen hasta que los abras.'
+    : rebotados.length > 0 ? 'Lo rebotado se repite en cada resumen hasta que lo abras.'
+      : porRevisar.length > 0 ? 'Lo que te pidieron revisar se repite en cada resumen hasta que lo abras.' : null;
   const pie = [
     'Este resumen llega a las 9 de la mañana, como mucho cada 2 días, con los avisos que no viste.',
-    rebotados.length > 0 && 'Lo rebotado se repite en cada resumen hasta que lo abras.',
+    repetidos,
     'Para no recibir estos correos, apágalos en el menú de tu cuenta, en «Avisos por correo».',
   ].filter(Boolean).join(' ');
 
   const texto = [
     `Hola, ${perfil.nombre}:`,
     '',
-    ...(rebotados.length > 0 ? [
-      `${tituloRebotes}. ${explicacion}`,
+    ...cajas.flatMap((caja) => [
+      `${caja.titulo}. ${caja.explicacion}`,
       '',
-      ...rebotados.flatMap((rebotado) => [
-        `• «${rebotado.texto}», ${quienRebote(rebotado)}`,
-        ...(rebotado.nota ? rebotado.nota.split('\n').map((linea) => `  > ${linea}`) : []),
-        ...(enlace(rebotado.id) ? [`  ${enlace(rebotado.id)}`] : []),
+      ...caja.items.flatMap((item) => [
+        `• «${item.texto}», ${item.pie}`,
+        ...(item.nota ? item.nota.split('\n').map((linea) => `  > ${linea}`) : []),
+        ...(enlace(item.id) ? [`  ${enlace(item.id)}`] : []),
         '',
       ]),
-    ] : []),
+    ]),
     ...(lista.length > 0 ? [introAvisos, ''] : []),
     ...mostrados.flatMap((actividad) => [
       `• ${frase(actividad)} (${haceCuanto(actividad.creado_en, ahora)})`,
@@ -131,20 +158,19 @@ export function armarResumen({ perfil, avisos, rebotados = [], urlTablero, ahora
     pie,
   ].join('\n');
 
-  const filaRebote = (rebotado) => {
-    const url = enlace(rebotado.id);
-    const titulo = url ? `<a href="${escapar(url)}" style="color:#7f1d1d;text-decoration:none">«${escapar(rebotado.texto)}»</a>` : `«${escapar(rebotado.texto)}»`;
-    return `<tr><td style="padding:8px 0;border-top:1px solid #fecaca">
-      <div style="font-size:15px;line-height:1.4;font-weight:600">${titulo}</div>
-      ${rebotado.nota ? `<div style="margin-top:6px;padding-left:10px;border-left:3px solid #fca5a5;color:#7f1d1d;font-size:14px;white-space:pre-line">${escapar(rebotado.nota)}</div>` : ''}
-      <div style="margin-top:4px;color:#991b1b;font-size:12px">${escapar(quienRebote(rebotado))}</div>
-    </td></tr>`;
-  };
-  const cajaRebotes = rebotados.length === 0 ? '' : `<tr><td style="padding:8px 0 16px">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fef2f2;border:1px solid #fecaca;border-left:4px solid #dc2626;border-radius:8px;padding:12px 14px">
-      <tr><td style="font-size:16px;font-weight:700;color:#b91c1c">${escapar(tituloRebotes)}</td></tr>
-      <tr><td style="font-size:14px;color:#991b1b;padding:4px 0 8px">${escapar(explicacion)}</td></tr>
-      ${rebotados.map(filaRebote).join('')}
+  const cajaHtml = ({ titulo, explicacion, colores: c, items }) => `<tr><td style="padding:8px 0 16px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${c.fondo};border:1px solid ${c.borde};border-left:4px solid ${c.acento};border-radius:8px;padding:12px 14px">
+      <tr><td style="font-size:16px;font-weight:700;color:${c.titulo}">${escapar(titulo)}</td></tr>
+      <tr><td style="font-size:14px;color:${c.texto};padding:4px 0 8px">${escapar(explicacion)}</td></tr>
+      ${items.map((item) => {
+        const url = enlace(item.id);
+        const nombre = url ? `<a href="${escapar(url)}" style="color:${c.enlace};text-decoration:none">«${escapar(item.texto)}»</a>` : `«${escapar(item.texto)}»`;
+        return `<tr><td style="padding:8px 0;border-top:1px solid ${c.borde}">
+        <div style="font-size:15px;line-height:1.4;font-weight:600">${nombre}</div>
+        ${item.nota ? `<div style="margin-top:6px;padding-left:10px;border-left:3px solid ${c.cita};color:${c.enlace};font-size:14px;white-space:pre-line">${escapar(item.nota)}</div>` : ''}
+        <div style="margin-top:4px;color:${c.texto};font-size:12px">${escapar(item.pie)}</div>
+      </td></tr>`;
+      }).join('')}
     </table>
   </td></tr>`;
   const filas = mostrados.map((actividad) => {
@@ -160,8 +186,8 @@ export function armarResumen({ perfil, avisos, rebotados = [], urlTablero, ahora
   const html = `<!doctype html><html lang="es"><body style="margin:0;background:#f3f4f6;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 12px"><tr><td align="center">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:12px;padding:24px">
-      <tr><td style="font-size:16px;padding-bottom:${rebotados.length > 0 ? 12 : 4}px">Hola, ${escapar(perfil.nombre)}:</td></tr>
-      ${cajaRebotes}
+      <tr><td style="font-size:16px;padding-bottom:${cajas.length > 0 ? 12 : 4}px">Hola, ${escapar(perfil.nombre)}:</td></tr>
+      ${cajas.map(cajaHtml).join('')}
       ${lista.length > 0 ? `<tr><td style="font-size:14px;color:#4b5563;padding-bottom:8px">${escapar(introAvisos)}</td></tr>` : ''}
       ${filas}
       ${resto > 0 ? `<tr><td style="padding-top:12px;font-size:14px;color:#4b5563">Y ${resto === 1 ? 'un aviso más' : `${resto} avisos más`} en el tablero.</td></tr>` : ''}

@@ -98,7 +98,7 @@ const MAX_CONEXIONES = 500;
 // Avisos por correo, como pidió el usuario: a las 9 de la mañana (hora de Lima, la del equipo) le llega un resumen de lo
 // que no vio a quien tenga avisos de hace más de una hora sin ver, como mucho uno cada 2 días por persona. Lo de más de
 // 3 días ya no se manda: al encenderlo no le llega a nadie todo lo atrasado. Un pendiente que rebotó y su responsable
-// no abrió va destacado arriba en cada correo (y basta para mandarlo) hasta que lo abra.
+// no abrió, o uno que le pidieron revisar y no abrió, va destacado arriba en cada correo (y basta para mandarlo) hasta que lo abra.
 const REGLAS_CORREO = { hora: 9, zona: 'America/Lima', dias: 2, esperaMs: 60 * 60_000, antiguedadMs: 3 * 24 * 60 * 60_000 };
 const REVISAR_CORREOS_MS = 5 * 60_000;
 const DIA_MS = 24 * 60 * 60_000;
@@ -165,6 +165,7 @@ const TRASPASO_PATH = new RegExp(`^/api/pendientes/${UUID}/traspaso$`);
 const EVIDENCIA_PATH = new RegExp(`^/api/pendientes/${UUID}/evidencia$`);
 const APROBACION_PATH = new RegExp(`^/api/pendientes/${UUID}/aprobacion$`);
 const REBOTE_PATH = new RegExp(`^/api/pendientes/${UUID}/rebote$`);
+const REVISION_PATH = new RegExp(`^/api/pendientes/${UUID}/revision$`);
 const ETIQUETA_PATH = new RegExp(`^/api/pendientes/etiquetas/${UUID}$`);
 const CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}$`);
 const NOTAS_DE_CURSO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/notas$`);
@@ -182,7 +183,7 @@ const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH, TODOS_LOS_ARCHIVOS_PATH,
   TRAER_IMAGEN_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
-  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, APROBACION_PATH, REBOTE_PATH, ETIQUETA_PATH,
+  ACTIVIDAD_ITEM_PATH, COMENTARIOS_PATH, COMENTARIO_PATH, ARCHIVOS_PATH, ARCHIVO_PATH, TRASPASO_PATH, EVIDENCIA_PATH, APROBACION_PATH, REBOTE_PATH, REVISION_PATH, ETIQUETA_PATH,
   CURSO_PATH, NOTAS_DE_CURSO_PATH, RECURSOS_DE_CURSO_PATH, NOTA_PATH, IMAGENES_DE_NOTA_PATH, IMAGEN_DE_NOTA_PATH, RECURSO_PATH, PARTES_DE_RECURSO_PATH, IA_TRABAJO_PATH, RECURSO_REPETIDO_PATH,
   PARTES_DE_ARCHIVO_PATH, ENLACE_DE_ARCHIVO_PATH, ARCHIVO_REPETIDO_PATH, REUSAR_ARCHIVO_PATH];
 // Las filas que apuntan a un archivo guardado por su contenido (DATA_DIR/blobs/<sha256>).
@@ -194,7 +195,9 @@ const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, tipo, perfil_id, cre
   (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0 AND a.subido IS NULL) AS num_archivos,
   (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0 AND a.subido IS NULL AND a.tipo LIKE 'video/%') AS num_videos,
   (SELECT json_group_array(pe.etiqueta_id) FROM pendiente_etiquetas pe WHERE pe.pendiente_id = pendientes.id) AS etiquetas,
-  (SELECT json_group_array(ap.perfil_id ORDER BY ap.creado_en, ap.rowid) FROM aprobaciones ap WHERE ap.pendiente_id = pendientes.id) AS aprobaciones`;
+  (SELECT json_group_array(ap.perfil_id ORDER BY ap.creado_en, ap.rowid) FROM aprobaciones ap WHERE ap.pendiente_id = pendientes.id) AS aprobaciones,
+  (SELECT json_group_array(json_object('revisor_id', r.revisor_id, 'pedido_por', r.pedido_por, 'pedido_en', r.pedido_en, 'abierto_en', r.abierto_en)
+    ORDER BY r.pedido_en, r.rowid) FROM revisiones r WHERE r.pendiente_id = pendientes.id) AS revisiones`;
 const SELECT_PERFIL = 'SELECT id, nombre, correo, telefono, color, password_hash IS NOT NULL AS tiene_contrasena, creado_en FROM perfiles';
 const SELECT_ORGANIZACION = `SELECT id, nombre, color, duenio_id, compartida, creado_en,
   (SELECT json_group_array(perfil_id) FROM organizacion_miembros m WHERE m.organizacion_id = organizaciones.id) AS miembros FROM organizaciones`;
@@ -211,7 +214,7 @@ const PENDIENTE_VISIBLE = `(proyecto_id IS NULL OR proyecto_id IN (${PROYECTOS_V
 const ACTIVIDAD_VISIBLE = `(a.pendiente_id IN (SELECT id FROM pendientes WHERE ${PENDIENTE_VISIBLE})
   OR (a.pendiente_id IS NULL AND (a.privado_de IS NULL OR a.privado_de = ?)))`;
 const SELECT_ACTIVIDAD = 'SELECT a.id, a.pendiente_id, a.texto_pendiente, a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en FROM actividad a';
-const SELECT_COMENTARIO = 'SELECT id, pendiente_id, perfil_id, autor, texto, respuesta_a, creado_en FROM comentarios';
+const SELECT_COMENTARIO = 'SELECT id, pendiente_id, perfil_id, autor, texto, respuesta_a, revision, creado_en FROM comentarios';
 const SELECT_ARCHIVO = 'SELECT id, pendiente_id, comentario_id, nombre, tipo, tamano, subido, perfil_id, autor, creado_en FROM archivos';
 // Lo de las notas se busca siempre junto con el dueño del curso: lo de otro perfil no existe.
 const SELECT_CURSO = 'SELECT id, nombre, icono, creado_en, actualizado_en FROM cursos';
@@ -495,6 +498,29 @@ const MIGRACIONES = [
       CREATE TRIGGER rebote_con_otro_responsable AFTER UPDATE OF perfil_id ON pendientes
         WHEN NEW.rebotado_en IS NOT NULL AND NEW.perfil_id IS NOT OLD.perfil_id
         BEGIN UPDATE pendientes SET rebote_visto_en = NULL WHERE id = NEW.id; END;
+    `);
+  },
+  // Pedidos de revisión: alguien le pide a un compañero que revise un pendiente hecho. Le queda «sin leer» (abierto_en
+  // null) hasta que abre el pendiente, y pendiente hasta que lo aprueba o lo rebota (entonces la fila se borra). Se
+  // cierran todos si sale de Hecho, y el de quien queda a cargo. El pedido también es un mensaje del chat (revision = 1).
+  (db) => {
+    db.exec(`
+      CREATE TABLE revisiones (
+        pendiente_id TEXT NOT NULL REFERENCES pendientes(id) ON DELETE CASCADE,
+        revisor_id TEXT NOT NULL REFERENCES perfiles(id) ON DELETE CASCADE,
+        pedido_por TEXT REFERENCES perfiles(id) ON DELETE SET NULL,
+        pedido_en TEXT NOT NULL,
+        abierto_en TEXT,
+        PRIMARY KEY (pendiente_id, revisor_id)
+      );
+      CREATE INDEX revisiones_revisor ON revisiones (revisor_id);
+      CREATE TRIGGER revisiones_al_salir_de_hecho AFTER UPDATE OF estado ON pendientes
+        WHEN OLD.estado = 'hecho' AND NEW.estado <> 'hecho'
+        BEGIN DELETE FROM revisiones WHERE pendiente_id = NEW.id; END;
+      CREATE TRIGGER revisiones_del_responsable AFTER UPDATE OF perfil_id ON pendientes
+        WHEN NEW.perfil_id IS NOT NULL
+        BEGIN DELETE FROM revisiones WHERE pendiente_id = NEW.id AND revisor_id = NEW.perfil_id; END;
+      ALTER TABLE comentarios ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
     `);
   },
 ];
@@ -869,6 +895,15 @@ export function parseTraspaso(input) {
   return { perfil_id: input.perfil_id, nota: nota || null };
 }
 
+// Pedir revisión: a quiénes (1 a 10 perfiles) y, si se quiere, una nota de qué mirar.
+export function parseRevision(input) {
+  const revisores = input.revisores;
+  if (!Array.isArray(revisores) || revisores.length === 0 || revisores.length > 10 || revisores.some((id) => typeof id !== 'string' || !id)) {
+    throw httpError(422, 'revisores_invalidos');
+  }
+  return { revisores: [...new Set(revisores)], nota: parseRebote(input).nota };
+}
+
 // Rebotar un pendiente hecho: si se quiere, con una nota de lo que falta.
 export function parseRebote(input) {
   if (input.nota !== undefined && input.nota !== null && typeof input.nota !== 'string') throw httpError(422, 'nota_invalida');
@@ -1113,7 +1148,11 @@ const fila = (row) => (row ? { ...row } : null);
 const perfilFila = (row) => (row ? { ...row, tiene_contrasena: Boolean(row.tiene_contrasena) } : null);
 const organizacionFila = (row) => (row ? { ...row, compartida: Boolean(row.compartida), miembros: JSON.parse(row.miembros).sort() } : null);
 const actividadFila = (row) => (row ? { ...row, datos: row.datos ? JSON.parse(row.datos) : null } : null);
-const pendienteFila = (row) => (row ? { ...row, etiquetas: JSON.parse(row.etiquetas).sort(), aprobaciones: JSON.parse(row.aprobaciones) } : null);
+const pendienteFila = (row) => (row
+  ? { ...row, etiquetas: JSON.parse(row.etiquetas).sort(), aprobaciones: JSON.parse(row.aprobaciones), revisiones: JSON.parse(row.revisiones) }
+  : null);
+// revision: el mensaje con el que alguien pidió revisar el pendiente.
+const comentarioFila = (row) => (row ? { ...row, revision: Boolean(row.revision) } : null);
 
 // Proyecto sin organización con ese nombre; se crea si no existe.
 function proyectoSuelto(db, nombre) {
@@ -1581,8 +1620,9 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     // A quién le toca un correo y con qué: a quien tiene correo, no lo apagó y no recibió ninguno desde `desde`, si su
     // aviso sin ver más viejo lleva más de `esperaMs`. Van todos los que no vio ni le llegaron ya por correo (de los últimos
     // `antiguedadMs`), del más viejo al más nuevo. Solo lo que puede ver, como en la campana.
-    // Aparte van los pendientes a su cargo que rebotaron hace más de `esperaMs` y todavía no abrió: esos se repiten en
-    // cada correo (y bastan para mandarlo) hasta que los abra.
+    // Aparte van los pendientes a su cargo que rebotaron hace más de `esperaMs` y todavía no abrió, y los que le pidieron
+    // revisar hace más de `esperaMs` y todavía no abrió: esos se repiten en cada correo (y bastan para mandarlo) hasta que
+    // los abra.
     avisosParaCorreo({ ahora, desde, esperaMs, antiguedadMs }) {
       const hace = (ms) => new Date(ahora - ms).toISOString();
       const desdeIso = new Date(desde).toISOString();
@@ -1598,18 +1638,24 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       const rebotados = db.prepare(`SELECT id, texto, rebotado_en, rebote_nota AS nota, (SELECT nombre FROM perfiles WHERE id = rebotado_por) AS por
         FROM pendientes WHERE perfil_id = ? AND rebotado_en IS NOT NULL AND rebote_visto_en IS NULL AND rebotado_en <= ? AND ${PENDIENTE_VISIBLE}
         ORDER BY rebotado_en, rowid`);
+      const porRevisar = db.prepare(`SELECT p.id, p.texto, r.pedido_en, (SELECT nombre FROM perfiles WHERE id = r.pedido_por) AS por
+        FROM revisiones r JOIN pendientes p ON p.id = r.pendiente_id
+        WHERE r.revisor_id = ? AND r.abierto_en IS NULL AND r.pedido_en <= ? AND ${PENDIENTE_VISIBLE} ORDER BY r.pedido_en, r.rowid`);
       return perfiles
         .map((perfil) => ({
           perfil: { ...perfil },
           avisos: sinVer.all(perfil.id, hace(antiguedadMs), perfil.id, perfil.id),
           rebotados: rebotados.all(perfil.id, hace(esperaMs), perfil.id).map((row) => ({ ...row })),
+          porRevisar: porRevisar.all(perfil.id, hace(esperaMs), perfil.id).map((row) => ({ ...row })),
         }))
-        .filter(({ avisos, rebotados }) => rebotados.length > 0 || (avisos.length > 0 && avisos[0].avisado_en <= hace(esperaMs)))
-        .map(({ perfil, avisos, rebotados }) => ({
+        .filter(({ avisos, rebotados, porRevisar }) => rebotados.length > 0 || porRevisar.length > 0
+          || (avisos.length > 0 && avisos[0].avisado_en <= hace(esperaMs)))
+        .map(({ perfil, avisos, rebotados, porRevisar }) => ({
           perfil,
           ids: avisos.map((aviso) => aviso.notificacion_id),
           avisos: avisos.map(({ notificacion_id: _id, avisado_en: _en, ...actividad }) => actividadFila(actividad)),
           rebotados,
+          porRevisar,
         }));
     },
 
@@ -1906,7 +1952,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     },
 
     // Otro perfil da por buena la funcionalidad de un pendiente hecho. Su responsable no la aprueba (es su trabajo), ni
-    // la cuenta del equipo (no se sabría quién). Se avisa al responsable y a quien lo creó.
+    // la cuenta del equipo (no se sabría quién). Se avisa al responsable, a quien lo creó y a quien le pidió revisarlo.
     aprobar(quien, id) {
       const yo = quien.perfil_id;
       const actual = pendiente(yo, id);
@@ -1915,9 +1961,11 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (actual.estado !== 'hecho') throw httpError(409, 'aprobar_solo_hechos');
       if (actual.perfil_id === yo) throw httpError(409, 'aprobar_lo_propio');
       return transaction(db, () => {
+        // Si le habían pedido revisarlo, el pedido se cierra y quien lo pidió también se entera.
+        const pedido = db.prepare('DELETE FROM revisiones WHERE pendiente_id = ? AND revisor_id = ? RETURNING pedido_por').get(id, yo);
         const { changes } = db.prepare('INSERT OR IGNORE INTO aprobaciones (pendiente_id, perfil_id, creado_en) VALUES (?, ?, ?)')
           .run(id, yo, new Date().toISOString());
-        if (changes) registrar(quien, actual, 'aprobado', null, [actual.perfil_id, actual.creado_por]);
+        if (changes) registrar(quien, actual, 'aprobado', null, [actual.perfil_id, actual.creado_por, pedido?.pedido_por]);
         return pendiente(yo, id);
       });
     },
@@ -1935,8 +1983,8 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     },
 
     // Quien revisa un pendiente hecho y no lo aprueba lo rebota: vuelve a Haciendo, primero en la columna, marcado hasta
-    // que vuelva a Hecho. Como al aprobar, no lo rebota su responsable ni la cuenta del equipo. Se avisa al responsable
-    // y a quien lo creó; las aprobaciones se pierden al salir de Hecho.
+    // que vuelva a Hecho. Como al aprobar, no lo rebota su responsable ni la cuenta del equipo. Se avisa al responsable,
+    // a quien lo creó y a quienes pidieron revisarlo; las aprobaciones y los pedidos de revisión se cierran al salir de Hecho.
     rebotar(quien, id, { nota }) {
       const yo = quien.perfil_id;
       const actual = pendiente(yo, id);
@@ -1946,17 +1994,51 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (actual.perfil_id === yo) throw httpError(409, 'rebotar_lo_propio');
       return transaction(db, () => {
         const ahora = new Date().toISOString();
+        const pidieron = db.prepare('SELECT pedido_por FROM revisiones WHERE pendiente_id = ?').all(id).map((row) => row.pedido_por);
         db.prepare(`UPDATE pendientes SET estado = 'haciendo', hecho_en = NULL, posicion = ?, rebotado_en = ?, rebotado_por = ?, rebote_nota = ?,
           rebote_visto_en = NULL, actualizado_en = ? WHERE id = ?`).run(arriba(), ahora, yo, nota, ahora, id);
-        registrar(quien, actual, 'rebotado', nota && { nota }, [actual.perfil_id, actual.creado_por]);
+        registrar(quien, actual, 'rebotado', nota && { nota }, [actual.perfil_id, actual.creado_por, ...pidieron]);
         return pendiente(yo, id);
       });
     },
 
-    // Su responsable abrió el pendiente rebotado: ya no se le recuerda por correo.
-    verRebote(yo, id) {
-      if (yo) db.prepare('UPDATE pendientes SET rebote_visto_en = ? WHERE id = ? AND perfil_id = ? AND rebotado_en IS NOT NULL AND rebote_visto_en IS NULL')
-        .run(new Date().toISOString(), id, yo);
+    // Alguien abrió un pendiente: si es su responsable y estaba rebotado, o le habían pedido revisarlo, ya lo vio (deja de
+    // estar «sin leer» y de recordársele por correo). Dice si cambió algo.
+    verPendiente(yo, id) {
+      if (!yo) return false;
+      const ahora = new Date().toISOString();
+      const rebote = db.prepare('UPDATE pendientes SET rebote_visto_en = ? WHERE id = ? AND perfil_id = ? AND rebotado_en IS NOT NULL AND rebote_visto_en IS NULL')
+        .run(ahora, id, yo);
+      const revision = db.prepare('UPDATE revisiones SET abierto_en = ? WHERE pendiente_id = ? AND revisor_id = ? AND abierto_en IS NULL').run(ahora, id, yo);
+      return rebote.changes + revision.changes > 0;
+    },
+
+    // Le pide a compañeros que revisen un pendiente hecho: queda un mensaje en el chat que los menciona y a cada uno le
+    // llega el aviso y el pedido «sin leer». Pedírselo otra vez lo vuelve a dejar sin leer. Lo pide un perfil (no la
+    // cuenta del equipo), a quienes pueden verlo y todavía no lo aprobaron, que no sean quien pide ni su responsable.
+    pedirRevision(quien, id, { revisores, nota }) {
+      const yo = quien.perfil_id;
+      const actual = pendiente(yo, id);
+      if (!actual) return null;
+      if (!yo) throw httpError(403, 'revision_con_perfil');
+      if (actual.estado !== 'hecho') throw httpError(409, 'revision_solo_hechos');
+      const valido = (revisor) => revisor !== yo && revisor !== actual.perfil_id && !actual.aprobaciones.includes(revisor) && perfil(revisor)
+        && db.prepare(`SELECT 1 FROM pendientes WHERE id = ? AND ${PENDIENTE_VISIBLE}`).get(id, revisor);
+      if (!revisores.every(valido)) throw httpError(422, 'revisor_invalido');
+      return transaction(db, () => {
+        const ahora = new Date().toISOString();
+        const pedir = db.prepare(`INSERT INTO revisiones (pendiente_id, revisor_id, pedido_por, pedido_en) VALUES (?, ?, ?, ?)
+          ON CONFLICT (pendiente_id, revisor_id) DO UPDATE SET pedido_por = excluded.pedido_por, pedido_en = excluded.pedido_en, abierto_en = NULL`);
+        for (const revisor of revisores) pedir.run(id, revisor, yo, ahora);
+        const nombres = revisores.map(nombreDePerfil);
+        const texto = `${nombres.map((nombre) => `@${nombre}`).join(' ')} ¿lo ${revisores.length > 1 ? 'revisan' : 'revisas'}?${nota ? `\n${nota}` : ''}`;
+        // El mensaje lleva la misma hora que los pedidos: borrarlo los cancela.
+        const comentarioId = randomUUID();
+        db.prepare('INSERT INTO comentarios (id, pendiente_id, perfil_id, autor, texto, respuesta_a, revision, creado_en) VALUES (?, ?, ?, ?, ?, NULL, 1, ?)')
+          .run(comentarioId, id, yo, quien.nombre, texto, ahora);
+        registrar(quien, actual, 'revision', { revisores: nombres, revisores_ids: revisores, comentario_id: comentarioId, ...(nota && { nota }) }, revisores);
+        return pendiente(yo, id);
+      });
     },
 
     ordenar(quien, orden) {
@@ -1991,7 +2073,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       const adjuntos = Map.groupBy(db.prepare(`${SELECT_ARCHIVO} WHERE pendiente_id = ? AND comentario_id IS NOT NULL ORDER BY creado_en, rowid`)
         .all(pendienteId).map(fila), (archivo) => archivo.comentario_id);
       return db.prepare(`${SELECT_COMENTARIO} WHERE pendiente_id = ? ORDER BY creado_en, rowid`).all(pendienteId)
-        .map((row) => ({ ...fila(row), archivos: adjuntos.get(row.id) ?? [] }));
+        .map((row) => ({ ...comentarioFila(row), archivos: adjuntos.get(row.id) ?? [] }));
     },
 
     // Avisa al responsable, a quien lo creó, a quienes ya escribieron, a los @mencionados y a quien escribió el mensaje respondido.
@@ -2022,20 +2104,26 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         };
         // Un mensaje no cambia el pendiente: solo avisa a los mencionados y a quien escribió el mensaje que se responde.
         registrar(quien, item, 'comentario', datos, [...menciones, respondido?.perfil_id]);
-        return { ...fila(db.prepare(`${SELECT_COMENTARIO} WHERE id = ?`).get(id)), archivos: adjuntos.map((archivo) => ({ ...archivo, comentario_id: id })) };
+        return { ...comentarioFila(db.prepare(`${SELECT_COMENTARIO} WHERE id = ?`).get(id)), archivos: adjuntos.map((archivo) => ({ ...archivo, comentario_id: id })) };
       });
     },
 
-    // Cada quien borra solo sus mensajes; con el mensaje se van su entrada del historial y sus avisos.
+    // Cada quien borra solo sus mensajes; con el mensaje se van su entrada del historial y sus avisos (y, si era un pedido de
+    // revisión, el pedido).
     async borrarComentario(quien, id) {
-      const comentario = db.prepare(`SELECT c.perfil_id, c.autor FROM comentarios c JOIN pendientes ON pendientes.id = c.pendiente_id
-        WHERE c.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, quien.perfil_id);
+      const comentario = db.prepare(`SELECT c.perfil_id, c.autor, c.pendiente_id, c.revision, c.creado_en FROM comentarios c
+        JOIN pendientes ON pendientes.id = c.pendiente_id WHERE c.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, quien.perfil_id);
       if (!comentario) return false;
       const esSuyo = comentario.perfil_id ? comentario.perfil_id === quien.perfil_id : quien.perfil_id === null && comentario.autor === quien.nombre;
       if (!esSuyo) throw httpError(403, 'solo_el_autor');
       const contenidos = db.prepare('SELECT sha256 FROM archivos WHERE comentario_id = ?').all(id).map((row) => row.sha256);
       transaction(db, () => {
-        db.prepare("DELETE FROM actividad WHERE tipo = 'comentario' AND json_extract(datos, '$.comentario_id') = ?").run(id);
+        db.prepare("DELETE FROM actividad WHERE tipo IN ('comentario', 'revision') AND json_extract(datos, '$.comentario_id') = ?").run(id);
+        // El mensaje de un pedido de revisión se lleva los pedidos que hizo (los que no se volvieron a pedir después).
+        if (comentario.revision) {
+          db.prepare('DELETE FROM revisiones WHERE pendiente_id = ? AND pedido_por IS ? AND pedido_en = ?')
+            .run(comentario.pendiente_id, comentario.perfil_id, comentario.creado_en);
+        }
         db.prepare('DELETE FROM comentarios WHERE id = ?').run(id);
       });
       await soltar(contenidos);
@@ -2216,7 +2304,8 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       const empezado = db.prepare(`SELECT MAX(creado_en) AS desde FROM actividad WHERE pendiente_id = ? AND (
         (tipo = 'estado' AND (json_extract(datos, '$.a') = 'haciendo' OR json_extract(datos, '$.de') = 'hecho')) OR tipo = 'rebotado'
         OR (tipo IN ('asignado', 'traspaso') AND json_extract(datos, '$.a_id') = ?))`);
-      const escribio = db.prepare('SELECT 1 FROM comentarios WHERE pendiente_id = ? AND perfil_id = ? AND creado_en >= ? LIMIT 1');
+      // El mensaje de un pedido de revisión no cuenta: no dice qué se probó.
+      const escribio = db.prepare('SELECT 1 FROM comentarios WHERE pendiente_id = ? AND perfil_id = ? AND creado_en >= ? AND revision = 0 LIMIT 1');
       const sinEvidencia = [];
       for (const terminado of terminados) {
         if (quienTermino.get(terminado.id)?.perfil_id !== yo) continue;
@@ -2665,9 +2754,9 @@ export function createApp(options = {}) {
       const pendientes = repo.avisosParaCorreo({
         ahora, desde: medianoche - (reglasCorreo.dias - 1) * DIA_MS, esperaMs: reglasCorreo.esperaMs, antiguedadMs: reglasCorreo.antiguedadMs,
       });
-      for (const { perfil, ids, avisos, rebotados } of pendientes) {
+      for (const { perfil, ids, avisos, rebotados, porRevisar } of pendientes) {
         try {
-          await correo.enviar({ to: perfil.correo, ...armarResumen({ perfil, avisos, rebotados, urlTablero, ahora }) });
+          await correo.enviar({ to: perfil.correo, ...armarResumen({ perfil, avisos, rebotados, porRevisar, urlTablero, ahora }) });
           repo.marcarAvisosEnviados(perfil.id, ids, ahora);
         } catch (error) {
           // Se vuelve a intentar en la próxima vuelta.
@@ -2707,11 +2796,13 @@ export function createApp(options = {}) {
       .finally(() => avisarCambio({ tipo: 'pendientes', pendiente_id: id }));
   }
 
-  // Qué avisar si la petición sale bien. Lo de un mensaje o archivo que se borra se busca antes de borrarlo.
+  // Qué avisar si la petición sale bien (uno o varios cambios). Lo de un mensaje o archivo que se borra se busca antes de borrarlo.
   function cambioDe(pathname, method) {
     if (method === 'GET') return null;
     const deRuta = (ruta) => pathname.match(ruta)?.[1];
     if (pathname === API_PATH || pathname === ORDER_PATH) return { tipo: 'pendientes' };
+    // Un pedido de revisión cambia el pendiente y deja un mensaje en su chat.
+    if (deRuta(REVISION_PATH)) return [{ tipo: 'pendientes', pendiente_id: deRuta(REVISION_PATH) }, { tipo: 'comentarios', pendiente_id: deRuta(REVISION_PATH) }];
     const pendienteId = deRuta(ITEM_PATH) ?? deRuta(TRASPASO_PATH) ?? deRuta(APROBACION_PATH) ?? deRuta(REBOTE_PATH);
     if (pendienteId) return { tipo: 'pendientes', pendiente_id: pendienteId };
     if (deRuta(COMENTARIOS_PATH)) return { tipo: 'comentarios', pendiente_id: deRuta(COMENTARIOS_PATH) };
@@ -2886,7 +2977,7 @@ export function createApp(options = {}) {
       const cambio = cambioDe(url.pathname, req.method);
       if (cambio) {
         const cliente = String(req.headers['x-cliente'] ?? '').slice(0, 64);
-        res.on('finish', () => res.statusCode < 400 && avisarCambio(cambio, cliente));
+        res.on('finish', () => res.statusCode < 400 && [cambio].flat().forEach((uno) => avisarCambio(uno, cliente)));
       }
       const enviar = (status, clave, valor) => (valor ? json(res, status, { [clave]: valor }) : json(res, 404, { error: 'not_found' }));
       const listo = (hecho) => (hecho ? json(res, 200, { ok: true }) : json(res, 404, { error: 'not_found' }));
@@ -3074,6 +3165,10 @@ export function createApp(options = {}) {
       const pendienteDeAprobacion = url.pathname.match(APROBACION_PATH)?.[1];
       if (pendienteDeAprobacion && req.method === 'POST') return enviar(200, 'pendiente', repo.aprobar(usuario, pendienteDeAprobacion));
       if (pendienteDeAprobacion && req.method === 'DELETE') return enviar(200, 'pendiente', repo.desaprobar(usuario, pendienteDeAprobacion));
+      const pendienteDeRevision = url.pathname.match(REVISION_PATH)?.[1];
+      if (pendienteDeRevision && req.method === 'POST') {
+        return enviar(200, 'pendiente', repo.pedirRevision(usuario, pendienteDeRevision, parseRevision(await readJson(req))));
+      }
       const pendienteDeRebote = url.pathname.match(REBOTE_PATH)?.[1];
       if (pendienteDeRebote && req.method === 'POST') {
         return enviar(200, 'pendiente', repo.rebotar(usuario, pendienteDeRebote, parseRebote(await readJson(req))));
@@ -3153,8 +3248,9 @@ export function createApp(options = {}) {
 
       const id = url.pathname.match(ITEM_PATH)?.[1];
       if (id && req.method === 'GET') {
-        // Abrirlo es verlo: si estaba rebotado y es su responsable, deja de recordársele por correo.
-        repo.verRebote(yo, id);
+        // Abrirlo es verlo: lo rebotado (para su responsable) y lo que le pidieron revisar dejan de estar sin leer. Se avisa
+        // a todos, también a sus otras pestañas y a la que lo abrió, para que su bandeja y la tarjeta se pongan al día.
+        if (repo.verPendiente(yo, id)) avisarCambio({ tipo: 'pendientes', pendiente_id: id });
         return enviar(200, 'pendiente', repo.detallePendiente(yo, id));
       }
       if (id && req.method === 'PATCH') {
@@ -3205,8 +3301,9 @@ if (isMain && process.argv[2] === 'quitar-contrasena') {
     const avisos = [ejemplo('asignado', { a: 'ti', a_id: 'prueba' }, 90), ejemplo('comentario', { menciones: ['prueba'], extracto: 'Si te llegó, el correo funciona.' }, 70)];
     const rebotados = [{ id: null, texto: 'Correo de prueba', por: 'Pendientes', nota: 'Así se ve un pendiente rebotado que todavía no abres.',
       rebotado_en: new Date(ahora - 26 * 60 * 60_000).toISOString() }];
+    const porRevisar = [{ id: null, texto: 'Correo de prueba', por: 'Pendientes', pedido_en: new Date(ahora - 3 * 60 * 60_000).toISOString() }];
     const perfil = { id: 'prueba', nombre: 'prueba' };
-    correo.enviar({ to: process.argv[3], ...armarResumen({ perfil, avisos, rebotados, urlTablero: process.env.URL_TABLERO ?? URL_TABLERO, ahora }) })
+    correo.enviar({ to: process.argv[3], ...armarResumen({ perfil, avisos, rebotados, porRevisar, urlTablero: process.env.URL_TABLERO ?? URL_TABLERO, ahora }) })
       .then((info) => console.log(`Enviado (${info.messageId}).`), (error) => {
         console.error(`No se pudo mandar: ${error.message}`);
         process.exitCode = 1;

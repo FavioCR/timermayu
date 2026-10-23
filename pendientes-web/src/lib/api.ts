@@ -4,6 +4,10 @@ export type Estado = "pendiente" | "haciendo" | "hecho"
 
 export type TipoTrabajo = "feat" | "fix" | "refactor" | "perf" | "docs" | "test" | "style" | "chore" | "ci"
 
+// Un pedido de revisión abierto: a quién se le pidió, quién y cuándo, y cuándo lo abrió (null: «sin leer»). Se cierra
+// cuando lo aprueba o lo rebota, si sale de Hecho o si queda a su cargo.
+export type Revision = { revisor_id: string; pedido_por: string | null; pedido_en: string; abierto_en: string | null }
+
 export type Pendiente = {
   id: string
   texto: string
@@ -24,6 +28,8 @@ export type Pendiente = {
   etiquetas: string[]
   // Perfiles que aprobaron su funcionalidad, del primero al último. Solo en Hecho: al salir de ahí se pierden.
   aprobaciones: string[]
+  // Pedidos de revisión abiertos, del más viejo al más nuevo.
+  revisiones: Revision[]
   creado_en: string
   actualizado_en: string
   // Cuándo pasó a Hecho; null si no está hecho. El tablero solo muestra los hechos de la última semana.
@@ -154,6 +160,7 @@ export type TipoActividad =
   | "aprobado"
   | "aprobacion_quitada"
   | "rebotado"
+  | "revision"
 
 // Lo que se anota según el tipo: de/a en los cambios, extracto y menciones (ids de perfil) en los mensajes, etc.
 export type DatosActividad = {
@@ -177,6 +184,9 @@ export type DatosActividad = {
   quitadas?: string[]
   // El tipo lo puso la IA.
   ia?: boolean
+  // A quiénes se les pidió revisar (nombres e ids).
+  revisores?: string[]
+  revisores_ids?: string[]
 }
 
 // Una entrada del historial. Guarda nombres (no solo ids) para leerse aunque el perfil o el proyecto ya no existan.
@@ -205,6 +215,8 @@ export type Comentario = {
   texto: string
   // El mensaje al que responde, como en WhatsApp; puede ya no estar si se borró.
   respuesta_a: string | null
+  // El mensaje con el que se pidió revisar el pendiente.
+  revision: boolean
   creado_en: string
   archivos: Archivo[]
 }
@@ -269,6 +281,10 @@ const MENSAJES: Record<string, string> = {
   rebotar_con_perfil: "Para rebotar, entra con tu perfil.",
   rebotar_solo_hechos: "Solo se rebota lo que está en Hecho.",
   rebotar_lo_propio: "Lo que está a tu cargo lo revisa otra persona.",
+  revision_con_perfil: "Para pedir una revisión, entra con tu perfil.",
+  revision_solo_hechos: "Primero pásalo a Hecho: ahí se aprueba o se rebota.",
+  revisor_invalido: "Esa persona no puede revisarlo (ya lo aprobó, está a su cargo o no lo ve).",
+  revisores_invalidos: "Elige a quién pedirle la revisión.",
   correo_duplicado: "Ese correo ya lo tiene otro perfil.",
   contrasena_invalida: "La contraseña debe tener al menos 8 caracteres.",
   solo_el_mismo: "Ese perfil ya tiene contraseña: solo esa persona puede cambiarlo.",
@@ -661,6 +677,9 @@ export const api = {
   // Revisado y no aprobado: vuelve a Haciendo, primero y marcado, con una nota de lo que falta.
   rebotar: (credenciales: string, id: string, nota: string) =>
     pedir<{ pendiente: Pendiente }>(credenciales, "POST", `/${id}/rebote`, { nota }).then((data) => data.pendiente),
+  // Les pide a compañeros que lo revisen: un mensaje en el chat que los menciona y el pedido «sin leer» para cada uno.
+  pedirRevision: (credenciales: string, id: string, revisores: string[], nota: string) =>
+    pedir<{ pendiente: Pendiente }>(credenciales, "POST", `/${id}/revision`, { revisores, nota }).then((data) => data.pendiente),
   ordenar: (credenciales: string, items: { id: string; estado: Estado }[]) =>
     pedir<{ pendientes: Pendiente[] }>(credenciales, "PUT", "/orden", { items }).then((data) => data.pendientes),
   subirImagen,

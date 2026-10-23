@@ -46,6 +46,7 @@ import {
   Paperclip,
   Plus,
   RotateCw,
+  ScanEye,
   Search,
   SearchX,
   Sparkles,
@@ -82,6 +83,7 @@ import {
 } from "@/components/kibo-ui/kanban"
 import { Notificaciones } from "@/components/notificaciones"
 import { PasarDialog } from "@/components/pasar-dialog"
+import { PorRevisar } from "@/components/por-revisar"
 import { AvisoRebote, RebotarDialog } from "@/components/rebotar-dialog"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { RecordatorioEvidencia, type Recordatorio } from "@/components/recordatorio-evidencia"
@@ -134,7 +136,7 @@ import {
   type SinLeer,
   type Usuario,
 } from "@/lib/api"
-import { enlaceWhatsApp } from "@/lib/actividad"
+import { enlaceWhatsApp, unirNombres } from "@/lib/actividad"
 import { APARIENCIA_NORMAL, aplicarApariencia } from "@/lib/apariencia"
 import { coincide } from "@/lib/buscar"
 import { agrupar, conOrganizacion, conProyecto, involucrados, organizacionDe, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
@@ -881,6 +883,25 @@ export function Tablero({
     }
   }
 
+  // Desde el chat: el pedido queda en el pendiente y su mensaje en el chat (que se recarga solo).
+  const pedirRevision = useCallback(
+    async (id: string, revisores: string[], nota: string) => {
+      try {
+        const actualizado = await api.pedirRevision(credenciales, id, revisores, nota)
+        setTarjetas((actuales) => actuales.map((t) => (t.id === id ? aTarjeta(actualizado) : t)))
+        const nombres = unirNombres(revisores.map((revisor) => perfilesPorId.get(revisor)?.nombre ?? "alguien"))
+        toast.success(`Le pediste la revisión a ${nombres}`, {
+          description: `Lo ${revisores.length > 1 ? "verán" : "verá"} sin leer en «Por revisar» hasta abrirlo, y ahí sigue hasta que lo apruebe o lo rebote.`,
+        })
+        return true
+      } catch (err) {
+        fallar(err)
+        return false
+      }
+    },
+    [credenciales, fallar, perfilesPorId]
+  )
+
   // Revisado y no aprobado: vuelve a Haciendo, primero en la columna y marcado hasta que vuelva a Hecho.
   async function rebotar(nota: string) {
     if (!rebotando) return false
@@ -967,7 +988,9 @@ export function Tablero({
         actuales.map((t) => {
           if (t.id !== id) return t
           const otras = t.aprobaciones.filter((perfilId) => perfilId !== yo)
-          return { ...t, aprobaciones: aprueba ? [...otras, yo] : otras }
+          // Aprobarlo cierra el pedido de revisión que tuviera.
+          const revisiones = aprueba ? t.revisiones.filter((r) => r.revisor_id !== yo) : t.revisiones
+          return { ...t, aprobaciones: aprueba ? [...otras, yo] : otras, revisiones }
         })
       )
       try {
@@ -1183,9 +1206,9 @@ export function Tablero({
       }
       try {
         await api.ordenar(credenciales, finales.map((tarjeta) => ({ id: tarjeta.id, estado: tarjeta.column as Estado })))
-        // Lo que salió de Hecho vuelve a trabajarse: el servidor ya le quitó las aprobaciones.
+        // Lo que salió de Hecho vuelve a trabajarse: el servidor ya le quitó las aprobaciones y los pedidos de revisión.
         const salieron = new Set(finales.filter((t) => t.column !== "hecho" && columnasAlEmpezar.current.get(t.id) === "hecho").map((t) => t.id))
-        if (salieron.size > 0) setTarjetas((actuales) => actuales.map((t) => (salieron.has(t.id) ? { ...t, aprobaciones: [] } : t)))
+        if (salieron.size > 0) setTarjetas((actuales) => actuales.map((t) => (salieron.has(t.id) ? { ...t, aprobaciones: [], revisiones: [] } : t)))
         if (pendienteDeRecarga) recargar()
         for (const tarjeta of finales) {
           if (tarjeta.column === "hecho" && columnasAlEmpezar.current.get(tarjeta.id) !== "hecho") revisarEvidencia(tarjeta)
@@ -1242,6 +1265,9 @@ export function Tablero({
                 </a>
               </Button>
             </div>
+            {usuario?.perfil_id && (
+              <PorRevisar pendientes={tarjetas} yo={usuario.perfil_id} perfilesPorId={perfilesPorId} onAbrir={abrirPendiente} />
+            )}
             {usuario?.perfil_id && (
               <Notificaciones
                 credenciales={credenciales}
@@ -1712,6 +1738,7 @@ export function Tablero({
                         const colorBorde = tipoDe(tarjeta.tipo)?.color ?? susEtiquetas[0]?.color
                         const aviso = sinLeer.get(tarjeta.id)
                         const rebotada = tarjeta.rebotado_en !== null
+                        const porRevisar = usuario?.perfil_id ? tarjeta.revisiones.find((r) => r.revisor_id === usuario.perfil_id) : undefined
                         return (
                           <Fragment key={tarjeta.id}>
                             {archivadosEnColumna[0]?.id === tarjeta.id && <SeparadorDeArchivados />}
@@ -1763,6 +1790,20 @@ export function Tablero({
                                     >
                                       {aviso.menciones > 0 ? <BellRing className="size-3" /> : <Bell className="size-3" />}
                                       {aviso.menciones > 0 ? "@" : aviso.avisos > 1 && aviso.avisos}
+                                    </span>
+                                  )}
+                                  {/* Te pidieron revisarla: resalta hasta que la abres, y queda hasta que la apruebas o la rebotas. */}
+                                  {porRevisar && (
+                                    <span
+                                      role="img"
+                                      aria-label={porRevisar.abierto_en ? "Te pidieron revisarlo" : "Te pidieron revisarlo; sin abrir"}
+                                      title={porRevisar.abierto_en ? "Te pidieron revisarlo: apruébalo o rebótalo" : "Te pidieron revisarlo (sin abrir)"}
+                                      className={cn(
+                                        "mt-px flex h-5 shrink-0 items-center gap-1 rounded-full px-1.5 text-[11px] leading-none font-semibold",
+                                        porRevisar.abierto_en ? "bg-primary/15 text-primary" : "bg-primary text-primary-foreground shadow-sm shadow-primary/40"
+                                      )}
+                                    >
+                                      <ScanEye className="size-3" /> Revisar
                                     </span>
                                   )}
                                   {tarjeta.column === "hecho" && (
@@ -2064,6 +2105,7 @@ export function Tablero({
         onCantidadArchivos={cambiarCantidadArchivos}
         onPasar={setPasando}
         onRebotar={setRebotando}
+        onPedirRevision={pedirRevision}
         onAbrirPendiente={setAbierto}
         onAprobar={aprobar}
         onBorrar={borrar}
