@@ -2422,7 +2422,9 @@ test('avisos por correo: un rebotado que su responsable no abrió va destacado e
   const favio = await entrarComo('Favio');
   await favio.call('PATCH', `/perfiles/${favio.perfil.id}`, { correo: 'favio@ejemplo.com' });
   const vuelta = (momento) => server.mandarAvisosPorCorreo(momento);
-  const { pendiente } = await diego.data('POST', '', { texto: 'Pago <Visa>', perfil_id: favio.perfil.id });
+  const { organizacion } = await diego.data('POST', '/organizaciones', { nombre: 'Mayugo' });
+  const { proyecto } = await diego.data('POST', '/proyectos', { nombre: 'Vendeizi', organizacion_id: organizacion.id });
+  const { pendiente } = await diego.data('POST', '', { texto: 'Pago <Visa>', perfil_id: favio.perfil.id, proyecto_id: proyecto.id });
   await favio.data('PATCH', `/${pendiente.id}`, { estado: 'hecho' });
   await diego.data('POST', `/${pendiente.id}/rebote`, { nota: 'Falla con tarjetas Visa.' });
 
@@ -2431,13 +2433,18 @@ test('avisos por correo: un rebotado que su responsable no abrió va destacado e
   assert.equal(enviados.length, 1);
   assert.equal(enviados[0].subject, '⚠️ Rebotaron «Pago <Visa>» y todavía no lo abres');
   const { text, html } = enviados[0];
-  for (const parte of ['⚠️ Rebotado sin abrir', '• «Pago <Visa>», lo rebotó Diego', '> Falla con tarjetas Visa.', `?p=${pendiente.id}`,
+  // Cada pendiente con su organización y su proyecto.
+  for (const parte of ['REBOTADO SIN ABRIR', '• «Pago <Visa>» (Mayugo › Vendeizi)', '> Falla con tarjetas Visa.', 'Lo rebotó Diego', `?p=${pendiente.id}`,
     'Diego creó «Pago <Visa>» y te lo asignó', 'Lo rebotado se repite en cada resumen']) {
     assert.ok(text.includes(parte), parte);
   }
-  assert.ok(text.indexOf('Rebotado sin abrir') < text.indexOf('te lo asignó'));
+  assert.match(text, /te lo asignó \([^)]+\)\n {2}Mayugo › Vendeizi\n/);
+  assert.ok(text.indexOf('REBOTADO SIN ABRIR') < text.indexOf('te lo asignó'));
   assert.ok(!text.includes('rebotó «'));
   assert.ok(html.includes('Pago &lt;Visa&gt;') && !html.includes('<Visa>'));
+  for (const parte of ['Rebotado sin abrir', 'Mayugo › Vendeizi', 'Otras actividades relacionadas', 'https://tablero.ejemplo/pendientes/correo/robot.png']) {
+    assert.ok(html.includes(parte), parte);
+  }
 
   // Aunque ya vio todos sus avisos, se le recuerda en cada correo (como mucho cada 2 días) mientras no lo abra.
   await favio.call('POST', '/notificaciones/leidas', {});
@@ -2446,7 +2453,7 @@ test('avisos por correo: un rebotado que su responsable no abrió va destacado e
   await vuelta(enDias(3));
   assert.equal(enviados.length, 2);
   assert.equal(enviados[1].subject, '⚠️ Rebotaron «Pago <Visa>» y todavía no lo abres');
-  assert.ok(!enviados[1].text.includes('Esto pasó en Pendientes'));
+  assert.ok(!enviados[1].text.includes('OTRAS ACTIVIDADES'));
 
   // Con dos, el asunto los cuenta.
   const otro = (await diego.data('POST', '', { texto: 'Exportar reporte', perfil_id: favio.perfil.id })).pendiente;
@@ -2478,7 +2485,7 @@ test('avisos por correo: lo que te pidieron revisar y no abriste va en su caja e
   await vuelta(enDias(1));
   assert.equal(enviados.length, 1);
   assert.equal(enviados[0].subject, '🔍 Diego te pidió revisar «Login con Google»');
-  for (const parte of ['🔍 Te pidieron revisar', '• «Login con Google», te lo pidió Diego', `?p=${pendiente.id}`, 'Lo que te pidieron revisar se repite']) {
+  for (const parte of ['TE PIDIERON REVISAR', '• «Login con Google»\n  Te lo pidió Diego', `?p=${pendiente.id}`, 'Lo que te pidieron revisar se repite']) {
     assert.ok(enviados[0].text.includes(parte), parte);
   }
   assert.ok(!enviados[0].text.includes('te pidió revisar «'), 'su aviso no se repite en la lista');

@@ -79,19 +79,56 @@ function haceCuanto(iso, ahora) {
   return relativo.format(Math.round(horas / 24), 'day');
 }
 
+const FUENTE = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 const escapar = (texto) => String(texto).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 // Como mucho estos en el correo; del resto se dice cuántos hay.
 const MAX_EN_CORREO = 20;
 
-// Los colores de cada caja destacada del correo.
-const ROJO = { fondo: '#fef2f2', borde: '#fecaca', acento: '#dc2626', titulo: '#b91c1c', texto: '#991b1b', enlace: '#7f1d1d', cita: '#fca5a5' };
-const AZUL = { fondo: '#eff6ff', borde: '#bfdbfe', acento: '#2563eb', titulo: '#1d4ed8', texto: '#1e40af', enlace: '#1e3a8a', cita: '#93c5fd' };
+// Los colores de cada caja destacada del correo y el ícono de su círculo.
+const ROJO = { fondo: '#fff1f2', borde: '#fecdd3', acento: '#dc2626', titulo: '#c81e1e', item: '#fde4e7', icono: 'alerta' };
+const AZUL = { fondo: '#eff6ff', borde: '#bfdbfe', acento: '#2563eb', titulo: '#1d4ed8', item: '#dfeafe', icono: 'lupa' };
+
+// "Mayugo › Vendeizi", o solo el proyecto si no está en una organización.
+const ubicacionDe = ({ organizacion, proyecto } = {}) => [organizacion, proyecto].filter(Boolean).join(' › ') || null;
+
+// La base del HTML (reset y ajustes para el celular) sale de Cerberus (https://github.com/emailmonday/Cerberus, MIT): tablas
+// con estilos en línea, que se ven igual en Gmail, Outlook y Apple Mail.
+const CABECERA = `<meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="x-apple-disable-message-reformatting"><meta name="format-detection" content="telephone=no,address=no,email=no,date=no,url=no">
+<meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">
+<!--[if mso]><style>* { font-family: sans-serif !important; }</style><![endif]-->
+<style>
+  :root { color-scheme: light; supported-color-schemes: light; }
+  html, body { margin: 0 auto !important; padding: 0 !important; height: 100% !important; width: 100% !important; }
+  * { -ms-text-size-adjust: 100%; -webkit-text-size-adjust: 100%; }
+  div[style*="margin: 16px 0"] { margin: 0 !important; }
+  #MessageViewBody, #MessageWebViewDiv { width: 100% !important; }
+  table, td { mso-table-lspace: 0pt !important; mso-table-rspace: 0pt !important; }
+  table { border-spacing: 0 !important; border-collapse: separate !important; margin: 0 auto !important; }
+  a { text-decoration: none; }
+  img { -ms-interpolation-mode: bicubic; }
+  a[x-apple-data-detectors], .unstyle-auto-detected-links a, .aBn { border-bottom: 0 !important; cursor: default !important; color: inherit !important;
+    text-decoration: none !important; font-size: inherit !important; font-family: inherit !important; font-weight: inherit !important; line-height: inherit !important; }
+  .im { color: inherit !important; }
+  .a6S { display: none !important; opacity: 0.01 !important; }
+  img.g-img + div { display: none !important; }
+  @media screen and (max-width: 600px) {
+    .email-container { padding: 12px 8px !important; }
+    .solo-ancho { display: none !important; width: 0 !important; }
+    .cabecera { padding: 18px 16px !important; }
+    .cuerpo { padding: 22px 14px 24px !important; }
+    .icono-caja { display: none !important; }
+    .texto-caja { padding-left: 16px !important; }
+    .hora { width: 74px !important; }
+  }
+</style>`;
 
 // El correo para `perfil` con sus `avisos` (actividad, de la más vieja a la más nueva), los pendientes a su cargo que
 // rebotaron y todavía no abrió (`rebotados`: id, texto, por, nota, rebotado_en) y los que le pidieron revisar y todavía no
-// abrió (`porRevisar`: id, texto, por, pedido_en): asunto, texto y HTML. Rebotados y pedidos van primero, cada uno en su
-// caja; su aviso no se repite en la lista.
+// abrió (`porRevisar`: id, texto, por, pedido_en): asunto, texto y HTML. Todo puede traer la organización y el proyecto de
+// su pendiente. Rebotados y pedidos van primero, cada uno en su caja; su aviso no se repite en la lista. Las imágenes
+// (PNG, porque Gmail no muestra SVG; el SVG de al lado es su fuente) se publican con el tablero, en /pendientes/correo.
 export function armarResumen({ perfil, avisos, rebotados = [], porRevisar = [], urlTablero, ahora = Date.now() }) {
   const enlace = (pendienteId) => pendienteId && `${urlTablero}?p=${pendienteId}`;
   const frase = (actividad) => `${actividad.autor ?? 'Alguien'} ${describir(actividad, perfil.id)}`;
@@ -106,49 +143,59 @@ export function armarResumen({ perfil, avisos, rebotados = [], porRevisar = [], 
       : lista.length === 1 ? frase(lista[0]) : `Tienes ${lista.length} avisos sin ver en Pendientes`;
   const cajas = [
     rebotados.length > 0 && {
-      titulo: rebotados.length === 1 ? '⚠️ Rebotado sin abrir' : '⚠️ Rebotados sin abrir',
+      titulo: rebotados.length === 1 ? 'Rebotado sin abrir' : 'Rebotados sin abrir',
       explicacion: rebotados.length === 1
-        ? 'Lo revisaron, no lo aprobaron y volvió a Haciendo. Ábrelo para ver qué falta:'
-        : 'Los revisaron, no los aprobaron y volvieron a Haciendo. Ábrelos para ver qué falta:',
+        ? 'Lo revisaron, no lo aprobaron y volvió a Haciendo. Ábrelo para ver qué falta.'
+        : 'Los revisaron, no los aprobaron y volvieron a Haciendo. Ábrelos para ver qué falta.',
       colores: ROJO,
-      items: rebotados.map((item) => ({ ...item, pie: `lo rebotó ${item.por ?? 'alguien'} ${haceCuanto(item.rebotado_en, ahora)}` })),
+      // Lo rebotado lleva debajo, en rojo y con el reloj, quién lo rebotó y cuándo.
+      items: rebotados.map((item) => ({ ...item, debajo: `Lo rebotó ${item.por ?? 'alguien'} ${haceCuanto(item.rebotado_en, ahora)}` })),
     },
     porRevisar.length > 0 && {
-      titulo: '🔍 Te pidieron revisar',
+      titulo: 'Te pidieron revisar',
       explicacion: porRevisar.length === 1
-        ? 'Ábrelo y apruébalo, o recházalo con «Rebotar» si falta algo:'
-        : 'Ábrelos y apruébalos, o recházalos con «Rebotar» si falta algo:',
+        ? 'Ábrelo y apruébalo, o recházalo con «Rebotar» si falta algo.'
+        : 'Ábrelos y apruébalos, o recházalos con «Rebotar» si falta algo.',
       colores: AZUL,
-      items: porRevisar.map((item) => ({ ...item, nota: null, pie: `te lo pidió ${item.por ?? 'alguien'} ${haceCuanto(item.pedido_en, ahora)}` })),
+      // Lo pedido lleva dentro de su recuadro quién lo pidió y cuándo.
+      items: porRevisar.map((item) => ({ ...item, dentro: `Te lo pidió ${item.por ?? 'alguien'} ${haceCuanto(item.pedido_en, ahora)}` })),
     },
   ].filter(Boolean);
-  const introAvisos = lista.length === 1 ? 'Esto pasó en Pendientes y todavía no lo viste:' : 'Esto pasó en Pendientes y todavía no lo viste (lo más nuevo primero):';
+  const tituloLista = cajas.length > 0 ? 'Otras actividades relacionadas' : 'Lo que no viste';
   const repetidos = rebotados.length > 0 && porRevisar.length > 0
     ? 'Lo rebotado y lo que te pidieron revisar se repiten en cada resumen hasta que los abras.'
     : rebotados.length > 0 ? 'Lo rebotado se repite en cada resumen hasta que lo abras.'
       : porRevisar.length > 0 ? 'Lo que te pidieron revisar se repite en cada resumen hasta que lo abras.' : null;
-  const pie = [
+  const lineasPie = [
     'Este resumen llega a las 9 de la mañana, como mucho cada 2 días, con los avisos que no viste.',
     repetidos,
-    'Para no recibir estos correos, apágalos en el menú de tu cuenta, en «Avisos por correo».',
-  ].filter(Boolean).join(' ');
+  ].filter(Boolean);
+  const apagar = ['Para no recibir estos correos, ', 'apágalos en tu cuenta, en «Avisos por correo»', '.'];
+  // Lo que se ve en la bandeja junto al asunto: cuánto hay de cada cosa.
+  const avance = [
+    rebotados.length > 0 && `${rebotados.length} ${rebotados.length === 1 ? 'rebotado' : 'rebotados'} sin abrir`,
+    porRevisar.length > 0 && `${porRevisar.length} por revisar`,
+    lista.length > 0 && `${lista.length} ${lista.length === 1 ? 'aviso' : 'avisos'} sin ver`,
+  ].filter(Boolean).join(' · ');
 
   const texto = [
     `Hola, ${perfil.nombre}:`,
     '',
     ...cajas.flatMap((caja) => [
-      `${caja.titulo}. ${caja.explicacion}`,
+      `${caja.titulo.toUpperCase()}. ${caja.explicacion}`,
       '',
       ...caja.items.flatMap((item) => [
-        `• «${item.texto}», ${item.pie}`,
+        `• «${item.texto}»${ubicacionDe(item) ? ` (${ubicacionDe(item)})` : ''}`,
         ...(item.nota ? item.nota.split('\n').map((linea) => `  > ${linea}`) : []),
+        ...[item.dentro, item.debajo].filter(Boolean).map((linea) => `  ${linea}`),
         ...(enlace(item.id) ? [`  ${enlace(item.id)}`] : []),
         '',
       ]),
     ]),
-    ...(lista.length > 0 ? [introAvisos, ''] : []),
+    ...(lista.length > 0 ? [`${tituloLista.toUpperCase()} (lo más nuevo primero)`, ''] : []),
     ...mostrados.flatMap((actividad) => [
       `• ${frase(actividad)} (${haceCuanto(actividad.creado_en, ahora)})`,
+      ...(ubicacionDe(actividad) ? [`  ${ubicacionDe(actividad)}`] : []),
       ...(detalleDe(actividad) ? detalleDe(actividad).split('\n').map((linea) => `  > ${linea}`) : []),
       ...(enlace(actividad.pendiente_id) ? [`  ${enlace(actividad.pendiente_id)}`] : []),
       '',
@@ -157,47 +204,129 @@ export function armarResumen({ perfil, avisos, rebotados = [], porRevisar = [], 
     `Abrir el tablero: ${urlTablero}`,
     '',
     '—',
-    pie,
+    [...lineasPie, apagar.join('')].join(' '),
   ].join('\n');
 
-  const cajaHtml = ({ titulo, explicacion, colores: c, items }) => `<tr><td style="padding:8px 0 16px">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${c.fondo};border:1px solid ${c.borde};border-left:4px solid ${c.acento};border-radius:8px;padding:12px 14px">
-      <tr><td style="font-size:16px;font-weight:700;color:${c.titulo}">${escapar(titulo)}</td></tr>
-      <tr><td style="font-size:14px;color:${c.texto};padding:4px 0 8px">${escapar(explicacion)}</td></tr>
-      ${items.map((item) => {
-        const url = enlace(item.id);
-        const nombre = url ? `<a href="${escapar(url)}" style="color:${c.enlace};text-decoration:none">«${escapar(item.texto)}»</a>` : `«${escapar(item.texto)}»`;
-        return `<tr><td style="padding:8px 0;border-top:1px solid ${c.borde}">
-        <div style="font-size:15px;line-height:1.4;font-weight:600">${nombre}</div>
-        ${item.nota ? `<div style="margin-top:6px;padding-left:10px;border-left:3px solid ${c.cita};color:${c.enlace};font-size:14px;white-space:pre-line">${escapar(item.nota)}</div>` : ''}
-        <div style="margin-top:4px;color:${c.texto};font-size:12px">${escapar(item.pie)}</div>
-      </td></tr>`;
-      }).join('')}
+  const imagen = (nombre, ancho, alto, alt = '', estilo = 'display:block') =>
+    `<img src="${escapar(new URL(`correo/${nombre}.png`, urlTablero).href)}" width="${ancho}" height="${alto}" alt="${escapar(alt)}" style="border:0;outline:none;${estilo}">`;
+  const separador = (alto) => `<div style="height:${alto}px;line-height:${alto}px;font-size:1px">&nbsp;</div>`;
+  const conEnlace = (url, contenido, color) => url ? `<a href="${escapar(url)}" style="color:${color};text-decoration:none">${contenido}</a>` : contenido;
+  const ubicacionHtml = (item) => ubicacionDe(item)
+    ? `<div style="font-size:12px;line-height:16px;font-weight:600;color:#64748b;padding-bottom:3px">${imagen('organizacion', 12, 12, '', 'display:inline-block;vertical-align:-1px;margin-right:5px')}${escapar(ubicacionDe(item))}</div>`
+    : '';
+  // «Diego» en negrita, y los títulos entre comillas también.
+  const fraseHtml = (actividad) => `<strong>${escapar(actividad.autor ?? 'Alguien')}</strong> ${escapar(describir(actividad, perfil.id)).replace(/«([^»]*)»/g, '<strong>«$1»</strong>')}`;
+
+  const cajaHtml = ({ titulo, explicacion, colores: c, items }) => `<tr><td style="padding:0 0 16px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${c.fondo};border:1px solid ${c.borde};border-left:4px solid ${c.acento};border-radius:10px">
+      <tr>
+        <td class="icono-caja" width="64" valign="top" style="width:64px;padding:20px 0 20px 16px">${imagen(c.icono, 48, 48)}</td>
+        <td class="texto-caja" valign="top" style="padding:19px 18px 18px 14px;font-family:${FUENTE}">
+          <div style="font-size:18px;line-height:24px;font-weight:700;color:${c.titulo}">${escapar(titulo)}</div>
+          <div style="font-size:15px;line-height:22px;color:#1f2937;padding-top:4px">${escapar(explicacion)}</div>
+          ${items.map((item) => `${separador(14)}
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${c.item};border-radius:8px">
+            <tr>
+              <td width="30" valign="top" style="width:30px;padding:16px 0 14px 16px">${imagen('carta', 18, 18)}</td>
+              <td valign="top" style="padding:13px 16px 14px 12px;font-family:${FUENTE}">
+                ${ubicacionHtml(item)}
+                <div style="font-size:15px;line-height:21px;font-weight:700;color:#111827">${conEnlace(enlace(item.id), `«${escapar(item.texto)}»`, '#111827')}</div>
+                ${[item.nota, item.dentro].filter(Boolean).map((linea) => `<div style="font-size:13.5px;line-height:20px;color:#4b5563;padding-top:2px;white-space:pre-line">${escapar(linea)}</div>`).join('')}
+              </td>
+            </tr>
+          </table>
+          ${item.debajo ? `<div style="font-size:13.5px;line-height:18px;color:${c.acento};padding-top:10px">${imagen('reloj', 14, 14, '', 'display:inline-block;vertical-align:-2px;margin-right:6px')}${escapar(item.debajo)}</div>` : ''}`).join('')}
+        </td>
+      </tr>
     </table>
   </td></tr>`;
-  const filas = mostrados.map((actividad) => {
-    const url = enlace(actividad.pendiente_id);
-    const titulo = url ? `<a href="${escapar(url)}" style="color:#111827;text-decoration:none">${escapar(frase(actividad))}</a>` : escapar(frase(actividad));
+
+  // La lista como una línea de tiempo: lo más nuevo con el check verde, lo demás con un punto, unidos por una línea.
+  const filas = mostrados.map((actividad, indice) => {
+    const ultima = indice === mostrados.length - 1;
+    const linea = mostrados.length === 1 ? ''
+      : `background-image:url(${new URL('correo/linea.png', urlTablero).href});background-repeat:no-repeat;background-size:2px ${
+        indice === 0 ? '100%;background-position:center 25px' : ultima ? '25px;background-position:center top' : '100%;background-position:center top'};`;
     const detalle = detalleDe(actividad);
-    return `<tr><td style="padding:12px 0;border-bottom:1px solid #e5e7eb">
-      <div style="font-size:15px;line-height:1.4;font-weight:600">${titulo}</div>
-      ${detalle ? `<div style="margin-top:6px;padding-left:10px;border-left:3px solid #d1d5db;color:#4b5563;font-size:14px;white-space:pre-line">${escapar(detalle)}</div>` : ''}
-      <div style="margin-top:4px;color:#6b7280;font-size:12px">${escapar(haceCuanto(actividad.creado_en, ahora))}</div>
-    </td></tr>`;
+    return `<tr>
+      <td width="36" valign="top" align="center" style="width:36px;padding-top:14px;${linea}">${imagen(indice === 0 ? 'hecho' : 'punto', 22, 22, '', 'display:block;margin:0 auto')}</td>
+      <td valign="top" style="padding:12px 0 12px 8px;${ultima ? '' : 'border-bottom:1px solid #e5e7eb;'}">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+          <td valign="top" style="font-family:${FUENTE};font-size:14.5px;line-height:21px;color:#111827">
+            ${ubicacionHtml(actividad)}
+            ${conEnlace(enlace(actividad.pendiente_id), fraseHtml(actividad), '#111827')}
+            ${detalle ? `<div style="font-size:13.5px;line-height:20px;color:#4b5563;padding-top:2px;white-space:pre-line">${escapar(detalle)}</div>` : ''}
+          </td>
+          <td class="hora" width="96" valign="top" align="right" style="width:96px;padding-left:8px;font-family:${FUENTE};font-size:13px;line-height:21px;color:#6b7280;white-space:nowrap">${escapar(haceCuanto(actividad.creado_en, ahora))}</td>
+        </tr></table>
+      </td>
+    </tr>`;
   }).join('');
-  const html = `<!doctype html><html lang="es"><body style="margin:0;background:#f3f4f6;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 12px"><tr><td align="center">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:12px;padding:24px">
-      <tr><td style="font-size:16px;padding-bottom:${cajas.length > 0 ? 12 : 4}px">Hola, ${escapar(perfil.nombre)}:</td></tr>
-      ${cajas.map(cajaHtml).join('')}
-      ${lista.length > 0 ? `<tr><td style="font-size:14px;color:#4b5563;padding-bottom:8px">${escapar(introAvisos)}</td></tr>` : ''}
-      ${filas}
-      ${resto > 0 ? `<tr><td style="padding-top:12px;font-size:14px;color:#4b5563">Y ${resto === 1 ? 'un aviso más' : `${resto} avisos más`} en el tablero.</td></tr>` : ''}
-      <tr><td style="padding-top:20px"><a href="${escapar(urlTablero)}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 16px;border-radius:8px">Abrir el tablero</a></td></tr>
-      <tr><td style="padding-top:24px;font-size:12px;color:#6b7280">${escapar(pie)}</td></tr>
+  const listaHtml = lista.length === 0 ? '' : `<tr><td style="padding:0 0 22px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:10px;background:#ffffff">
+      <tr><td style="padding:16px 20px 4px 16px">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+          <td width="42" valign="middle" style="width:42px">${imagen('documento', 32, 32)}</td>
+          <td valign="middle" style="font-family:${FUENTE};font-size:16px;line-height:22px;font-weight:700;color:#111827">${escapar(tituloLista)}</td>
+        </tr></table>
+      </td></tr>
+      <tr><td style="padding:2px 20px 8px 20px">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${filas}</table>
+        ${resto > 0 ? `<div style="font-family:${FUENTE};font-size:13.5px;line-height:20px;color:#4b5563;padding:6px 0 4px 44px">Y ${resto === 1 ? 'un aviso más' : `${resto} avisos más`} en el tablero.</div>` : ''}
+      </td></tr>
     </table>
-  </td></tr></table>
-</body></html>`;
+  </td></tr>`;
+
+  const html = `<!doctype html>
+<html lang="es" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>${CABECERA}<title>${escapar(asunto)}</title></head>
+<body width="100%" style="margin:0;padding:0 !important;mso-line-height-rule:exactly;background-color:#eef2f7">
+<center role="article" aria-roledescription="email" lang="es" style="width:100%;background-color:#eef2f7">
+  <div style="max-height:0;overflow:hidden;mso-hide:all;display:none" aria-hidden="true">${escapar(avance)}&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;</div>
+  <div style="max-width:600px;margin:0 auto;padding:24px 12px" class="email-container">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:auto">
+      <tr><td class="cabecera" bgcolor="#1d4ed8" style="background-color:#1d4ed8;background-image:linear-gradient(115deg,#1a45d4 0%,#2563eb 55%,#3b7cf7 100%);border-radius:16px 16px 0 0;padding:22px 26px">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+          <td width="84" valign="middle" style="width:84px">${imagen('robot', 72, 72, 'Pendientebot')}</td>
+          <td valign="middle" style="font-family:${FUENTE}">
+            <div style="font-size:26px;line-height:32px;font-weight:800;color:#ffffff">Pendientebot</div>
+            <div style="font-size:14.5px;line-height:20px;color:#dbeafe;padding-top:2px">Te mantiene al día con tus pendientes</div>
+          </td>
+          <td class="solo-ancho" width="150" align="right" valign="middle" style="width:150px">${imagen('sobre', 140, 93, '', 'display:block;margin-left:auto')}</td>
+        </tr></table>
+      </td></tr>
+      <tr><td class="cuerpo" bgcolor="#ffffff" style="background-color:#ffffff;border-radius:0 0 16px 16px;padding:26px 28px 28px;box-shadow:0 8px 24px rgba(15,23,42,.06)">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+          <tr><td style="font-family:${FUENTE};padding:0 0 18px">
+            <div style="font-size:20px;line-height:26px;font-weight:700;color:#111827">Hola, ${escapar(perfil.nombre)}:</div>
+            <div style="font-size:15px;line-height:22px;color:#4b5563;padding-top:4px">Este es un resumen de lo que pasó en tus pendientes:</div>
+          </td></tr>
+          ${cajas.map(cajaHtml).join('')}
+          ${listaHtml}
+          <tr><td align="center" style="padding:2px 0 24px">
+            <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto"><tr>
+              <td bgcolor="#1d4ed8" style="background-color:#1d4ed8;border-radius:8px">
+                <a href="${escapar(urlTablero)}" style="display:inline-block;padding:14px 30px;font-family:${FUENTE};font-size:17px;line-height:22px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:8px">${imagen('enlace', 20, 20, '', 'display:inline-block;vertical-align:-4px;margin-right:10px')}Abrir el tablero${imagen('flecha', 20, 20, '', 'display:inline-block;vertical-align:-4px;margin-left:10px')}</a>
+              </td>
+            </tr></table>
+          </td></tr>
+          <tr><td>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;border-radius:10px">
+              <tr>
+                <td width="58" valign="top" style="width:58px;padding:16px 0 16px 18px">${imagen('foco', 40, 40)}</td>
+                <td valign="middle" style="padding:14px 18px 14px 4px;font-family:${FUENTE};font-size:13px;line-height:20px;color:#4b5563">
+                  ${lineasPie.map(escapar).join('<br>')}<br>${escapar(apagar[0])}<strong style="color:#374151">${escapar(apagar[1])}</strong>${escapar(apagar[2])}
+                </td>
+              </tr>
+            </table>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </div>
+</center>
+</body>
+</html>`;
   return { subject: asunto, text: texto, html };
 }
 

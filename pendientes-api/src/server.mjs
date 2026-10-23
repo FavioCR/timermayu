@@ -217,6 +217,9 @@ const PENDIENTE_VISIBLE = `(proyecto_id IS NULL OR proyecto_id IN (${PROYECTOS_V
 // El historial de un pendiente se ve si se ve el pendiente. El de uno ya borrado guarda en privado_de
 // al dueño de la organización privada en la que estaba (o NULL si lo veía todo el equipo).
 // Lleva dos parámetros, los dos el perfil que pregunta.
+// La organización y el proyecto de un pendiente (para el correo), en una consulta sobre pendientes.
+const UBICACION = `(SELECT o.nombre FROM proyectos pr JOIN organizaciones o ON o.id = pr.organizacion_id WHERE pr.id = proyecto_id) AS organizacion,
+  (SELECT nombre FROM proyectos WHERE id = proyecto_id) AS proyecto`;
 const ACTIVIDAD_VISIBLE = `(a.pendiente_id IN (SELECT id FROM pendientes WHERE ${PENDIENTE_VISIBLE})
   OR (a.pendiente_id IS NULL AND (a.privado_de IS NULL OR a.privado_de = ?)))`;
 const SELECT_ACTIVIDAD = 'SELECT a.id, a.pendiente_id, a.texto_pendiente, a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en FROM actividad a';
@@ -1640,7 +1643,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     // `antiguedadMs`), del más viejo al más nuevo. Solo lo que puede ver, como en la campana.
     // Aparte van los pendientes a su cargo que rebotaron hace más de `esperaMs` y todavía no abrió, y los que le pidieron
     // revisar hace más de `esperaMs` y todavía no abrió: esos se repiten en cada correo (y bastan para mandarlo) hasta que
-    // los abra.
+    // los abra. Cada cosa lleva la organización y el proyecto de su pendiente.
     avisosParaCorreo({ ahora, desde, esperaMs, antiguedadMs }) {
       const hace = (ms) => new Date(ahora - ms).toISOString();
       const desdeIso = new Date(desde).toISOString();
@@ -1653,12 +1656,16 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         FROM notificaciones n JOIN actividad a ON a.id = n.actividad_id
         WHERE n.perfil_id = ? AND n.leida_en IS NULL AND n.correo_en IS NULL AND n.creado_en > ? AND ${ACTIVIDAD_VISIBLE}
         ORDER BY n.creado_en, n.rowid`);
-      const rebotados = db.prepare(`SELECT id, texto, rebotado_en, rebote_nota AS nota, (SELECT nombre FROM perfiles WHERE id = rebotado_por) AS por
+      const rebotados = db.prepare(`SELECT id, texto, rebotado_en, rebote_nota AS nota, (SELECT nombre FROM perfiles WHERE id = rebotado_por) AS por,
+          ${UBICACION}
         FROM pendientes WHERE perfil_id = ? AND rebotado_en IS NOT NULL AND rebote_visto_en IS NULL AND rebotado_en <= ? AND ${PENDIENTE_VISIBLE}
         ORDER BY rebotado_en, rowid`);
-      const porRevisar = db.prepare(`SELECT p.id, p.texto, r.pedido_en, (SELECT nombre FROM perfiles WHERE id = r.pedido_por) AS por
+      const porRevisar = db.prepare(`SELECT p.id, p.texto, r.pedido_en, (SELECT nombre FROM perfiles WHERE id = r.pedido_por) AS por,
+          ${UBICACION.replaceAll('proyecto_id', 'p.proyecto_id')}
         FROM revisiones r JOIN pendientes p ON p.id = r.pendiente_id
         WHERE r.revisor_id = ? AND r.abierto_en IS NULL AND r.pedido_en <= ? AND ${PENDIENTE_VISIBLE} ORDER BY r.pedido_en, r.rowid`);
+      const ubicacion = db.prepare(`SELECT ${UBICACION} FROM pendientes WHERE id = ?`);
+      const conUbicacion = (actividad) => ({ ...actividad, ...(actividad.pendiente_id && ubicacion.get(actividad.pendiente_id)) });
       return perfiles
         .map((perfil) => ({
           perfil: { ...perfil },
@@ -1671,7 +1678,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         .map(({ perfil, avisos, rebotados, porRevisar }) => ({
           perfil,
           ids: avisos.map((aviso) => aviso.notificacion_id),
-          avisos: avisos.map(({ notificacion_id: _id, avisado_en: _en, ...actividad }) => actividadFila(actividad)),
+          avisos: avisos.map(({ notificacion_id: _id, avisado_en: _en, ...actividad }) => conUbicacion(actividadFila(actividad))),
           rebotados,
           porRevisar,
         }));
@@ -3374,14 +3381,15 @@ if (isMain && process.argv[2] === 'quitar-contrasena') {
     process.exitCode = 1;
   } else {
     const ahora = Date.now();
+    const donde = { organizacion: 'Mayugo', proyecto: 'Pendientes' };
     const ejemplo = (tipo, datos, minutos) => ({
       pendiente_id: null, texto_pendiente: 'Correo de prueba', perfil_id: null, autor: 'Pendientes', tipo, datos,
-      creado_en: new Date(ahora - minutos * 60_000).toISOString(),
+      creado_en: new Date(ahora - minutos * 60_000).toISOString(), ...donde,
     });
     const avisos = [ejemplo('asignado', { a: 'ti', a_id: 'prueba' }, 90), ejemplo('comentario', { menciones: ['prueba'], extracto: 'Si te llegó, el correo funciona.' }, 70)];
     const rebotados = [{ id: null, texto: 'Correo de prueba', por: 'Pendientes', nota: 'Así se ve un pendiente rebotado que todavía no abres.',
-      rebotado_en: new Date(ahora - 26 * 60 * 60_000).toISOString() }];
-    const porRevisar = [{ id: null, texto: 'Correo de prueba', por: 'Pendientes', pedido_en: new Date(ahora - 3 * 60 * 60_000).toISOString() }];
+      rebotado_en: new Date(ahora - 26 * 60 * 60_000).toISOString(), ...donde }];
+    const porRevisar = [{ id: null, texto: 'Correo de prueba', por: 'Pendientes', pedido_en: new Date(ahora - 3 * 60 * 60_000).toISOString(), ...donde }];
     const perfil = { id: 'prueba', nombre: 'prueba' };
     correo.enviar({ to: process.argv[3], ...armarResumen({ perfil, avisos, rebotados, porRevisar, urlTablero: process.env.URL_TABLERO ?? URL_TABLERO, ahora }) })
       .then((info) => console.log(`Enviado (${info.messageId}).`), (error) => {
