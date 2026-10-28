@@ -270,6 +270,7 @@ export function ProyectosDialog({
       }}
     >
       <DialogContent
+        data-seguir="seccion:proyectos"
         className="max-h-[90svh] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-lg"
         // Mientras se renombra, Escape cancela el nombre y no cierra la ventana.
         onEscapeKeyDown={(event) => renombrando && event.preventDefault()}

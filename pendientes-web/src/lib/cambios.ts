@@ -17,6 +17,7 @@ export type EventoSeguimiento = {
   perfil_id: string
   lugar: "tablero" | "pendiente" | "notas" | null
   pendiente_id: string | null
+  seccion: string | null
   puntero: { ancla: string; x: number; y: number } | null
 }
 

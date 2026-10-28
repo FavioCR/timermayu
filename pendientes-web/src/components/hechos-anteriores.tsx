@@ -54,7 +54,7 @@ export function HechosAnteriores({
       className="sm:max-w-xl"
     >
       {/* Busca igual que el buscador de la columna: cada palabra, sin importar tildes. */}
-      <Command filter={(valor, texto, palabras) => (coincide([valor, ...(palabras ?? [])].join(" "), texto) ? 1 : 0)}>
+      <Command data-seguir="seccion:hechos-anteriores" filter={(valor, texto, palabras) => (coincide([valor, ...(palabras ?? [])].join(" "), texto) ? 1 : 0)}>
         <CommandInput placeholder="Buscar en lo terminado hace más de 2 días…" value={busqueda} onValueChange={onBusquedaChange} />
         <CommandList className="max-h-[min(60svh,32rem)]">
           <CommandEmpty>{pendientes.length ? "Nada con ese texto." : "No hay hechos archivados."}</CommandEmpty>

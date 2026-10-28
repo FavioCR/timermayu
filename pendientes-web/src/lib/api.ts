@@ -209,7 +209,12 @@ export type Notificacion = { id: string; leida: boolean; actividad: Actividad }
 export type Presencia = { perfil_id: string; en_linea: boolean; visto_en: string | null }
 export type CuerpoSeguimiento =
   | { lugar: null }
-  | { lugar: "tablero" | "pendiente" | "notas"; pendiente_id: string | null; puntero: { ancla: string; x: number; y: number } | null }
+  | {
+      lugar: "tablero" | "pendiente" | "notas"
+      pendiente_id: string | null
+      seccion: string | null
+      puntero: { ancla: string; x: number; y: number } | null
+    }
 
 // Un pendiente con avisos sin leer: cuántos y cuántos son menciones (o respuestas a un mensaje tuyo).
 export type SinLeer = { pendiente_id: string; avisos: number; menciones: number }

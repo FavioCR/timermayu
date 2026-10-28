@@ -227,7 +227,7 @@ export function PerfilesDialog({
         onAbiertoChange(siguiente)
       }}
     >
-      <DialogContent className="max-h-[90svh] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-md">
+      <DialogContent data-seguir="seccion:perfiles" className="max-h-[90svh] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Perfiles</DialogTitle>
           <DialogDescription>

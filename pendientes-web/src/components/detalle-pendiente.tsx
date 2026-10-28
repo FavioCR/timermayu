@@ -35,6 +35,7 @@ import { abrirArchivo, PREFIJO_URL_ARCHIVO, tipoPorNombre, urlDeArchivo } from "
 import { comprimirImagen } from "@/lib/comprimir-imagen"
 import type { Medio } from "@/lib/marcas-de-tiempo"
 import { reproducir } from "@/lib/reproductor"
+import type { Pestana } from "@/lib/seguimiento"
 import { involucrados, organizacionDe, type Catalogo } from "@/lib/catalogo"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 
@@ -75,6 +76,10 @@ type Props = {
   onSalir: () => void
   // Cambia (>0) cuando hay que mostrar el chat con el campo listo para escribir (desde el recordatorio de evidencia).
   enfocarChat?: number
+  // Siguiendo a alguien: la pestaña (chat o historial) que tiene abierta. Sin seguir a nadie, undefined.
+  pestanaSeguida?: Pestana
+  // La pestaña que se ve, para contarla en el seguimiento.
+  onPestana?: (pestana: Pestana) => void
 }
 
 // Copia el enlace que abre este pendiente (?p=<id>), para pasarlo por WhatsApp o donde sea.
@@ -155,8 +160,16 @@ function Contenido({
   onBorrar,
   onSalir,
   enfocarChat = 0,
+  pestanaSeguida,
+  onPestana,
 }: Omit<Props, "pendiente" | "onCerrar"> & { pendiente: Pendiente }) {
-  const [pestana, setPestana] = useState("chat")
+  const [pestana, setPestana] = useState<Pestana>(pestanaSeguida ?? "chat")
+  const [seguida, setSeguida] = useState(pestanaSeguida)
+  if (pestanaSeguida !== seguida) {
+    setSeguida(pestanaSeguida)
+    if (pestanaSeguida) setPestana(pestanaSeguida)
+  }
+  useEffect(() => onPestana?.(pestana), [pestana, onPestana])
   // Un pedido nuevo de escribir en el chat lo muestra aunque estuviera viendo el historial.
   const [pedidoDeChat, setPedidoDeChat] = useState(enfocarChat)
   if (enfocarChat !== pedidoDeChat) {
@@ -589,7 +602,7 @@ function Contenido({
       </div>
 
       <aside data-seguir={`chat:${pendiente.id}`} aria-label="Chat e historial" className="flex flex-col border-t lg:h-full lg:w-96 lg:shrink-0 lg:border-t-0 lg:border-l">
-        <Tabs value={pestana} onValueChange={setPestana} className="flex min-h-0 flex-1 flex-col gap-0">
+        <Tabs value={pestana} onValueChange={(valor) => setPestana(valor as Pestana)} className="flex min-h-0 flex-1 flex-col gap-0">
           <div className="flex h-14 shrink-0 items-center border-b px-4 lg:pr-12">
             <TabsList>
               <TabsTrigger value="chat" className="px-3">

@@ -1,4 +1,3 @@
-import { useState } from "react"
 import { ScanEye } from "lucide-react"
 import { cn } from "cn"
 
@@ -16,13 +15,17 @@ export function PorRevisar({
   yo,
   perfilesPorId,
   onAbrir,
+  abierto,
+  onAbiertoChange: setAbierto,
 }: {
   pendientes: Pendiente[]
   yo: string
   perfilesPorId: Map<string, Perfil>
   onAbrir: (id: string) => void
+  // Lo lleva el tablero, para abrirlo o cerrarlo al seguir a alguien.
+  abierto: boolean
+  onAbiertoChange: (abierto: boolean) => void
 }) {
-  const [abierto, setAbierto] = useState(false)
   const pedidos = pendientes
     .flatMap((pendiente) => {
       const revision = pendiente.revisiones.find((r) => r.revisor_id === yo)
@@ -54,7 +57,7 @@ export function PorRevisar({
           )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-[min(24rem,calc(100vw-2rem))] gap-0 p-0">
+      <PopoverContent data-seguir="seccion:por-revisar" align="end" className="w-[min(24rem,calc(100vw-2rem))] gap-0 p-0">
         <div className="flex min-h-12 items-center justify-between gap-2 border-b px-4 py-2">
           <p className="m-0 font-medium">Por revisar</p>
           {pedidos.length > 0 && (

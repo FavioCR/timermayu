@@ -152,12 +152,14 @@ import { usePresencia } from "@/lib/presencia"
 import {
   cambiarVerCursores,
   describirLugar,
+  esSeccion,
   lugaresActuales,
   useCompartirSeguimiento,
   useLugares,
   useVerCursores,
   vigilarLugares,
   type Lugar,
+  type Pestana,
 } from "@/lib/seguimiento"
 import { separarTipo, TIPOS, tipoDe } from "@/lib/tipos"
 
@@ -269,7 +271,17 @@ function leerSelecciones(): Selecciones {
   }
 }
 
-type Ventana = "proyectos" | "perfiles" | "actividad" | "ia" | "crear-ia" | "instalar" | "apariencia"
+type Ventana =
+  | "proyectos"
+  | "perfiles"
+  | "actividad"
+  | "ia"
+  | "crear-ia"
+  | "instalar"
+  | "apariencia"
+  | "mis-pendientes"
+  | "por-revisar"
+  | "avisos"
 
 // Tocar un botón dentro de la tarjeta no debe empezar a arrastrarla.
 const detener = (event: SyntheticEvent) => event.stopPropagation()
@@ -735,7 +747,10 @@ export function Tablero({
   usePresencia(credenciales, Boolean(usuario?.perfil_id))
 
   // Seguimiento, como en Miro: los demás ven dónde anda uno y su mouse, y uno puede seguir a alguien (ver lib/seguimiento.ts).
-  const miLugar: Lugar = abierto ? { tipo: "pendiente", id: abierto } : { tipo: "tablero" }
+  // Lo que se tiene abierto encima del tablero (Actividad, la campana…) y, en un pendiente, si el chat o el historial.
+  const miSeccion = hechosAbiertos ? "hechos-anteriores" : esSeccion(ventana) ? ventana : null
+  const [pestanaDetalle, setPestanaDetalle] = useState<Pestana>("chat")
+  const miLugar: Lugar = abierto ? { tipo: "pendiente", id: abierto, pestana: pestanaDetalle } : { tipo: "tablero", seccion: miSeccion }
   useCompartirSeguimiento(credenciales, usuario?.perfil_id ? miLugar : null)
   const verCursores = useVerCursores()
   const lugares = useLugares()
@@ -743,18 +758,22 @@ export function Tablero({
   const seguido = siguiendo ? perfilesPorId.get(siguiendo) : undefined
   const lugarSeguido = siguiendo ? lugares.get(siguiendo) : undefined
   const tituloDe = useCallback((id: string) => tarjetas.find((tarjeta) => tarjeta.id === id)?.texto, [tarjetas])
-  // Se abre lo que abre quien se sigue y se cierra lo que cierra; si se va, se lo deja de seguir.
+  // Se abre lo que abre quien se sigue (un pendiente o una sección) y se cierra lo que cierra; si se va, se lo deja de
+  // seguir. Lo demás que uno tenga abierto (Apariencia, por ejemplo) no se toca.
   const irConSeguido = useCallback(
     (perfilId: string) => {
       const lugar = lugaresActuales().get(perfilId)
       if (!lugar) {
         setSiguiendo(null)
         toast(`${perfilesPorId.get(perfilId)?.nombre ?? "Quien seguías"} se desconectó`)
-      } else if (lugar.lugar === "tablero") {
-        setAbierto(null)
-      } else if (lugar.lugar === "pendiente" && lugar.pendiente_id) {
-        setAbierto(lugar.pendiente_id)
+        return
       }
+      if (lugar.lugar === "notas") return
+      const seccion = lugar.lugar === "tablero" && esSeccion(lugar.seccion) ? lugar.seccion : null
+      setHechosAbiertos(seccion === "hechos-anteriores")
+      setVentana((actual) => (seccion && seccion !== "hechos-anteriores" ? seccion : esSeccion(actual) ? null : actual))
+      if (lugar.lugar === "tablero") setAbierto(null)
+      else if (lugar.pendiente_id) setAbierto(lugar.pendiente_id)
     },
     [perfilesPorId]
   )
@@ -1371,6 +1390,8 @@ export function Tablero({
             </div>
             {usuario?.perfil_id && (
               <MisPendientes
+                abierto={ventana === "mis-pendientes"}
+                onAbiertoChange={(siguiente) => setVentana(siguiente ? "mis-pendientes" : null)}
                 pendientes={misPorHacer}
                 proyectosPorId={proyectosPorId}
                 organizacionesPorId={organizacionesPorId}
@@ -1388,10 +1409,19 @@ export function Tablero({
               />
             )}
             {usuario?.perfil_id && (
-              <PorRevisar pendientes={tarjetas} yo={usuario.perfil_id} perfilesPorId={perfilesPorId} onAbrir={abrirPendiente} />
+              <PorRevisar
+                abierto={ventana === "por-revisar"}
+                onAbiertoChange={(siguiente) => setVentana(siguiente ? "por-revisar" : null)}
+                pendientes={tarjetas}
+                yo={usuario.perfil_id}
+                perfilesPorId={perfilesPorId}
+                onAbrir={abrirPendiente}
+              />
             )}
             {usuario?.perfil_id && (
               <Notificaciones
+                abierto={ventana === "avisos"}
+                onAbiertoChange={(siguiente) => setVentana(siguiente ? "avisos" : null)}
                 credenciales={credenciales}
                 yo={usuario.perfil_id}
                 perfilesPorId={perfilesPorId}
@@ -2244,6 +2274,8 @@ export function Tablero({
         onCerrar={cerrarDetalle}
         onSalir={onSalir}
         enfocarChat={chatEnfocado && chatEnfocado.id === abierto ? chatEnfocado.vez : 0}
+        pestanaSeguida={siguiendo && lugarSeguido?.lugar === "pendiente" ? (lugarSeguido.seccion === "historial" ? "historial" : "chat") : undefined}
+        onPestana={setPestanaDetalle}
       />
       {usuario && <Cursores lugar={miLugar} perfilesPorId={perfilesPorId} siguiendo={siguiendo} />}
       {seguido && (

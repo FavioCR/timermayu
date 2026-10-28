@@ -7,14 +7,31 @@ import { escucharSeguimiento } from "@/lib/cambios"
 // si está en el mismo lugar, su mouse con su nombre; también puede seguir a alguien (ver el tablero).
 //
 // El mouse va anclado a lo que tiene debajo, marcado con data-seguir: una columna (columna:<estado>), una tarjeta
-// (tarjeta:<id>), la descripción o el chat de un pendiente (detalle:<id>, chat:<id>); fuera de eso, la ventana
-// (pagina). x e y van de 0 a 1 dentro del ancla, así cae sobre lo mismo en pantallas de otro tamaño o con otro scroll.
+// (tarjeta:<id>), la descripción o el chat de un pendiente (detalle:<id>, chat:<id>), una sección abierta encima del
+// tablero (seccion:<nombre>); fuera de eso, la ventana (pagina). x e y van de 0 a 1 dentro del ancla, así cae sobre lo mismo en pantallas de otro tamaño o con otro scroll.
 
 export type Puntero = { ancla: string; x: number; y: number }
+// Lo que se tiene abierto encima del tablero; se sigue igual que un pendiente. Apariencia, la IA o Crear con IA no:
+// son de uno y no tiene sentido abrírselas a quien lo sigue.
+export const SECCIONES = {
+  actividad: "Actividad",
+  proyectos: "Proyectos",
+  perfiles: "Perfiles",
+  "mis-pendientes": "Mis pendientes",
+  "por-revisar": "Por revisar",
+  avisos: "los avisos",
+  "hechos-anteriores": "Hechos anteriores",
+} as const
+export type Seccion = keyof typeof SECCIONES
+export const esSeccion = (valor: string | null | undefined): valor is Seccion => Boolean(valor && Object.hasOwn(SECCIONES, valor))
+// En un pendiente: su chat o su historial.
+export type Pestana = "chat" | "historial"
+
 // Dónde está uno.
-export type Lugar = { tipo: "tablero" } | { tipo: "pendiente"; id: string } | { tipo: "notas" }
-// Dónde está otro. pendiente_id null: un pendiente que uno no puede ver.
-export type LugarAjeno = { lugar: "tablero" | "pendiente" | "notas"; pendiente_id: string | null }
+export type Lugar = { tipo: "tablero"; seccion: Seccion | null } | { tipo: "pendiente"; id: string; pestana: Pestana } | { tipo: "notas" }
+// Dónde está otro. pendiente_id null: un pendiente que uno no puede ver. seccion: la del tablero o, en un pendiente,
+// "historial" (sin ella, el chat).
+export type LugarAjeno = { lugar: "tablero" | "pendiente" | "notas"; pendiente_id: string | null; seccion: string | null }
 
 const ANCLA = "data-seguir"
 // Unas 12 veces por segundo mientras se mueve; quien lo ve lo suaviza.
@@ -31,7 +48,7 @@ let porConfirmar: Set<string> | null = null
 
 function ponerLugar(perfilId: string, lugar: LugarAjeno | null) {
   const antes = lugares.get(perfilId)
-  if (antes?.lugar === lugar?.lugar && antes?.pendiente_id === lugar?.pendiente_id) return
+  if (antes?.lugar === lugar?.lugar && antes?.pendiente_id === lugar?.pendiente_id && antes?.seccion === lugar?.seccion) return
   const nuevos = new Map(lugares)
   if (lugar) nuevos.set(perfilId, lugar)
   else nuevos.delete(perfilId)
@@ -57,7 +74,7 @@ escucharSeguimiento((evento) => {
   porConfirmar?.delete(evento.perfil_id)
   if (evento.puntero) punteros.set(evento.perfil_id, evento.puntero)
   else punteros.delete(evento.perfil_id)
-  ponerLugar(evento.perfil_id, evento.lugar ? { lugar: evento.lugar, pendiente_id: evento.pendiente_id } : null)
+  ponerLugar(evento.perfil_id, evento.lugar ? { lugar: evento.lugar, pendiente_id: evento.pendiente_id, seccion: evento.seccion } : null)
 })
 
 export function vigilarLugares(vigilante: () => void) {
@@ -77,16 +94,19 @@ export function useLugares() {
 // El último mouse de alguien; se lee en cada cuadro, sin pasar por React.
 export const punteroDe = (perfilId: string) => punteros.get(perfilId) ?? null
 
+// En el tablero, también con la misma sección abierta; en un pendiente da igual si en el chat o el historial.
 export function mismoLugar(ajeno: LugarAjeno | undefined, propio: Lugar) {
   if (!ajeno || ajeno.lugar !== propio.tipo) return false
+  if (propio.tipo === "tablero") return ajeno.seccion === propio.seccion
   return propio.tipo !== "pendiente" || ajeno.pendiente_id === propio.id
 }
 
 export function describirLugar(lugar: LugarAjeno, tituloDe: (id: string) => string | undefined) {
-  if (lugar.lugar === "tablero") return "En el tablero"
+  if (lugar.lugar === "tablero") return esSeccion(lugar.seccion) ? `En ${SECCIONES[lugar.seccion]}` : "En el tablero"
   if (lugar.lugar === "notas") return "En sus notas"
   const titulo = lugar.pendiente_id ? tituloDe(lugar.pendiente_id) : undefined
-  return titulo ? `Viendo «${titulo}»` : "Viendo un pendiente"
+  const viendo = titulo ? `Viendo «${titulo}»` : "Viendo un pendiente"
+  return lugar.seccion === "historial" ? `${viendo} · Historial` : viendo
 }
 
 // --- Medir y ubicar el mouse ---
@@ -182,6 +202,7 @@ function mandar(credenciales: string, cuerpo: CuerpoSeguimiento) {
 export function useCompartirSeguimiento(credenciales: string, lugar: Lugar | null) {
   const tipo = lugar?.tipo ?? null
   const pendienteId = lugar?.tipo === "pendiente" ? lugar.id : null
+  const seccion = lugar?.tipo === "tablero" ? lugar.seccion : lugar?.tipo === "pendiente" && lugar.pestana === "historial" ? "historial" : null
   const activo = tipo !== null
 
   useEffect(() => {
@@ -207,7 +228,7 @@ export function useCompartirSeguimiento(credenciales: string, lugar: Lugar | nul
     const cuerpo = (): CuerpoSeguimiento =>
       document.visibilityState !== "visible"
         ? { lugar: null }
-        : { lugar: tipo, pendiente_id: pendienteId, puntero: tipo === "notas" ? null : puntero }
+        : { lugar: tipo, pendiente_id: pendienteId, seccion, puntero: tipo === "notas" ? null : puntero }
     const enviar = () => {
       if (!vivo || temporizador) return
       if (enviando) {
@@ -266,7 +287,7 @@ export function useCompartirSeguimiento(credenciales: string, lugar: Lugar | nul
       document.removeEventListener("visibilitychange", enviar)
       dejarDeEscuchar()
     }
-  }, [credenciales, tipo, pendienteId])
+  }, [credenciales, tipo, pendienteId, seccion])
 }
 
 // --- Preferencia: ver o no los cursores del equipo (de este navegador) ---

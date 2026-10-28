@@ -933,8 +933,15 @@ export function parseRebote(input) {
 // Seguimiento: dónde anda cada quien (el tablero, un pendiente o sus notas) y por dónde va su mouse. El mouse va
 // anclado a lo que tiene debajo (una columna, una tarjeta, la descripción o el chat de un pendiente, o la página), con
 // x e y de 0 a 1 dentro de eso, para que caiga en el mismo lugar en pantallas de otro tamaño. En las notas, que son
-// privadas, solo se dice que está ahí. { lugar: null } es que se fue.
+// privadas, solo se dice que está ahí. { lugar: null } es que se fue. La sección es lo que tiene abierto encima del
+// tablero (Actividad, Proyectos, la campana…) o, en un pendiente, su historial; el mouse sobre ella va anclado a
+// seccion:<nombre>.
 const LUGARES = ['tablero', 'pendiente', 'notas'];
+const SECCIONES = {
+  tablero: ['actividad', 'proyectos', 'perfiles', 'mis-pendientes', 'por-revisar', 'avisos', 'hechos-anteriores'],
+  pendiente: ['historial'],
+  notas: [],
+};
 const ANCLAS_DE_PENDIENTE = ['tarjeta', 'detalle', 'chat'];
 const ES_UUID = new RegExp(`^${UUID}$`);
 export function parseSeguimiento(input) {
@@ -944,16 +951,19 @@ export function parseSeguimiento(input) {
   if (input.lugar === 'pendiente' ? typeof pendienteId !== 'string' || !ES_UUID.test(pendienteId) : pendienteId !== null) {
     throw httpError(422, 'pendiente_invalido');
   }
+  const seccion = input.seccion ?? null;
+  if (seccion !== null && !SECCIONES[input.lugar].includes(seccion)) throw httpError(422, 'seccion_invalida');
   const puntero = input.puntero ?? null;
-  if (puntero === null) return { lugar: input.lugar, pendiente_id: pendienteId, puntero: null };
+  if (puntero === null) return { lugar: input.lugar, pendiente_id: pendienteId, seccion, puntero: null };
   const [tipo, id, ...resto] = typeof puntero.ancla === 'string' ? puntero.ancla.split(':') : [];
   const anclaValida = resto.length === 0 && (tipo === 'columna' ? ESTADOS.includes(id)
     : ANCLAS_DE_PENDIENTE.includes(tipo) ? typeof id === 'string' && ES_UUID.test(id)
-      : tipo === 'pagina' && id === undefined);
+      : tipo === 'seccion' ? SECCIONES.tablero.includes(id)
+        : tipo === 'pagina' && id === undefined);
   const enRango = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
   if (input.lugar === 'notas' || !anclaValida || !enRango(puntero.x) || !enRango(puntero.y)) throw httpError(422, 'puntero_invalido');
   const redondear = (n) => Math.round(n * 10_000) / 10_000;
-  return { lugar: input.lugar, pendiente_id: pendienteId, puntero: { ancla: puntero.ancla, x: redondear(puntero.x), y: redondear(puntero.y) } };
+  return { lugar: input.lugar, pendiente_id: pendienteId, seccion, puntero: { ancla: puntero.ancla, x: redondear(puntero.x), y: redondear(puntero.y) } };
 }
 
 // Sin ids marca todos los avisos como leídos.
@@ -2894,9 +2904,9 @@ export function createApp(options = {}) {
   // Seguimiento, como en Miro: dónde está cada quien y su mouse, para verlo en el tablero de los demás y seguirlo. Vive
   // en memoria, una entrada por perfil (la de su última pestaña), y se avisa enseguida, sin guardar nada. A cada uno le
   // llega solo lo que puede ver: de un pendiente privado ajeno no sabe cuál es ni ve el mouse. A uno mismo no se le avisa.
-  const seguimientos = new Map(); // perfil_id → { pestana, lugar, pendiente_id, puntero, ms }
+  const seguimientos = new Map(); // perfil_id → { pestana, lugar, pendiente_id, seccion, puntero, ms }
   function seguimientoPara(conexion, perfilId, seguimiento) {
-    if (!seguimiento) return { tipo: 'seguimiento', perfil_id: perfilId, lugar: null, pendiente_id: null, puntero: null };
+    if (!seguimiento) return { tipo: 'seguimiento', perfil_id: perfilId, lugar: null, pendiente_id: null, seccion: null, puntero: null };
     const ve = (id) => repo.puedeVerPendiente(conexion.yo, id);
     const pendienteId = seguimiento.pendiente_id && ve(seguimiento.pendiente_id) ? seguimiento.pendiente_id : null;
     const [tipo, id] = seguimiento.puntero?.ancla.split(':') ?? [];
@@ -2906,6 +2916,7 @@ export function createApp(options = {}) {
       perfil_id: perfilId,
       lugar: seguimiento.lugar,
       pendiente_id: pendienteId,
+      seccion: seguimiento.seccion,
       puntero: ocultoPuntero ? null : seguimiento.puntero,
     };
   }

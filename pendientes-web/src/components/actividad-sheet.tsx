@@ -58,7 +58,7 @@ export function ActividadSheet({
 
   return (
     <Sheet open={abierto} onOpenChange={onAbiertoChange}>
-      <SheetContent className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-md">
+      <SheetContent data-seguir="seccion:actividad" className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-md">
         <SheetHeader className="border-b pr-12">
           <SheetTitle className="flex items-center gap-2">
             <History className="size-4" /> Actividad

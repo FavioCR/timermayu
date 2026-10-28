@@ -1,4 +1,3 @@
-import { useState } from "react"
 import { Building2, ChevronRight, ListTodo } from "lucide-react"
 
 import { InsigniaTipo } from "@/components/tipo-select"
@@ -14,13 +13,17 @@ export function MisPendientes({
   proyectosPorId,
   organizacionesPorId,
   onAbrir,
+  abierto,
+  onAbiertoChange: setAbierto,
 }: {
   pendientes: Pendiente[]
   proyectosPorId: Map<string, Proyecto>
   organizacionesPorId: Map<string, Organizacion>
   onAbrir: (id: string) => void
+  // Lo lleva el tablero, para abrirlo o cerrarlo al seguir a alguien.
+  abierto: boolean
+  onAbiertoChange: (abierto: boolean) => void
 }) {
-  const [abierto, setAbierto] = useState(false)
 
   return (
     <>
@@ -38,7 +41,7 @@ export function MisPendientes({
         </span>
       </Button>
       <Sheet open={abierto} onOpenChange={setAbierto}>
-        <SheetContent className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-md">
+        <SheetContent data-seguir="seccion:mis-pendientes" className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-md">
           <SheetHeader className="border-b pr-12">
             <SheetTitle className="flex items-center gap-2">
               <ListTodo className="size-4" /> Mis pendientes

@@ -2237,9 +2237,13 @@ test('equipo: quién está en línea (con el tablero a la vista) y su última co
 test('valida el seguimiento: dónde anda y por dónde va su mouse', () => {
   const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
   assert.equal(parseSeguimiento({ lugar: null }), null);
-  assert.deepEqual(parseSeguimiento({ lugar: 'tablero' }), { lugar: 'tablero', pendiente_id: null, puntero: null });
+  assert.deepEqual(parseSeguimiento({ lugar: 'tablero' }), { lugar: 'tablero', pendiente_id: null, seccion: null, puntero: null });
   assert.deepEqual(parseSeguimiento({ lugar: 'pendiente', pendiente_id: id, puntero: { ancla: `chat:${id}`, x: 0.123456, y: 1 } }),
-    { lugar: 'pendiente', pendiente_id: id, puntero: { ancla: `chat:${id}`, x: 0.1235, y: 1 } });
+    { lugar: 'pendiente', pendiente_id: id, seccion: null, puntero: { ancla: `chat:${id}`, x: 0.1235, y: 1 } });
+  // Lo que tiene abierto encima del tablero, o el historial de un pendiente.
+  assert.deepEqual(parseSeguimiento({ lugar: 'tablero', seccion: 'actividad', puntero: { ancla: 'seccion:actividad', x: 0.5, y: 0.5 } }),
+    { lugar: 'tablero', pendiente_id: null, seccion: 'actividad', puntero: { ancla: 'seccion:actividad', x: 0.5, y: 0.5 } });
+  assert.equal(parseSeguimiento({ lugar: 'pendiente', pendiente_id: id, seccion: 'historial' }).seccion, 'historial');
   assert.deepEqual(parseSeguimiento({ lugar: 'tablero', puntero: { ancla: 'columna:haciendo', x: 0, y: 0.5 } }).puntero,
     { ancla: 'columna:haciendo', x: 0, y: 0.5 });
   assert.equal(parseSeguimiento({ lugar: 'tablero', puntero: { ancla: 'pagina', x: 0.5, y: 0.5 } }).puntero.ancla, 'pagina');
@@ -2258,6 +2262,11 @@ test('valida el seguimiento: dónde anda y por dónde va su mouse', () => {
     { lugar: 'tablero', puntero: { ancla: 'pagina', x: 1.5, y: 0 } },
     { lugar: 'tablero', puntero: { ancla: 'pagina', x: '0.5', y: 0 } },
     { lugar: 'tablero', puntero: 'pagina' },
+    { lugar: 'tablero', seccion: 'apariencia' },
+    { lugar: 'tablero', seccion: 'historial' },
+    { lugar: 'pendiente', pendiente_id: id, seccion: 'actividad' },
+    { lugar: 'notas', seccion: 'actividad' },
+    { lugar: 'tablero', puntero: { ancla: 'seccion:ia', x: 0, y: 0 } },
   ]) {
     assert.throws(() => parseSeguimiento(malo), (error) => error.statusCode === 422, JSON.stringify(malo));
   }
@@ -2282,16 +2291,23 @@ test('seguimiento: a los demás les llega dónde anda cada uno y su mouse, sin c
   const deDiego = await leerEventos(base, diego.headers, {
     cantidad: 3,
     alConectar: async () => {
-      await seguir(favio, { lugar: 'pendiente', pendiente_id: compartido.id, puntero: { ancla: `detalle:${compartido.id}`, x: 0.1, y: 0.2 } });
+      await seguir(favio, { lugar: 'pendiente', pendiente_id: compartido.id, seccion: 'historial', puntero: { ancla: `detalle:${compartido.id}`, x: 0.1, y: 0.2 } });
       // Lo propio no se avisa a uno mismo.
       await seguir(diego, { lugar: 'tablero' });
       await seguir(favio, { lugar: null });
     },
   });
   assert.deepEqual(deDiego, [
-    { tipo: 'seguimiento', perfil_id: favio.perfil.id, lugar: 'tablero', pendiente_id: null, puntero: { ancla: 'columna:pendiente', x: 0.5, y: 0.25 } },
-    { tipo: 'seguimiento', perfil_id: favio.perfil.id, lugar: 'pendiente', pendiente_id: compartido.id, puntero: { ancla: `detalle:${compartido.id}`, x: 0.1, y: 0.2 } },
-    { tipo: 'seguimiento', perfil_id: favio.perfil.id, lugar: null, pendiente_id: null, puntero: null },
+    { tipo: 'seguimiento', perfil_id: favio.perfil.id, lugar: 'tablero', pendiente_id: null, seccion: null, puntero: { ancla: 'columna:pendiente', x: 0.5, y: 0.25 } },
+    {
+      tipo: 'seguimiento',
+      perfil_id: favio.perfil.id,
+      lugar: 'pendiente',
+      pendiente_id: compartido.id,
+      seccion: 'historial',
+      puntero: { ancla: `detalle:${compartido.id}`, x: 0.1, y: 0.2 },
+    },
+    { tipo: 'seguimiento', perfil_id: favio.perfil.id, lugar: null, pendiente_id: null, seccion: null, puntero: null },
   ]);
 
   // De un pendiente privado ajeno no se sabe cuál es ni se ve el mouse, tampoco si pasa sobre su tarjeta en el tablero.
