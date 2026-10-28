@@ -1,0 +1,10 @@
+[Unit]
+Description=Despliegue de timermayu si hay commits nuevos en GitHub (deploy/timermayu-deploy)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/timermayu-deploy
+TimeoutStartSec=30min
+Nice=10

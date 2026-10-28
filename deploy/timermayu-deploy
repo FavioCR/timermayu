@@ -1,0 +1,106 @@
+#!/bin/sh
+# Despliegue automático de timermayu en la VM `apps`. Lo lanza timermayu-deploy.timer cada minuto:
+# si origin/main tiene un commit que aún no está desplegado, lo despliega. Basta con hacer push a main.
+#
+# /usr/local/sbin/timermayu-deploy es una copia de deploy/timermayu-deploy (la copia instalada es
+# la que manda; para actualizarla: deploy/instalar.sh).
+#
+# Por qué la VM pregunta en vez de que GitHub entre: GitHub no llega a la VM (CGNAT, y el túnel
+# WireGuard al VPS espejo está apagado desde 2026-10-11), y así GitHub nunca ejecuta nada aquí
+# (el repo es público).
+#
+# Pasos: fetch → avanzar main → tests → backup de pendientes → compilar (de uno en uno: en
+# paralelo la VM se queda sin memoria) → reemplazar contenedores → comprobar.
+# Si algo falla antes de reemplazar, sigue funcionando lo anterior. Un commit que falló no se
+# reintenta hasta que llegue otro, o hasta `timermayu-deploy --forzar`.
+#
+# Logs: journalctl -u timermayu-deploy -e
+set -eu
+
+DIR=/root/projects/timermayu
+STATE=/var/lib/timermayu-deploy
+BACKUPS=/root/backups/timermayu-pendientes
+KEEP_BACKUPS=15
+TESTED="webhook-receiver pendientes-api"
+
+FORCE=0
+[ "${1:-}" = --forzar ] && FORCE=1
+
+mkdir -p "$STATE" "$BACKUPS"
+
+# Un despliegue cada vez; si el timer salta durante uno largo, simplemente no hace nada
+exec 9>/run/timermayu-deploy.lock
+flock -n 9 || exit 0
+
+cd "$DIR"
+timeout 60 git fetch -q origin main
+TARGET=$(git rev-parse origin/main)
+SHORT=$(git rev-parse --short "$TARGET")
+
+if [ "$FORCE" = 0 ]; then
+  [ "$TARGET" = "$(cat "$STATE/desplegado" 2>/dev/null || true)" ] && exit 0
+  [ "$TARGET" = "$(cat "$STATE/fallido" 2>/dev/null || true)" ] && exit 0
+fi
+
+trap 'rc=$?; [ "$rc" = 0 ] || { echo "$TARGET" > "$STATE/fallido"; echo "== FALLÓ el despliegue de $SHORT (no se reintenta hasta otro commit o --forzar)"; }' EXIT
+
+echo "== timermayu $SHORT: $(git log -1 --format=%s "$TARGET")"
+
+# Nunca pisar trabajo hecho a mano en la VM
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "Hay cambios sin commitear en $DIR:"; git status --short --untracked-files=no
+  exit 1
+fi
+if ! git merge-base --is-ancestor HEAD "$TARGET"; then
+  echo "main de la VM tiene commits que no están en GitHub (falta push o la historia divergió)"
+  exit 1
+fi
+git merge -q --ff-only "$TARGET"
+
+for svc in $TESTED; do
+  echo "== Tests $svc"
+  out=$(docker run --rm -v "$DIR/$svc:/src:ro" node:22-alpine sh -c \
+    'cp -r /src /app && cd /app && npm ci --no-audit --no-fund --loglevel=error && npm test' 2>&1) \
+    || { echo "$out" | tail -40; exit 1; }
+  echo "$out" | grep -E '^# (pass|fail)'
+done
+
+echo "== Backup de pendientes"
+# Copia consistente de la base con el API encendido (VACUUM INTO); si el API no está, copia directa.
+# El .tgz se restaura tal cual: la base va dentro como pendientes.db.
+SNAP=.backup-deploy.db
+docker exec timermayu_pendientes_api_prod node --disable-warning=ExperimentalWarning -e \
+  "require('fs').rmSync('/data/$SNAP',{force:true}); const {DatabaseSync}=require('node:sqlite'); new DatabaseSync('/data/pendientes.db').exec(\"VACUUM INTO '/data/$SNAP'\")" \
+  || echo "(API apagado: copia directa)"
+NAME=$(date +%Y%m%d-%H%M%S)-$SHORT.tgz
+docker run --rm -v timermayu_pendientes_data:/data -v "$BACKUPS:/out" alpine sh -c "
+  cp -a /data /b && rm -f /data/$SNAP && cd /b &&
+  if [ -f $SNAP ]; then rm -f pendientes.db pendientes.db-wal pendientes.db-shm && mv $SNAP pendientes.db; fi &&
+  tar czf /out/$NAME ."
+ls -1t "$BACKUPS"/*.tgz | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm -f
+echo "   $BACKUPS/$NAME"
+
+echo "== Compilando"
+for svc in $(docker compose config --services); do
+  docker compose build -q "$svc"
+done
+
+echo "== Reemplazando contenedores"
+docker compose up -d
+
+echo "== Comprobando"
+sleep 15
+bad=$(docker compose ps -a --format '{{.Name}} {{.State}}' | grep -v ' running$' || true)
+[ -z "$bad" ] || { echo "Contenedores caídos:"; echo "$bad"; exit 1; }
+check() { # ruta, códigos aceptados
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --resolve timer.practi.dev:443:127.0.0.1 "https://timer.practi.dev$1")
+  echo "$2" | grep -qw "$code" || { echo "$1 responde $code"; exit 1; }
+}
+check / 200
+check /pendientes/ 200
+check /api/pendientes "200 401"
+
+docker image prune -f >/dev/null
+echo "$TARGET" > "$STATE/desplegado"
+rm -f "$STATE/fallido"
+echo "== Desplegado $SHORT"
