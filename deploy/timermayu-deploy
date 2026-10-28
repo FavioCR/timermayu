@@ -60,7 +60,7 @@ git merge -q --ff-only "$TARGET"
 for svc in $TESTED; do
   echo "== Tests $svc"
   out=$(docker run --rm -v "$DIR/$svc:/src:ro" node:22-alpine sh -c \
-    'cp -r /src /app && cd /app && npm ci --no-audit --no-fund --loglevel=error && npm test' 2>&1) \
+    'cp -r /src /app && cd /app && { [ ! -f package-lock.json ] || npm ci --no-audit --no-fund --loglevel=error; } && npm test' 2>&1) \
     || { echo "$out" | tail -40; exit 1; }
   echo "$out" | grep -E '^# (pass|fail)'
 done
