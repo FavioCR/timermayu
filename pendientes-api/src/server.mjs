@@ -132,6 +132,7 @@ const YO_PATH = '/api/pendientes/yo';
 const APARIENCIA_PATH = '/api/pendientes/yo/apariencia';
 const AVISOS_POR_CORREO_PATH = '/api/pendientes/yo/avisos-por-correo';
 const PRESENCIA_PATH = '/api/pendientes/yo/presencia';
+const SEGUIMIENTO_PATH = '/api/pendientes/yo/seguimiento';
 const EQUIPO_PATH = '/api/pendientes/equipo';
 const PERFILES_PATH = '/api/pendientes/perfiles';
 const ORGANIZACIONES_PATH = '/api/pendientes/organizaciones';
@@ -185,7 +186,7 @@ const IA_TRABAJO_PATH = new RegExp(`^/api/pendientes/ia/sugerir/${UUID}$`);
 const RECURSO_REPETIDO_PATH = new RegExp(`^/api/pendientes/notas/cursos/${UUID}/recursos/repetido$`);
 // Lo que se guarda el resultado de un trabajo de la IA que nadie vino a buscar.
 const VIDA_TRABAJO_IA_MS = 10 * 60_000;
-const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_CORREO_PATH, PRESENCIA_PATH, EQUIPO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
+const RUTAS_FIJAS = [API_PATH, ORDER_PATH, YO_PATH, APARIENCIA_PATH, AVISOS_POR_CORREO_PATH, PRESENCIA_PATH, SEGUIMIENTO_PATH, EQUIPO_PATH, PERFILES_PATH, ORGANIZACIONES_PATH, PROYECTOS_PATH, ACTIVIDAD_PATH, NOTIFICACIONES_PATH, LEIDAS_PATH,
   IA_PATH, IA_MODELOS_PATH, IA_SUGERIR_PATH, IA_REDACTAR_PATH, ETIQUETAS_PATH, EVENTOS_PATH, NOTAS_PATH, NOTAS_BUSCAR_PATH, CURSOS_PATH, TODOS_LOS_ARCHIVOS_PATH,
   TRAER_IMAGEN_PATH];
 const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH, PROYECTO_PATH, SUBIR_IMAGEN_PATH, IMAGEN_PATH,
@@ -927,6 +928,32 @@ export function parseRebote(input) {
   const nota = input.nota?.trim() ?? '';
   if (nota.length > MAX_NOTA) throw httpError(422, 'nota_invalida');
   return { nota: nota || null };
+}
+
+// Seguimiento: dónde anda cada quien (el tablero, un pendiente o sus notas) y por dónde va su mouse. El mouse va
+// anclado a lo que tiene debajo (una columna, una tarjeta, la descripción o el chat de un pendiente, o la página), con
+// x e y de 0 a 1 dentro de eso, para que caiga en el mismo lugar en pantallas de otro tamaño. En las notas, que son
+// privadas, solo se dice que está ahí. { lugar: null } es que se fue.
+const LUGARES = ['tablero', 'pendiente', 'notas'];
+const ANCLAS_DE_PENDIENTE = ['tarjeta', 'detalle', 'chat'];
+const ES_UUID = new RegExp(`^${UUID}$`);
+export function parseSeguimiento(input) {
+  if (input.lugar === null) return null;
+  if (!LUGARES.includes(input.lugar)) throw httpError(422, 'lugar_invalido');
+  const pendienteId = input.pendiente_id ?? null;
+  if (input.lugar === 'pendiente' ? typeof pendienteId !== 'string' || !ES_UUID.test(pendienteId) : pendienteId !== null) {
+    throw httpError(422, 'pendiente_invalido');
+  }
+  const puntero = input.puntero ?? null;
+  if (puntero === null) return { lugar: input.lugar, pendiente_id: pendienteId, puntero: null };
+  const [tipo, id, ...resto] = typeof puntero.ancla === 'string' ? puntero.ancla.split(':') : [];
+  const anclaValida = resto.length === 0 && (tipo === 'columna' ? ESTADOS.includes(id)
+    : ANCLAS_DE_PENDIENTE.includes(tipo) ? typeof id === 'string' && ES_UUID.test(id)
+      : tipo === 'pagina' && id === undefined);
+  const enRango = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
+  if (input.lugar === 'notas' || !anclaValida || !enRango(puntero.x) || !enRango(puntero.y)) throw httpError(422, 'puntero_invalido');
+  const redondear = (n) => Math.round(n * 10_000) / 10_000;
+  return { lugar: input.lugar, pendiente_id: pendienteId, puntero: { ancla: puntero.ancla, x: redondear(puntero.x), y: redondear(puntero.y) } };
 }
 
 // Sin ids marca todos los avisos como leídos.
@@ -2843,6 +2870,7 @@ export function createApp(options = {}) {
     if (pestanas.size > 0) presentes.set(perfilId, pestanas);
     else presentes.delete(perfilId);
     repo.guardarVisto(perfilId, new Date().toISOString());
+    if (!activo) soltarSeguimiento(perfilId, pestana);
     if (enLinea(perfilId) !== antes) avisarCambio({ tipo: 'presencia' });
   }
   const caducar = setInterval(() => {
@@ -2855,9 +2883,50 @@ export function createApp(options = {}) {
         cambio = true;
       }
     }
+    // El seguimiento de una pestaña que ya no está en línea, y que tampoco se movió en un rato, se va.
+    for (const [perfilId, { pestana, ms }] of seguimientos) {
+      if (!presentes.get(perfilId)?.has(pestana) && ahora - ms >= enLineaMs) soltarSeguimiento(perfilId, pestana);
+    }
     if (cambio) avisarCambio({ tipo: 'presencia' });
   }, REVISAR_PRESENCIA_MS);
   caducar.unref();
+
+  // Seguimiento, como en Miro: dónde está cada quien y su mouse, para verlo en el tablero de los demás y seguirlo. Vive
+  // en memoria, una entrada por perfil (la de su última pestaña), y se avisa enseguida, sin guardar nada. A cada uno le
+  // llega solo lo que puede ver: de un pendiente privado ajeno no sabe cuál es ni ve el mouse. A uno mismo no se le avisa.
+  const seguimientos = new Map(); // perfil_id → { pestana, lugar, pendiente_id, puntero, ms }
+  function seguimientoPara(conexion, perfilId, seguimiento) {
+    if (!seguimiento) return { tipo: 'seguimiento', perfil_id: perfilId, lugar: null, pendiente_id: null, puntero: null };
+    const ve = (id) => repo.puedeVerPendiente(conexion.yo, id);
+    const pendienteId = seguimiento.pendiente_id && ve(seguimiento.pendiente_id) ? seguimiento.pendiente_id : null;
+    const [tipo, id] = seguimiento.puntero?.ancla.split(':') ?? [];
+    const ocultoPuntero = (seguimiento.pendiente_id && !pendienteId) || (ANCLAS_DE_PENDIENTE.includes(tipo) && !ve(id));
+    return {
+      tipo: 'seguimiento',
+      perfil_id: perfilId,
+      lugar: seguimiento.lugar,
+      pendiente_id: pendienteId,
+      puntero: ocultoPuntero ? null : seguimiento.puntero,
+    };
+  }
+  const escribirSeguimiento = (conexion, perfilId, seguimiento) => {
+    conexion.res.write(`event: seguimiento\ndata: ${JSON.stringify(seguimientoPara(conexion, perfilId, seguimiento))}\n\n`);
+  };
+  function avisarSeguimiento(perfilId, seguimiento) {
+    for (const conexion of conexiones) if (conexion.yo !== perfilId) escribirSeguimiento(conexion, perfilId, seguimiento);
+  }
+  function ponerSeguimiento(perfilId, pestana, nuevo) {
+    if (!nuevo) return soltarSeguimiento(perfilId, pestana);
+    const seguimiento = { pestana, ...nuevo, ms: Date.now() };
+    seguimientos.set(perfilId, seguimiento);
+    avisarSeguimiento(perfilId, seguimiento);
+  }
+  // Se va solo si es la misma pestaña: otra suya más nueva sigue mandando.
+  function soltarSeguimiento(perfilId, pestana) {
+    if (seguimientos.get(perfilId)?.pestana !== pestana) return;
+    seguimientos.delete(perfilId);
+    avisarSeguimiento(perfilId, null);
+  }
 
   // El tipo que elige la IA llega después de crear el pendiente: se avisa a todos, también a la pestaña que lo creó
   // (que espera la respuesta para dejar de mostrar que la IA está eligiendo), haya salido bien o no.
@@ -3072,6 +3141,12 @@ export function createApp(options = {}) {
         marcarPresencia(yo, String(req.headers['x-cliente'] ?? '').slice(0, 64), activo);
         return json(res, 200, { ok: true });
       }
+      // Dónde anda y por dónde va su mouse (cada vez que se mueve, como mucho unas 12 veces por segundo).
+      if (url.pathname === SEGUIMIENTO_PATH && req.method === 'POST') {
+        if (!yo) throw httpError(403, 'seguimiento_con_perfil');
+        ponerSeguimiento(yo, String(req.headers['x-cliente'] ?? '').slice(0, 64), parseSeguimiento(await readJson(req)));
+        return json(res, 200, { ok: true });
+      }
       // Quién está en línea y cuándo estuvo cada uno por última vez.
       if (url.pathname === EQUIPO_PATH && req.method === 'GET') {
         const ahora = Date.now();
@@ -3097,6 +3172,8 @@ export function createApp(options = {}) {
         });
         res.write('event: conectado\ndata: {"tipo":"conectado"}\n\n');
         const conexion = { res, yo, cliente: (url.searchParams.get('cliente') ?? '').slice(0, 64) };
+        // Quien recién se conecta (o se reconecta) recibe dónde anda cada uno ahora.
+        for (const [perfilId, seguimiento] of seguimientos) if (perfilId !== yo) escribirSeguimiento(conexion, perfilId, seguimiento);
         conexiones.add(conexion);
         res.on('close', () => conexiones.delete(conexion));
         return;

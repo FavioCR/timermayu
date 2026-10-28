@@ -10,10 +10,22 @@ export type Cambio = {
   pendiente_id?: string | null
 }
 
+// Dónde anda otra persona y por dónde va su mouse (ver lib/seguimiento.ts). Llega cada vez que se mueve, así que no
+// pasa por los oyentes de los cambios: tiene los suyos. lugar null: se fue.
+export type EventoSeguimiento = {
+  tipo: "seguimiento"
+  perfil_id: string
+  lugar: "tablero" | "pendiente" | "notas" | null
+  pendiente_id: string | null
+  puntero: { ancla: string; x: number; y: number } | null
+}
+
 // Cómo está la conexión, para el indicador del encabezado. reintentoEn: cuándo se vuelve a intentar.
 export type Conexion = { estado: "conectando" | "en-vivo" | "reconectando"; reintentoEn: number | null }
 
 const oyentes = new Set<(cambio: Cambio) => void>()
+// "conectado": el servidor enseguida manda dónde anda cada uno ahora (lo de antes ya no vale).
+const oyentesSeguimiento = new Set<(evento: EventoSeguimiento | "conectado") => void>()
 const vigilantes = new Set<() => void>()
 let conexion: Conexion = { estado: "conectando", reintentoEn: null }
 let reintentarYa: (() => void) | null = null
@@ -88,13 +100,18 @@ export function conectarCambios(credenciales: string, onNoAutorizado: () => void
               .map((linea) => linea.slice(5).trim())
               .join("\n")
             if (!datos) continue
-            let cambio: Cambio
+            let cambio: Cambio | EventoSeguimiento
             try {
               cambio = JSON.parse(datos)
             } catch {
               continue
             }
+            if (cambio.tipo === "seguimiento") {
+              for (const oyente of oyentesSeguimiento) oyente(cambio)
+              continue
+            }
             if (cambio.tipo === "conectado") {
+              for (const oyente of oyentesSeguimiento) oyente("conectado")
               espera = ESPERA_INICIAL_MS
               ponerConexion({ estado: "en-vivo", reintentoEn: null })
               // La primera vez el tablero recién cargó todo.
@@ -137,6 +154,13 @@ export function conectarCambios(credenciales: string, onNoAutorizado: () => void
   ponerConexion({ estado: "conectando", reintentoEn: null })
   escuchar()
   return () => control.abort()
+}
+
+export function escucharSeguimiento(oyente: (evento: EventoSeguimiento | "conectado") => void) {
+  oyentesSeguimiento.add(oyente)
+  return () => {
+    oyentesSeguimiento.delete(oyente)
+  }
 }
 
 function vigilar(vigilante: () => void) {

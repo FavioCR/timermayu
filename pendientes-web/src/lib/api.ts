@@ -207,6 +207,9 @@ export type Notificacion = { id: string; leida: boolean; actividad: Actividad }
 
 // Si alguien del equipo está en línea (con el tablero a la vista y en uso) y la última vez que lo estuvo.
 export type Presencia = { perfil_id: string; en_linea: boolean; visto_en: string | null }
+export type CuerpoSeguimiento =
+  | { lugar: null }
+  | { lugar: "tablero" | "pendiente" | "notas"; pendiente_id: string | null; puntero: { ancla: string; x: number; y: number } | null }
 
 // Un pendiente con avisos sin leer: cuántos y cuántos son menciones (o respuestas a un mensaje tuyo).
 export type SinLeer = { pendiente_id: string; avisos: number; menciones: number }
@@ -747,6 +750,16 @@ export const api = {
         keepalive: true,
         headers: { Authorization: `Basic ${credenciales}`, "X-Cliente": CLIENTE, "Content-Type": "application/json" },
         body: JSON.stringify({ activo }),
+      }).then(() => undefined),
+  },
+  seguimiento: {
+    // Dónde anda y por dónde va su mouse; { lugar: null } al irse (keepalive: llega aunque la pestaña se esté cerrando).
+    enviar: (credenciales: string, cuerpo: CuerpoSeguimiento, keepalive = false) =>
+      fetch(`${BASE}/yo/seguimiento`, {
+        method: "POST",
+        keepalive,
+        headers: { Authorization: `Basic ${credenciales}`, "X-Cliente": CLIENTE, "Content-Type": "application/json" },
+        body: JSON.stringify(cuerpo),
       }).then(() => undefined),
   },
   notificaciones: {

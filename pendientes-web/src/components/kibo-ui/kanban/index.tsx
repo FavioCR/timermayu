@@ -71,9 +71,11 @@ export type KanbanBoardProps = {
   children: ReactNode;
   className?: string;
   style?: CSSProperties;
+  // El ancla del seguimiento (data-seguir): el mouse de otros se ubica dentro de la columna.
+  seguir?: string;
 };
 
-export const KanbanBoard = ({ id, children, className, style }: KanbanBoardProps) => {
+export const KanbanBoard = ({ id, children, className, style, seguir }: KanbanBoardProps) => {
   const { isOver, setNodeRef } = useDroppable({
     id,
   });
@@ -87,6 +89,7 @@ export const KanbanBoard = ({ id, children, className, style }: KanbanBoardProps
       )}
       ref={setNodeRef}
       style={style}
+      data-seguir={seguir}
     >
       {children}
     </div>
@@ -98,6 +101,8 @@ export type KanbanCardProps<T extends KanbanItemProps = KanbanItemProps> = T & {
   className?: string;
   // Estilos de la tarjeta (no del contenedor que se arrastra): el tablero tiñe su borde con una variable CSS.
   cardStyle?: CSSProperties;
+  // El ancla del seguimiento (data-seguir): el mouse de otros se ubica dentro de la tarjeta.
+  seguir?: string;
 };
 
 export const KanbanCard = <T extends KanbanItemProps = KanbanItemProps>({
@@ -106,6 +111,7 @@ export const KanbanCard = <T extends KanbanItemProps = KanbanItemProps>({
   children,
   className,
   cardStyle,
+  seguir,
 }: KanbanCardProps<T>) => {
   const {
     attributes,
@@ -126,7 +132,7 @@ export const KanbanCard = <T extends KanbanItemProps = KanbanItemProps>({
 
   return (
     <>
-      <div style={style} {...listeners} {...attributes} ref={setNodeRef}>
+      <div style={style} {...listeners} {...attributes} ref={setNodeRef} data-seguir={seguir}>
         <Card
           className={cn(
             "cursor-grab gap-4 rounded-md p-3 shadow-sm",

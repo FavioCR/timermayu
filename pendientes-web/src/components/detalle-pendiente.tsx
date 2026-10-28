@@ -122,6 +122,10 @@ export function DetallePendiente({ pendiente, onCerrar, ...props }: Props) {
           event.preventDefault()
           if (!props.enfocarChat) (event.currentTarget as HTMLElement).focus()
         }}
+        // La barra de «Siguiendo a…» queda fuera del panel: tocarla no lo cierra.
+        onPointerDownOutside={(event) => {
+          if ((event.target as Element | null)?.closest?.("[data-seguimiento-barra]")) event.preventDefault()
+        }}
       >
         {mostrado && <Contenido key={mostrado.id} pendiente={mostrado} {...props} />}
       </SheetContent>
@@ -338,7 +342,7 @@ function Contenido({
 
   return (
     <div className="flex flex-col lg:h-full lg:flex-row">
-      <div className="min-w-0 flex-1 lg:overflow-y-auto">
+      <div className="min-w-0 flex-1 lg:overflow-y-auto" data-seguir={`detalle:${pendiente.id}`}>
       <SheetHeader className="gap-1 pr-12 lg:pr-4">
         <SheetTitle className="sr-only">{pendiente.texto}</SheetTitle>
         <Textarea
@@ -584,7 +588,7 @@ function Contenido({
       </div>
       </div>
 
-      <aside aria-label="Chat e historial" className="flex flex-col border-t lg:h-full lg:w-96 lg:shrink-0 lg:border-t-0 lg:border-l">
+      <aside data-seguir={`chat:${pendiente.id}`} aria-label="Chat e historial" className="flex flex-col border-t lg:h-full lg:w-96 lg:shrink-0 lg:border-t-0 lg:border-l">
         <Tabs value={pestana} onValueChange={setPestana} className="flex min-h-0 flex-1 flex-col gap-0">
           <div className="flex h-14 shrink-0 items-center border-b px-4 lg:pr-12">
             <TabsList>

@@ -1,4 +1,5 @@
-import { UsersRound } from "lucide-react"
+import { Eye, UsersRound } from "lucide-react"
+import { useState } from "react"
 import { cn } from "cn"
 
 import { PerfilAvatar } from "@/components/perfil-avatar"
@@ -6,11 +7,29 @@ import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import type { Perfil } from "@/lib/api"
 import { ultimaConexion, useEquipo } from "@/lib/presencia"
+import { describirLugar, useLugares } from "@/lib/seguimiento"
 
-// Quién del equipo está en línea (con el tablero o sus notas a la vista y en uso) y, de los demás, su última conexión.
-// En el encabezado se ven las caras de quienes están en línea (en pantallas más chicas, cuántos son).
-export function Equipo({ credenciales, yo, perfiles }: { credenciales: string; yo: string | null; perfiles: Perfil[] }) {
+// Quién del equipo está en línea (con el tablero o sus notas a la vista y en uso), dónde anda (el tablero, qué
+// pendiente o sus notas) y, de los demás, su última conexión. A quien está en el tablero o en un pendiente se lo puede
+// seguir, como en Miro. En el encabezado se ven las caras de quienes están en línea (en pantallas más chicas, cuántos son).
+export function Equipo({
+  credenciales,
+  yo,
+  perfiles,
+  tituloDe,
+  siguiendo,
+  onSeguir,
+}: {
+  credenciales: string
+  yo: string | null
+  perfiles: Perfil[]
+  tituloDe: (pendienteId: string) => string | undefined
+  siguiendo: string | null
+  onSeguir: (perfilId: string | null) => void
+}) {
   const equipo = useEquipo(credenciales)
+  const lugares = useLugares()
+  const [abierto, setAbierto] = useState(false)
   const enLinea = (perfil: Perfil) => perfil.id === yo || equipo.get(perfil.id)?.en_linea === true
   const conectados = perfiles.filter(enLinea).sort((a, b) => (a.id === yo ? -1 : b.id === yo ? 1 : a.nombre.localeCompare(b.nombre)))
   // Los demás, primero quien estuvo hace menos; al final quien nunca entró.
@@ -21,7 +40,7 @@ export function Equipo({ credenciales, yo, perfiles }: { credenciales: string; y
   const otros = conectados.filter((perfil) => perfil.id !== yo)
 
   return (
-    <Popover>
+    <Popover open={abierto} onOpenChange={setAbierto}>
       <PopoverTrigger asChild>
         <Button
           variant="ghost"
@@ -62,8 +81,12 @@ export function Equipo({ credenciales, yo, perfiles }: { credenciales: string; y
           {[...conectados, ...desconectados].map((perfil) => {
             const conectado = enLinea(perfil)
             const presencia = equipo.get(perfil.id)
+            const lugar = perfil.id === yo ? undefined : lugares.get(perfil.id)
+            const seguible = conectado && (lugar?.lugar === "tablero" || lugar?.lugar === "pendiente")
             const estado = conectado
-              ? "En línea"
+              ? lugar
+                ? describirLugar(lugar, tituloDe)
+                : "En línea"
               : !perfil.tiene_contrasena
                 ? "Aún no entra con su nombre"
                 : presencia?.visto_en
@@ -82,10 +105,28 @@ export function Equipo({ credenciales, yo, perfiles }: { credenciales: string; y
                     {perfil.nombre}
                     {perfil.id === yo && <span className="font-normal text-muted-foreground"> (tú)</span>}
                   </span>
-                  <span className={cn("block text-xs", conectado ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>
+                  <span
+                    className={cn("block truncate text-xs", conectado ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}
+                    title={estado}
+                  >
                     {estado}
                   </span>
                 </span>
+                {seguible && (
+                  <Button
+                    size="xs"
+                    variant={siguiendo === perfil.id ? "secondary" : "outline"}
+                    className="shrink-0"
+                    aria-pressed={siguiendo === perfil.id}
+                    title={siguiendo === perfil.id ? "Dejar de seguir" : `Ver lo que ve ${perfil.nombre}`}
+                    onClick={() => {
+                      onSeguir(siguiendo === perfil.id ? null : perfil.id)
+                      setAbierto(false)
+                    }}
+                  >
+                    <Eye /> {siguiendo === perfil.id ? "Siguiendo" : "Seguir"}
+                  </Button>
+                )}
               </li>
             )
           })}

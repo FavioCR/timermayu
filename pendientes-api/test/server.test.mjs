@@ -24,6 +24,7 @@ import {
   parseOrganizacion,
   parsePedidoModelos,
   parsePendiente,
+  parseSeguimiento,
   parsePerfil,
   parseProyecto,
   parseSugerencia,
@@ -2231,6 +2232,99 @@ test('equipo: quién está en línea (con el tablero a la vista) y su última co
   assert.equal((await estado())[diego.perfil.id].en_linea, true);
   await new Promise((listo) => setTimeout(listo, 350));
   assert.deepEqual((await estado())[diego.perfil.id], { en_linea: false, visto: true });
+});
+
+test('valida el seguimiento: dónde anda y por dónde va su mouse', () => {
+  const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
+  assert.equal(parseSeguimiento({ lugar: null }), null);
+  assert.deepEqual(parseSeguimiento({ lugar: 'tablero' }), { lugar: 'tablero', pendiente_id: null, puntero: null });
+  assert.deepEqual(parseSeguimiento({ lugar: 'pendiente', pendiente_id: id, puntero: { ancla: `chat:${id}`, x: 0.123456, y: 1 } }),
+    { lugar: 'pendiente', pendiente_id: id, puntero: { ancla: `chat:${id}`, x: 0.1235, y: 1 } });
+  assert.deepEqual(parseSeguimiento({ lugar: 'tablero', puntero: { ancla: 'columna:haciendo', x: 0, y: 0.5 } }).puntero,
+    { ancla: 'columna:haciendo', x: 0, y: 0.5 });
+  assert.equal(parseSeguimiento({ lugar: 'tablero', puntero: { ancla: 'pagina', x: 0.5, y: 0.5 } }).puntero.ancla, 'pagina');
+  for (const malo of [
+    {},
+    { lugar: 'perfiles' },
+    { lugar: 'pendiente' },
+    { lugar: 'pendiente', pendiente_id: 'abc' },
+    { lugar: 'tablero', pendiente_id: id },
+    // En las notas, que son privadas, no va el mouse.
+    { lugar: 'notas', puntero: { ancla: 'pagina', x: 0, y: 0 } },
+    { lugar: 'tablero', puntero: { ancla: 'columna:archivo', x: 0, y: 0 } },
+    { lugar: 'tablero', puntero: { ancla: 'tarjeta:abc', x: 0, y: 0 } },
+    { lugar: 'tablero', puntero: { ancla: `tarjeta:${id}:x`, x: 0, y: 0 } },
+    { lugar: 'tablero', puntero: { ancla: 'pagina:1', x: 0, y: 0 } },
+    { lugar: 'tablero', puntero: { ancla: 'pagina', x: 1.5, y: 0 } },
+    { lugar: 'tablero', puntero: { ancla: 'pagina', x: '0.5', y: 0 } },
+    { lugar: 'tablero', puntero: 'pagina' },
+  ]) {
+    assert.throws(() => parseSeguimiento(malo), (error) => error.statusCode === 422, JSON.stringify(malo));
+  }
+});
+
+test('seguimiento: a los demás les llega dónde anda cada uno y su mouse, sin colar lo privado', async (t) => {
+  const { base, call, entrarComo } = await startServer(t);
+  const diego = await entrarComo('Diego');
+  const favio = await entrarComo('Favio');
+  const junior = await entrarComo('Junior');
+  const { organizacion } = await diego.data('POST', '/organizaciones', { nombre: 'Personal', compartida: false });
+  const { proyecto } = await diego.data('POST', '/proyectos', { nombre: 'Casa', organizacion_id: organizacion.id });
+  const { pendiente: privado } = await diego.data('POST', '', { texto: 'Pagar luz', proyecto_id: proyecto.id });
+  const { pendiente: compartido } = await diego.data('POST', '', { texto: 'Login' });
+
+  const seguir = (quien, cuerpo, pestana = 'pestana-1') => call('POST', '/yo/seguimiento', cuerpo, { ...quien.headers, 'X-Cliente': pestana });
+  assert.equal((await call('POST', '/yo/seguimiento', { lugar: 'tablero' })).status, 403);
+  assert.equal((await seguir(favio, { lugar: 'cocina' })).status, 422);
+
+  // Quien se conecta recibe dónde anda cada uno ahora; después, cada movimiento.
+  assert.equal((await seguir(favio, { lugar: 'tablero', puntero: { ancla: 'columna:pendiente', x: 0.5, y: 0.25 } })).status, 200);
+  const deDiego = await leerEventos(base, diego.headers, {
+    cantidad: 3,
+    alConectar: async () => {
+      await seguir(favio, { lugar: 'pendiente', pendiente_id: compartido.id, puntero: { ancla: `detalle:${compartido.id}`, x: 0.1, y: 0.2 } });
+      // Lo propio no se avisa a uno mismo.
+      await seguir(diego, { lugar: 'tablero' });
+      await seguir(favio, { lugar: null });
+    },
+  });
+  assert.deepEqual(deDiego, [
+    { tipo: 'seguimiento', perfil_id: favio.perfil.id, lugar: 'tablero', pendiente_id: null, puntero: { ancla: 'columna:pendiente', x: 0.5, y: 0.25 } },
+    { tipo: 'seguimiento', perfil_id: favio.perfil.id, lugar: 'pendiente', pendiente_id: compartido.id, puntero: { ancla: `detalle:${compartido.id}`, x: 0.1, y: 0.2 } },
+    { tipo: 'seguimiento', perfil_id: favio.perfil.id, lugar: null, pendiente_id: null, puntero: null },
+  ]);
+
+  // De un pendiente privado ajeno no se sabe cuál es ni se ve el mouse, tampoco si pasa sobre su tarjeta en el tablero.
+  const deJunior = await leerEventos(base, junior.headers, {
+    cantidad: 4,
+    alConectar: async () => {
+      await seguir(diego, { lugar: 'pendiente', pendiente_id: privado.id, puntero: { ancla: `chat:${privado.id}`, x: 0.5, y: 0.5 } });
+      await seguir(diego, { lugar: 'tablero', puntero: { ancla: `tarjeta:${privado.id}`, x: 0.5, y: 0.5 } });
+      await seguir(diego, { lugar: 'notas' });
+    },
+  });
+  // El primero es la foto al conectarse: Diego ya estaba en el tablero.
+  assert.deepEqual(deJunior.map(({ lugar, pendiente_id, puntero }) => ({ lugar, pendiente_id, puntero })), [
+    { lugar: 'tablero', pendiente_id: null, puntero: null },
+    { lugar: 'pendiente', pendiente_id: null, puntero: null },
+    { lugar: 'tablero', pendiente_id: null, puntero: null },
+    { lugar: 'notas', pendiente_id: null, puntero: null },
+  ]);
+
+  // Una pestaña vieja que se va no borra a la nueva; al salir de línea la que manda, se va su seguimiento.
+  await seguir(favio, { lugar: 'tablero' }, 'a');
+  await seguir(favio, { lugar: 'tablero' }, 'b');
+  const alSalir = await leerEventos(base, diego.headers, {
+    cantidad: 2,
+    alConectar: async () => {
+      await seguir(favio, { lugar: null }, 'a');
+      await call('POST', '/yo/presencia', { activo: false }, { ...favio.headers, 'X-Cliente': 'b' });
+    },
+  });
+  assert.deepEqual(alSalir.map(({ perfil_id, lugar }) => ({ perfil_id, lugar })), [
+    { perfil_id: favio.perfil.id, lugar: 'tablero' },
+    { perfil_id: favio.perfil.id, lugar: null },
+  ]);
 });
 
 test('evidencia: al tercer pendiente seguido que alguien termina sin escribir en su chat, se le recuerda', async (t) => {

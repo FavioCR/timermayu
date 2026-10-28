@@ -71,6 +71,7 @@ import { api, esNoAutorizado, mensajeDeError, type Usuario } from "@/lib/api"
 import { haceCuanto } from "@/lib/actividad"
 import { APARIENCIA_NORMAL, aplicarApariencia } from "@/lib/apariencia"
 import { usePresencia } from "@/lib/presencia"
+import { useCompartirSeguimiento } from "@/lib/seguimiento"
 import {
   direccionDe,
   lugarDeLaDireccion,
@@ -120,6 +121,8 @@ export default function PaginaNotas({ credenciales, onSalir }: { credenciales: s
   const [aviso, setAviso] = useState("")
   // Con sus notas abiertas también se está en línea.
   usePresencia(credenciales, Boolean(usuario?.perfil_id))
+  // Los demás solo saben que está en sus notas: ni cuál ni su mouse.
+  useCompartirSeguimiento(credenciales, usuario?.perfil_id ? { tipo: "notas" } : null)
 
   const salir = useCallback(() => onSalir(), [onSalir])
   const agregarRecurso = useCallback(

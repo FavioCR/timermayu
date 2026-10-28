@@ -41,6 +41,7 @@ import {
   Mail,
   MessageSquare,
   MonitorDown,
+  MousePointer2,
   NotebookPen,
   MoreVertical,
   Paperclip,
@@ -67,6 +68,7 @@ import { AparienciaDialog } from "@/components/apariencia-dialog"
 import { Aprobacion } from "@/components/aprobacion"
 import { ARCHIVADOS_POR_VEZ, ArchivadosAlPie, SeparadorDeArchivados } from "@/components/archivados-al-pie"
 import { Reproductor } from "@/components/reproductor"
+import { Cursores } from "@/components/cursores"
 import { DetallePendiente } from "@/components/detalle-pendiente"
 import { EstadoConexion } from "@/components/estado-conexion"
 import { porNombre, PuntoEtiqueta } from "@/components/etiquetas-selector"
@@ -84,6 +86,7 @@ import {
 import { MisPendientes } from "@/components/mis-pendientes"
 import { Notificaciones } from "@/components/notificaciones"
 import { Equipo } from "@/components/equipo"
+import { Siguiendo } from "@/components/siguiendo"
 import { PasarDialog } from "@/components/pasar-dialog"
 import { PorRevisar } from "@/components/por-revisar"
 import { AvisoRebote, RebotarDialog } from "@/components/rebotar-dialog"
@@ -146,6 +149,16 @@ import { conectarCambios, revisarConexion, useCambios } from "@/lib/cambios"
 import { COLUMNAS, NADIE } from "@/lib/estados"
 import { instalar, useInstalacion } from "@/lib/instalar"
 import { usePresencia } from "@/lib/presencia"
+import {
+  cambiarVerCursores,
+  describirLugar,
+  lugaresActuales,
+  useCompartirSeguimiento,
+  useLugares,
+  useVerCursores,
+  vigilarLugares,
+  type Lugar,
+} from "@/lib/seguimiento"
 import { separarTipo, TIPOS, tipoDe } from "@/lib/tipos"
 
 const PerfilesDialog = lazy(() => import("@/components/perfiles-dialog").then((modulo) => ({ default: modulo.PerfilesDialog })))
@@ -720,6 +733,73 @@ export function Tablero({
     [tarjetas, usuario?.perfil_id]
   )
   usePresencia(credenciales, Boolean(usuario?.perfil_id))
+
+  // Seguimiento, como en Miro: los demás ven dónde anda uno y su mouse, y uno puede seguir a alguien (ver lib/seguimiento.ts).
+  const miLugar: Lugar = abierto ? { tipo: "pendiente", id: abierto } : { tipo: "tablero" }
+  useCompartirSeguimiento(credenciales, usuario?.perfil_id ? miLugar : null)
+  const verCursores = useVerCursores()
+  const lugares = useLugares()
+  const [siguiendo, setSiguiendo] = useState<string | null>(null)
+  const seguido = siguiendo ? perfilesPorId.get(siguiendo) : undefined
+  const lugarSeguido = siguiendo ? lugares.get(siguiendo) : undefined
+  const tituloDe = useCallback((id: string) => tarjetas.find((tarjeta) => tarjeta.id === id)?.texto, [tarjetas])
+  // Se abre lo que abre quien se sigue y se cierra lo que cierra; si se va, se lo deja de seguir.
+  const irConSeguido = useCallback(
+    (perfilId: string) => {
+      const lugar = lugaresActuales().get(perfilId)
+      if (!lugar) {
+        setSiguiendo(null)
+        toast(`${perfilesPorId.get(perfilId)?.nombre ?? "Quien seguías"} se desconectó`)
+      } else if (lugar.lugar === "tablero") {
+        setAbierto(null)
+      } else if (lugar.lugar === "pendiente" && lugar.pendiente_id) {
+        setAbierto(lugar.pendiente_id)
+      }
+    },
+    [perfilesPorId]
+  )
+  const seguir = useCallback(
+    (perfilId: string | null) => {
+      setSiguiendo(perfilId)
+      if (perfilId) irConSeguido(perfilId)
+    },
+    [irConSeguido]
+  )
+  useEffect(() => {
+    if (!siguiendo) return
+    let antes = lugaresActuales().get(siguiendo)
+    return vigilarLugares(() => {
+      const ahora = lugaresActuales().get(siguiendo)
+      if (ahora === antes) return
+      antes = ahora
+      irConSeguido(siguiendo)
+    })
+  }, [siguiendo, irConSeguido])
+  // Tocar, hacer scroll o usar el teclado lo deja de seguir (menos en su barra). Esc no cierra además el pendiente.
+  useEffect(() => {
+    if (!siguiendo) return
+    const dejar = (evento: Event) => {
+      if (evento.target instanceof Element && evento.target.closest("[data-seguimiento-barra]")) return
+      setSiguiendo(null)
+    }
+    const tecla = (evento: KeyboardEvent) => {
+      if (["Shift", "Control", "Alt", "Meta"].includes(evento.key)) return
+      if (evento.key === "Escape") {
+        evento.preventDefault()
+        evento.stopPropagation()
+      }
+      setSiguiendo(null)
+    }
+    window.addEventListener("pointerdown", dejar, true)
+    window.addEventListener("wheel", dejar, { capture: true, passive: true })
+    window.addEventListener("keydown", tecla, true)
+    return () => {
+      window.removeEventListener("pointerdown", dejar, true)
+      window.removeEventListener("wheel", dejar, { capture: true })
+      window.removeEventListener("keydown", tecla, true)
+    }
+  }, [siguiendo])
+
   // Para el ejemplo del recordatorio de evidencia: quien creó el pendiente, o si fue uno mismo, otra persona del equipo.
   const creadorDelRecordado = recordatorio ? tarjetas.find((t) => t.id === recordatorio.pendiente.id)?.creado_por : null
   const otroDelEquipo =
@@ -1297,7 +1377,16 @@ export function Tablero({
                 onAbrir={abrirPendiente}
               />
             )}
-            {usuario && <Equipo credenciales={credenciales} yo={usuario.perfil_id} perfiles={perfiles} />}
+            {usuario && (
+              <Equipo
+                credenciales={credenciales}
+                yo={usuario.perfil_id}
+                perfiles={perfiles}
+                tituloDe={tituloDe}
+                siguiendo={siguiendo}
+                onSeguir={seguir}
+              />
+            )}
             {usuario?.perfil_id && (
               <PorRevisar pendientes={tarjetas} yo={usuario.perfil_id} perfilesPorId={perfilesPorId} onAbrir={abrirPendiente} />
             )}
@@ -1369,6 +1458,13 @@ export function Tablero({
                     </span>
                   </DropdownMenuCheckboxItem>
                 )}
+                <DropdownMenuCheckboxItem checked={verCursores} onCheckedChange={(ver) => cambiarVerCursores(ver === true)}>
+                  <MousePointer2 />
+                  <span className="flex min-w-0 flex-col">
+                    Cursores del equipo
+                    <span className="truncate text-xs text-muted-foreground">Por dónde va el mouse de los demás</span>
+                  </span>
+                </DropdownMenuCheckboxItem>
                 {!instalacion.instalada && (
                   <DropdownMenuItem onSelect={instalarApp}>
                     <MonitorDown /> Instalar en el escritorio
@@ -1636,6 +1732,7 @@ export function Tablero({
                   <KanbanBoard
                     id={columna.id}
                     key={columna.id}
+                    seguir={`columna:${columna.id}`}
                     // Cada columna se tiñe con su color: el fondo apenas, el encabezado un poco más.
                     style={{ "--tono": columna.color } as CSSProperties}
                     className="min-h-[28rem] divide-y-0 rounded-none border-[color-mix(in_oklab,var(--tono)_20%,var(--color-border))] bg-[color-mix(in_oklab,var(--tono)_4%,var(--color-columna))] text-sm shadow-none"
@@ -1779,6 +1876,7 @@ export function Tablero({
                               column={columna.id}
                               id={tarjeta.id}
                               name={tarjeta.name}
+                              seguir={`tarjeta:${tarjeta.id}`}
                               cardStyle={colorBorde ? ({ "--borde": colorBorde } as CSSProperties) : undefined}
                               className={cn(
                                 "rounded-none transition-shadow",
@@ -2147,6 +2245,14 @@ export function Tablero({
         onSalir={onSalir}
         enfocarChat={chatEnfocado && chatEnfocado.id === abierto ? chatEnfocado.vez : 0}
       />
+      {usuario && <Cursores lugar={miLugar} perfilesPorId={perfilesPorId} siguiendo={siguiendo} />}
+      {seguido && (
+        <Siguiendo
+          perfil={seguido}
+          donde={lugarSeguido ? describirLugar(lugarSeguido, tituloDe) : "Conectando…"}
+          onDejar={() => setSiguiendo(null)}
+        />
+      )}
       <RecordatorioEvidencia
         recordatorio={recordatorio}
         yo={miPerfil ?? null}
