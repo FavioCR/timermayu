@@ -688,14 +688,14 @@ export function Tablero({
 
   const visibles = useMemo(() => enAlcance.filter(conPersona), [enAlcance, conPersona])
 
-  // El buscador de cada columna mira el título, la descripción, el proyecto, la persona, el tipo y las etiquetas.
+  // El buscador de cada columna mira el número (#73), el título, la descripción, el proyecto, la persona, el tipo y las etiquetas.
   const textoDe = useCallback(
     (tarjeta: Tarjeta) => {
       const proyecto = tarjeta.proyecto_id ? proyectosPorId.get(tarjeta.proyecto_id) : undefined
       const organizacion = proyecto?.organizacion_id ? organizacionesPorId.get(proyecto.organizacion_id) : undefined
       const perfil = tarjeta.perfil_id ? perfilesPorId.get(tarjeta.perfil_id) : undefined
       const etiquetasDe = tarjeta.etiquetas.map((id) => etiquetasPorId.get(id)?.nombre)
-      return [tarjeta.texto, tarjeta.resumen, organizacion?.nombre, proyecto?.nombre, perfil?.nombre ?? "Sin asignar", tarjeta.tipo, ...etiquetasDe]
+      return [`#${tarjeta.numero}`, tarjeta.texto, tarjeta.resumen, organizacion?.nombre, proyecto?.nombre, perfil?.nombre ?? "Sin asignar", tarjeta.tipo, ...etiquetasDe]
         .filter(Boolean)
         .join(" ")
     },

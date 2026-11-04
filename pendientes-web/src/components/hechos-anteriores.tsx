@@ -69,7 +69,7 @@ export function HechosAnteriores({
                     key={pendiente.id}
                     // Lo que se puede buscar; el id lo hace único.
                     value={`${pendiente.texto} ${pendiente.id}`}
-                    keywords={[pendiente.resumen ?? "", proyecto ?? "", perfil?.nombre ?? "", pendiente.tipo ?? "", ...etiquetas.map((e) => e.nombre)]}
+                    keywords={[`#${pendiente.numero}`, pendiente.resumen ?? "", proyecto ?? "", perfil?.nombre ?? "", pendiente.tipo ?? "", ...etiquetas.map((e) => e.nombre)]}
                     onSelect={() => {
                       onAbiertoChange(false)
                       onAbrir(pendiente.id)
