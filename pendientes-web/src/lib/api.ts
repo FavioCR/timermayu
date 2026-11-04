@@ -10,6 +10,8 @@ export type Revision = { revisor_id: string; pedido_por: string | null; pedido_e
 
 export type Pendiente = {
   id: string
+  // Número corto y único (#1, #2…) para nombrarlo; no se reusa aunque se borre.
+  numero: number
   texto: string
   proyecto_id: string | null
   estado: Estado

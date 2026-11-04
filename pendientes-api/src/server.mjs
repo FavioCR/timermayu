@@ -196,7 +196,7 @@ const RUTAS_CON_ID = [ITEM_PATH, PERFIL_PATH, CONTRASENA_PATH, ORGANIZACION_PATH
 // Las filas que apuntan a un archivo guardado por su contenido (DATA_DIR/blobs/<sha256>).
 const TABLAS_CON_BLOB = ['imagenes', 'archivos', 'nota_imagenes', 'recursos'];
 const SHA256 = /^[0-9a-f]{64}$/;
-const COLUMNAS_PENDIENTE = `id, texto, proyecto_id, estado, tipo, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en, hecho_en,
+const COLUMNAS_PENDIENTE = `id, numero, texto, proyecto_id, estado, tipo, perfil_id, creado_por, resumen, num_imagenes, creado_en, actualizado_en, hecho_en,
   rebotado_en, rebotado_por, rebote_nota, rebote_visto_en,
   (SELECT COUNT(*) FROM comentarios c WHERE c.pendiente_id = pendientes.id) AS num_comentarios,
   (SELECT COUNT(*) FROM archivos a WHERE a.pendiente_id = pendientes.id AND a.borrador = 0 AND a.subido IS NULL) AS num_archivos,
@@ -540,6 +540,22 @@ const MIGRACIONES = [
   // La revisión se le puede pedir a cualquiera menos a uno mismo, también a su responsable: asignárselo ya no la cierra.
   (db) => {
     db.exec('DROP TRIGGER IF EXISTS revisiones_del_responsable');
+  },
+  // Cada pendiente lleva un número corto y único (#1, #2…) para nombrarlo. Los que ya estaban se numeran por fecha de
+  // creación. El contador vive en ajustes, no en MAX(numero): el número de uno borrado no se vuelve a usar.
+  (db) => {
+    db.exec(`
+      ALTER TABLE pendientes ADD COLUMN numero INTEGER;
+      WITH n AS (SELECT id, ROW_NUMBER() OVER (ORDER BY creado_en, rowid) AS n FROM pendientes)
+      UPDATE pendientes SET numero = (SELECT n FROM n WHERE n.id = pendientes.id);
+      CREATE UNIQUE INDEX pendientes_numero ON pendientes (numero);
+      INSERT INTO ajustes (clave, valor) VALUES ('ultimo_numero', (SELECT COALESCE(MAX(numero), 0) FROM pendientes));
+      CREATE TRIGGER numero_al_crear AFTER INSERT ON pendientes WHEN NEW.numero IS NULL
+        BEGIN
+          UPDATE ajustes SET valor = CAST(valor AS INTEGER) + 1 WHERE clave = 'ultimo_numero';
+          UPDATE pendientes SET numero = (SELECT CAST(valor AS INTEGER) FROM ajustes WHERE clave = 'ultimo_numero') WHERE id = NEW.id;
+        END;
+    `);
   },
 ];
 

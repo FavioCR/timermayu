@@ -2076,8 +2076,8 @@ export function Tablero({
                                       <ImageIcon className="size-3.5" /> {tarjeta.num_imagenes}
                                     </span>
                                   )}
-                                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                                    {fecha.format(new Date(tarjeta.creado_en))}
+                                  <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
+                                    #{tarjeta.numero} · {fecha.format(new Date(tarjeta.creado_en))}
                                   </span>
                                   <DropdownMenu>
                                     <DropdownMenuTrigger asChild>

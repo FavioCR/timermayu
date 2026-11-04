@@ -283,6 +283,18 @@ test('crea, asigna, mueve, edita y borra un pendiente', async (t) => {
   assert.deepEqual((await data('GET')).pendientes, []);
 });
 
+test('cada pendiente lleva un número único que no se reusa al borrar', async (t) => {
+  const { call, data } = await startServer(t);
+  const crear = async (texto) => (await data('POST', '', { texto })).pendiente;
+  const uno = await crear('Uno');
+  const dos = await crear('Dos');
+  assert.deepEqual([uno.numero, dos.numero], [1, 2]);
+  assert.equal((await call('DELETE', `/${dos.id}`)).status, 200);
+  const tres = await crear('Tres');
+  assert.equal(tres.numero, 3);
+  assert.equal((await data('GET', `/${tres.id}`)).pendiente.numero, 3);
+});
+
 test('organizaciones con proyectos: nombres únicos dentro de cada una, mover, renombrar y borrar vacíos', async (t) => {
   const { call, data } = await startServer(t);
   const { organizacion: mayugo } = await data('POST', '/organizaciones', { nombre: 'Mayugo' });
@@ -442,6 +454,7 @@ test('importa una sola vez los pendientes de la versión con archivo JSON', asyn
   assert.deepEqual(proyectos.map((p) => [p.nombre, p.organizacion_id]), [['kimba', null]]);
   assert.deepEqual((await data('GET')).pendientes.map((p) => [p.texto, p.estado, p.proyecto_id]),
     [['Primero', 'haciendo', proyectos[0].id], ['Segundo', 'pendiente', null]]);
+  assert.deepEqual((await data('GET')).pendientes.map((p) => p.numero).sort(), [1, 2]);
   assert.equal(existsSync(path.join(dataDir, 'pendientes.json')), false);
   assert.equal(existsSync(path.join(dataDir, 'pendientes.json.importado')), true);
 });

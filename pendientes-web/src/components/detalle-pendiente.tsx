@@ -375,7 +375,7 @@ function Contenido({
         />
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <SheetDescription>
-            Creado el {fechaLarga.format(new Date(pendiente.creado_en))}
+            <span className="tabular-nums">#{pendiente.numero}</span> · Creado el {fechaLarga.format(new Date(pendiente.creado_en))}
             {creador && ` por ${creador.nombre}`}
             {estadoGuardado && ` · ${estadoGuardado}`}
           </SheetDescription>
