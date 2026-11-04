@@ -1931,6 +1931,9 @@ export function Tablero({
                                     onKeyDown={detener}
                                     onClick={() => !arrastrando.current && setAbierto(tarjeta.id)}
                                   >
+                                    <span className="mr-1.5 align-[1px] text-[11px] font-normal tabular-nums text-muted-foreground">
+                                      #{tarjeta.numero}
+                                    </span>
                                     {tarjeta.tipo ? (
                                       <InsigniaTipo tipo={tarjeta.tipo} className="mr-1.5 align-[1px]" />
                                     ) : (
@@ -2077,7 +2080,7 @@ export function Tablero({
                                     </span>
                                   )}
                                   <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
-                                    #{tarjeta.numero} · {fecha.format(new Date(tarjeta.creado_en))}
+                                    {fecha.format(new Date(tarjeta.creado_en))}
                                   </span>
                                   <DropdownMenu>
                                     <DropdownMenuTrigger asChild>
