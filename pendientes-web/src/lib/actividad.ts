@@ -119,6 +119,18 @@ export function enlaceDePendiente(id: string) {
   return `${window.location.origin}${import.meta.env.BASE_URL}?p=${id}`
 }
 
+// El pendiente al que lleva un enlace de este mismo tablero (el de «Copiar enlace» o el «A partir de #12»); null si el
+// enlace va a otro lado.
+export function pendienteDeEnlace(href: string): string | null {
+  try {
+    const url = new URL(href, window.location.href)
+    if (url.origin !== window.location.origin || url.pathname !== import.meta.env.BASE_URL) return null
+    return url.searchParams.get("p")
+  } catch {
+    return null
+  }
+}
+
 // Abre WhatsApp con el mensaje escrito. Sin teléfono guardado, WhatsApp deja elegir el chat.
 export function enlaceWhatsApp({
   perfil,

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
-import { Check, CheckCheck, Forward, History, Link2, Lock, MessageCircle, MessageSquare, ScanEye, Trash2, Users } from "lucide-react"
+import { ArrowLeft, Check, CheckCheck, Forward, History, Link2, Lock, MessageCircle, MessageSquare, ScanEye, Trash2, Users } from "lucide-react"
 import { toast } from "sonner"
 
 import { Aprobacion } from "@/components/aprobacion"
@@ -65,6 +65,11 @@ type Props = {
   onPasar: (pendiente: Pendiente) => void
   // Abre otro pendiente (uno donde también está un archivo de este).
   onAbrirPendiente: (id: string) => void
+  // Abre encima el pendiente de un enlace de la descripción («A partir de #12»): al cerrarlo se vuelve a este.
+  onAbrirReferencia: (id: string) => void
+  // El pendiente que quedó debajo al abrir este desde un enlace, y cómo volver a él.
+  debajo: Pendiente | null
+  onVolver: () => void
   onAprobar: (id: string, aprueba: boolean) => void
   // Revisado y no aprobado: abre el diálogo para devolverlo a Haciendo.
   onRebotar: (pendiente: Pendiente) => void
@@ -156,6 +161,9 @@ function Contenido({
   onCantidadArchivos,
   onPasar,
   onAbrirPendiente,
+  onAbrirReferencia,
+  debajo,
+  onVolver,
   onAprobar,
   onRebotar,
   onDerivar,
@@ -359,6 +367,17 @@ function Contenido({
     <div className="flex flex-col lg:h-full lg:flex-row">
       <div className="min-w-0 flex-1 lg:overflow-y-auto" data-seguir={`detalle:${pendiente.id}`}>
       <SheetHeader className="gap-1 pr-12 lg:pr-4">
+        {debajo && (
+          <Button
+            variant="ghost"
+            size="xs"
+            className="-ml-2 self-start text-muted-foreground"
+            title={`Volver a «${debajo.texto}»`}
+            onClick={onVolver}
+          >
+            <ArrowLeft /> Volver a #{debajo.numero}
+          </Button>
+        )}
         <SheetTitle className="sr-only">{pendiente.texto}</SheetTitle>
         <Textarea
           aria-label="Título del pendiente"
@@ -566,6 +585,7 @@ function Contenido({
                 medios={mediosDe.id === id ? mediosDe.lista : undefined}
                 onReproducir={(medio, desde, hasta) => reproducir({ credenciales, archivo: medio, desde, hasta })}
                 traerImagen={(url) => api.traerImagen(credenciales, url)}
+                abrirPendiente={onAbrirReferencia}
               />
             </Suspense>
           ) : (

@@ -13,20 +13,25 @@ import { es } from "@blocknote/core/locales"
 import {
   createReactBlockSpec,
   createReactInlineContentSpec,
+  DeleteLinkButton,
+  EditLinkButton,
   FileBlockWrapper,
   FormattingToolbar,
   FormattingToolbarController,
   getDefaultReactSlashMenuItems,
   getFormattingToolbarItems,
   GridSuggestionMenuController,
+  LinkToolbar,
+  LinkToolbarController,
   SuggestionMenuController,
   useComponentsContext,
   useCreateBlockNote,
   useEditorState,
   type DefaultReactSuggestionItem,
+  type LinkToolbarProps,
 } from "@blocknote/react"
 import { BlockNoteView } from "@blocknote/shadcn"
-import { Clock, Sparkles } from "lucide-react"
+import { Clock, ExternalLink, PanelRightOpen, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 import { TextSelection, type Transaction } from "prosemirror-state"
 import { cn } from "cn"
@@ -36,6 +41,7 @@ import { PerfilAvatar } from "@/components/perfil-avatar"
 import { RedactarIA } from "@/components/redactar-ia"
 import { VisorImagenes, type ImagenDelVisor } from "@/components/visor-imagenes"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
+import { pendienteDeEnlace } from "@/lib/actividad"
 import type { OpcionesRedaccion, Perfil } from "@/lib/api"
 import { claseDeArchivo, tipoPorNombre } from "@/lib/archivos"
 import { medioDeMarca, tramoLegible, type Medio } from "@/lib/marcas-de-tiempo"
@@ -44,6 +50,35 @@ import { comoImagenSubible, imagenesDelPortapapeles, nombreDeImagen, prepararHtm
 
 // Tocar un archivo de la descripción lo abre con la contraseña (un enlace directo no la lleva).
 const AbrirArchivo = createContext<(url: string, nombre: string) => void>(() => {})
+// Abre un enlace de la descripción: los de otro pendiente, encima en este mismo panel; los demás, en otra pestaña.
+const AbrirEnlace = createContext<(href: string) => void>(() => {})
+
+// La barra que sale sobre un enlace: editarlo, abrirlo (aquí mismo si es de otro pendiente) y quitarlo.
+function BarraDeEnlace(props: LinkToolbarProps) {
+  const Components = useComponentsContext()!
+  const abrir = useContext(AbrirEnlace)
+  const deUnPendiente = pendienteDeEnlace(props.url) !== null
+  return (
+    <LinkToolbar {...props}>
+      <EditLinkButton
+        url={props.url}
+        text={props.text}
+        range={props.range}
+        setToolbarOpen={props.setToolbarOpen}
+        setToolbarPositionFrozen={props.setToolbarPositionFrozen}
+      />
+      <Components.LinkToolbar.Button
+        className="bn-button"
+        mainTooltip={deUnPendiente ? "Abrir el pendiente aquí" : "Abrir en otra pestaña"}
+        label={deUnPendiente ? "Abrir el pendiente aquí" : "Abrir en otra pestaña"}
+        isSelected={false}
+        onClick={() => abrir(props.url)}
+        icon={deUnPendiente ? <PanelRightOpen size={16} /> : <ExternalLink size={16} />}
+      />
+      <DeleteLinkButton range={props.range} setToolbarOpen={props.setToolbarOpen} />
+    </LinkToolbar>
+  )
+}
 
 function EnlaceArchivo({ url, nombre }: { url: string; nombre: string }) {
   const abrir = useContext(AbrirArchivo)
@@ -219,6 +254,7 @@ export default function EditorDescripcion({
   medios = SIN_MEDIOS,
   onReproducir,
   traerImagen,
+  abrirPendiente,
 }: {
   inicial: (typeof schema.PartialBlock)[] | undefined
   oscuro: boolean
@@ -239,9 +275,21 @@ export default function EditorDescripcion({
   onReproducir?: (medio: Medio, desde: number, hasta: number | null) => void
   // Una imagen pegada (de otra página, de otra tarjeta o nota, o ya en la página), para subirla aquí.
   traerImagen: (url: string) => Promise<Blob>
+  // Un enlace a otro pendiente lo abre encima, en el mismo panel; sin esto (en las notas) va a otra pestaña como todos.
+  abrirPendiente?: (id: string) => void
 }) {
   const [extensionMarcas] = useState(marcasDeTiempo)
   const alPegar = useRef<(event: ClipboardEvent, porDefecto: () => boolean | undefined) => boolean | undefined>(() => undefined)
+  // El editor se crea una vez: el clic en un enlace usa siempre el abrirPendiente de ahora.
+  const abrirPendienteActual = useRef(abrirPendiente)
+  useEffect(() => {
+    abrirPendienteActual.current = abrirPendiente
+  })
+  const [abrirEnlace] = useState(() => (href: string) => {
+    const id = pendienteDeEnlace(href)
+    if (id && abrirPendienteActual.current) abrirPendienteActual.current(id)
+    else window.open(href, "_blank", "noopener,noreferrer")
+  })
   const editor = useCreateBlockNote({
     schema,
     initialContent: inicial,
@@ -250,6 +298,14 @@ export default function EditorDescripcion({
     resolveFileUrl: resolverUrl,
     extensions: [extensionMarcas],
     pasteHandler: ({ event, defaultPasteHandler }) => alPegar.current(event, defaultPasteHandler),
+    links: {
+      onClick: (event) => {
+        const enlace = event.target instanceof Element ? event.target.closest("a") : null
+        if (!enlace) return false
+        abrirEnlace(enlace.href)
+        return true
+      },
+    },
   })
 
   // Pegar texto con imágenes las trae tal cual: con imágenes manda el HTML (aunque el texto plano parezca Markdown, que
@@ -507,6 +563,7 @@ export default function EditorDescripcion({
 
   return (
     <AbrirArchivo.Provider value={abrirArchivo}>
+      <AbrirEnlace.Provider value={abrirEnlace}>
       <Personas.Provider value={personas}>
         <Reescribir.Provider value={redactar ? abrirReescribir : null}>
           <BlockNoteView
@@ -516,6 +573,7 @@ export default function EditorDescripcion({
             slashMenu={false}
             emojiPicker={false}
             formattingToolbar={false}
+            linkToolbar={false}
             onChange={() => onCambio(paraGuardar(editor.document as Bloque[]))}
           >
             <SuggestionMenuController triggerCharacter="/" getItems={itemsDeBarra} />
@@ -523,6 +581,7 @@ export default function EditorDescripcion({
             <GridSuggestionMenuController triggerCharacter=":" columns={10} minQueryLength={2} shouldOpen={noDespuesDeUnNumero} />
             {perfiles.length > 0 && <SuggestionMenuController triggerCharacter="@" getItems={sugerencias} />}
             <FormattingToolbarController formattingToolbar={BarraDeFormato} />
+            <LinkToolbarController linkToolbar={BarraDeEnlace} />
           </BlockNoteView>
         </Reescribir.Provider>
         <Popover open={ia !== null} onOpenChange={(abierto) => !abierto && setIa(null)}>
@@ -571,6 +630,7 @@ export default function EditorDescripcion({
           onCerrar={() => setAgrandada(null)}
         />
       </Personas.Provider>
+      </AbrirEnlace.Provider>
     </AbrirArchivo.Provider>
   )
 }

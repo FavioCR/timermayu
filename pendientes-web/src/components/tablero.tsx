@@ -1172,10 +1172,33 @@ export function Tablero({
     [credenciales, fallar, recargar]
   )
 
+  // Los pendientes que quedaron debajo al abrir otro desde un enlace de su descripción («A partir de #12»), del primero al
+  // último. Cerrar el de encima vuelve al de debajo; cerrar el último cierra el panel.
+  const [debajo, setDebajo] = useState<string[]>([])
+  // Si el panel se cerró por otro lado (al borrar, desde un aviso…), no queda nada debajo.
+  if (!abierto && debajo.length > 0) setDebajo([])
+  const abrirReferencia = useCallback(
+    (id: string) => {
+      if (!tarjetas.some((tarjeta) => tarjeta.id === id)) {
+        toast.error("Ese pendiente ya no existe o no lo puedes ver.")
+        return
+      }
+      if (abierto && abierto !== id) setDebajo((actuales) => [...actuales, abierto])
+      setAbierto(id)
+      setChatEnfocado(null)
+    },
+    [tarjetas, abierto]
+  )
+  const volverAlDeDebajo = useCallback(() => {
+    setAbierto(debajo.at(-1) ?? null)
+    setDebajo((actuales) => actuales.slice(0, -1))
+  }, [debajo])
   const cerrarDetalle = useCallback(() => {
+    if (debajo.length > 0) return volverAlDeDebajo()
     setAbierto(null)
     setChatEnfocado(null)
-  }, [])
+  }, [debajo, volverAlDeDebajo])
+  const pendienteDebajo = debajo.length > 0 ? (tarjetas.find((tarjeta) => tarjeta.id === debajo.at(-1)) ?? null) : null
 
   async function borrar(tarjeta: Pendiente) {
     if (abierto === tarjeta.id) setAbierto(null)
@@ -2326,6 +2349,9 @@ export function Tablero({
         onPedirRevision={pedirRevision}
         onMarcarRevisado={marcarRevisado}
         onAbrirPendiente={setAbierto}
+        onAbrirReferencia={abrirReferencia}
+        debajo={pendienteDebajo}
+        onVolver={volverAlDeDebajo}
         onAprobar={aprobar}
         onBorrar={borrar}
         onCerrar={cerrarDetalle}
