@@ -20,6 +20,7 @@ import { Textarea } from "@/components/ui/textarea"
 import {
   api,
   esNoAutorizado,
+  conReintentos,
   mensajeDeError,
   type CambiosPendiente,
   type Estado,
@@ -205,22 +206,20 @@ function Contenido({
     setInicial((actual) => ({ bloques, version: (actual?.version ?? 0) + 1 }))
   }, [])
 
-  useEffect(() => {
-    let vigente = true
-    api
-      .detalle(credenciales, id)
-      .then((detalle) => {
-        if (vigente) aplicarDescripcion(detalle.descripcion)
-      })
-      .catch((err) => {
-        if (!vigente) return
-        if (esNoAutorizado(err)) onSalir()
-        else setAviso(mensajeDeError(err))
-      })
-    return () => {
-      vigente = false
-    }
-  }, [credenciales, id, onSalir, aplicarDescripcion])
+  // Si el servidor no responde (un despliegue lo reinicia unos segundos), lo vuelve a pedir solo, cada vez más espaciado,
+  // y el aviso se va en cuanto carga.
+  useEffect(
+    () =>
+      conReintentos(
+        () => api.detalle(credenciales, id),
+        (detalle) => {
+          setAviso("")
+          aplicarDescripcion(detalle.descripcion)
+        },
+        (err) => (esNoAutorizado(err) ? onSalir() : setAviso(mensajeDeError(err)))
+      ),
+    [credenciales, id, onSalir, aplicarDescripcion]
+  )
 
   // Si el pendiente cambió (otra persona lo editó y el tablero se puso al día), trae la descripción otra vez. Solo la
   // reemplaza si es distinta y aquí no se está escribiendo: nada sin guardar y el cursor fuera del editor (y de su /ia).

@@ -19,7 +19,7 @@ import { VisorImagenes } from "@/components/visor-imagenes"
 import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { api, esNoAutorizado, MAX_ARCHIVO_BYTES, mensajeDeError, type Archivo, type ArchivoEncontrado, type Usuario } from "@/lib/api"
+import { api, conReintentos, esNoAutorizado, MAX_ARCHIVO_BYTES, mensajeDeError, type Archivo, type ArchivoEncontrado, type Usuario } from "@/lib/api"
 import { abrirArchivo, claseDeArchivo, esMedio, tamanoLegible, traeArchivos, urlDeArchivo, type ClaseDeArchivo } from "@/lib/archivos"
 
 export const ICONOS: Record<ClaseDeArchivo, typeof File> = {
@@ -315,22 +315,19 @@ export function ArchivosPendiente({
   )
   const cargarImagen = useCallback((url: string) => api.urlDeImagen(credenciales, url), [credenciales])
 
-  useEffect(() => {
-    let vigente = true
-    api.archivos
-      .listar(credenciales, pendienteId)
-      .then((lista) => {
-        if (vigente) setArchivos(lista)
-      })
-      .catch((err) => {
-        if (!vigente) return
-        if (esNoAutorizado(err)) onSalir()
-        else setError(mensajeDeError(err))
-      })
-    return () => {
-      vigente = false
-    }
-  }, [credenciales, pendienteId, version, onSalir])
+  // Si el servidor no responde, la lista se vuelve a pedir sola y el aviso se va en cuanto llega.
+  useEffect(
+    () =>
+      conReintentos(
+        () => api.archivos.listar(credenciales, pendienteId),
+        (lista) => {
+          setError("")
+          setArchivos(lista)
+        },
+        (err) => (esNoAutorizado(err) ? onSalir() : setError(mensajeDeError(err)))
+      ),
+    [credenciales, pendienteId, version, onSalir]
+  )
 
   useEffect(() => {
     if (!archivos) return

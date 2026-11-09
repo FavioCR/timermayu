@@ -14,6 +14,7 @@ import { Textarea } from "@/components/ui/textarea"
 import {
   api,
   esNoAutorizado,
+  esSinConexion,
   MAX_ARCHIVO_BYTES,
   mensajeDeError,
   type Archivo,
@@ -101,6 +102,29 @@ type Comando = { nombre: NombreComando; descripcion: string; Icono: LucideIcon }
 // Lo escrito para un comando: desde la / hasta el cursor.
 type EnCurso = { inicio: number; fin: number; consulta: string }
 
+// Lo escrito y sin enviar se guarda en este navegador (por pendiente y por perfil): si el panel se cierra sin querer, al
+// volver a abrirlo sigue ahí, con el mensaje al que se respondía. Se borra al enviarlo o al vaciar el campo.
+type Borrador = { texto: string; respuesta_a: string | null }
+const claveBorrador = (yo: string | null, pendienteId: string) => `pendientes.borrador:${yo ?? "equipo"}:${pendienteId}`
+
+function leerBorrador(clave: string): Borrador | null {
+  try {
+    const guardado = JSON.parse(localStorage.getItem(clave) ?? "null")
+    return guardado && typeof guardado.texto === "string" ? { texto: guardado.texto, respuesta_a: guardado.respuesta_a ?? null } : null
+  } catch {
+    return null
+  }
+}
+
+function guardarBorrador(clave: string, borrador: Borrador) {
+  try {
+    if (borrador.texto.trim() || borrador.respuesta_a) localStorage.setItem(clave, JSON.stringify(borrador))
+    else localStorage.removeItem(clave)
+  } catch {
+    // Sin almacenamiento (ventana privada, por ejemplo) simplemente no hay borrador.
+  }
+}
+
 const escapar = (texto: string) => texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 const sinTildes = (texto: string) => texto.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase()
 
@@ -170,7 +194,10 @@ export function ChatPendiente({
   }
 }) {
   const [comentarios, setComentarios] = useState<Comentario[] | null>(null)
-  const [texto, setTexto] = useState("")
+  const borrador = claveBorrador(usuario?.perfil_id ?? null, pendienteId)
+  // El borrador que quedó de antes; la respuesta se recupera cuando llegan los mensajes (si el original sigue ahí).
+  const [guardado] = useState(() => leerBorrador(borrador))
+  const [texto, setTexto] = useState(guardado?.texto ?? "")
   const [enviando, setEnviando] = useState(false)
   const [confirmando, setConfirmando] = useState<string | null>(null)
   const [error, setError] = useState("")
@@ -186,6 +213,7 @@ export function ChatPendiente({
   const [adjuntos, setAdjuntos] = useState<Adjunto[]>([])
   const [encima, setEncima] = useState(false)
   const [respondiendo, setRespondiendo] = useState<Comentario | null>(null)
+  const respuestaPorRecuperar = useRef(guardado?.respuesta_a ?? null)
   // Al agrandar una imagen se ven todas las del chat en carrusel, en el orden de los mensajes.
   const imagenesDelChat = useMemo(
     () =>
@@ -233,11 +261,21 @@ export function ChatPendiente({
     [onSalir]
   )
 
+  // Si el servidor no responde (un despliegue lo reinicia unos segundos), se vuelve a pedir solo, cada vez más espaciado
+  // (2 s, 4 s… hasta 30 s), y el aviso se va en cuanto carga.
+  const reintento = useRef<{ espera?: number; intento: number }>({ intento: 0 })
   const cargar = useCallback(async () => {
+    window.clearTimeout(reintento.current.espera)
     try {
       setComentarios(await api.comentarios.listar(credenciales, pendienteId))
+      reintento.current.intento = 0
+      setError("")
     } catch (err) {
       fallar(err)
+      if (esSinConexion(err)) {
+        const espera = Math.min(2000 * 2 ** reintento.current.intento++, 30_000)
+        reintento.current.espera = window.setTimeout(() => cargar(), espera)
+      }
     }
   }, [credenciales, pendienteId, fallar])
 
@@ -250,11 +288,25 @@ export function ChatPendiente({
     const intervalo = window.setInterval(cargar, CADA_MS)
     const alVolver = () => document.visibilityState === "visible" && cargar()
     document.addEventListener("visibilitychange", alVolver)
+    const pendiente = reintento.current
     return () => {
       window.clearInterval(intervalo)
+      window.clearTimeout(pendiente.espera)
       document.removeEventListener("visibilitychange", alVolver)
     }
   }, [cargar])
+
+  useEffect(() => {
+    if (!comentarios || !respuestaPorRecuperar.current) return
+    const original = comentarios.find((comentario) => comentario.id === respuestaPorRecuperar.current)
+    respuestaPorRecuperar.current = null
+    if (original) setRespondiendo(original)
+  }, [comentarios])
+
+  // Mientras se recupera la respuesta, no se pisa la guardada.
+  useEffect(() => {
+    guardarBorrador(borrador, { texto, respuesta_a: respondiendo?.id ?? respuestaPorRecuperar.current })
+  }, [borrador, texto, respondiendo])
 
   useEffect(() => {
     if (!comentarios) return

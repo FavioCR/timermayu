@@ -390,6 +390,29 @@ export function esSinConexion(error: unknown) {
   return error instanceof ApiError && (error.status === 0 || [502, 503, 504].includes(error.status))
 }
 
+// Pide algo y, si el servidor no responde (un despliegue lo reinicia unos segundos), lo vuelve a pedir solo, cada vez más
+// espaciado (2 s, 4 s… hasta 30 s), hasta que cargue. alFallar avisa de cada fallo; alCargar, de cuando por fin llega.
+// Devuelve con qué dejar de intentarlo (al cerrar, o al cambiar lo que se pide).
+export function conReintentos<T>(pedir: () => Promise<T>, alCargar: (valor: T) => void, alFallar: (error: unknown) => void) {
+  let vigente = true
+  let espera: number | undefined
+  const intentar = (intento: number) =>
+    pedir()
+      .then((valor) => {
+        if (vigente) alCargar(valor)
+      })
+      .catch((error) => {
+        if (!vigente) return
+        alFallar(error)
+        if (esSinConexion(error)) espera = window.setTimeout(() => intentar(intento + 1), Math.min(2000 * 2 ** intento, 30_000))
+      })
+  intentar(0)
+  return () => {
+    vigente = false
+    window.clearTimeout(espera)
+  }
+}
+
 export function esNoAutorizado(error: unknown) {
   return error instanceof ApiError && error.status === 401
 }
