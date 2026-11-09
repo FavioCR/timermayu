@@ -1,5 +1,5 @@
 import type { HTMLAttributes } from "react"
-import { BadgeCheck, Check, Undo2 } from "lucide-react"
+import { BadgeCheck, Check, CopyPlus, Undo2 } from "lucide-react"
 import { cn } from "cn"
 
 import { PerfilAvatar } from "@/components/perfil-avatar"
@@ -11,22 +11,26 @@ const lista = new Intl.ListFormat("es", { type: "conjunction" })
 
 // Quiénes aprobaron un pendiente hecho y el check para aprobar su funcionalidad (o quitar la aprobación propia); al lado,
 // «Rebotar» si al revisarlo no está bien. Lo revisan otros perfiles: su responsable no (es su trabajo) ni la cuenta del
-// equipo (no se sabría quién).
+// equipo (no se sabría quién). Junto a «Rebotar», crear otro pendiente a partir de este (cualquier perfil, también su
+// responsable): lo que siguió al revisarlo, sin devolver este a Haciendo.
 export function Aprobacion({
   pendiente,
   perfilesPorId,
   yo,
   onAprobar,
   onRebotar,
+  onDerivar,
   compacto = false,
   botonProps,
 }: {
-  pendiente: Pick<Pendiente, "texto" | "perfil_id" | "aprobaciones">
+  pendiente: Pick<Pendiente, "numero" | "texto" | "perfil_id" | "aprobaciones">
   perfilesPorId: Map<string, Perfil>
   yo: string | null
   onAprobar: (aprobar: boolean) => void
   // Abre el diálogo para devolverlo a Haciendo con lo que falta.
   onRebotar: () => void
+  // Abre el diálogo para crear un pendiente nuevo a partir de este.
+  onDerivar?: () => void
   // En la tarjeta: más chico, con el texto corto.
   compacto?: boolean
   // En la tarjeta, para que tocar el botón no empiece a arrastrarla.
@@ -80,18 +84,36 @@ export function Aprobacion({
           {resumen}
         </span>
       )}
-      {puedo && (
-        <Button
-          variant="ghost"
-          size={compacto ? "xs" : "sm"}
-          aria-label={`Rebotar "${pendiente.texto}" a Haciendo`}
-          title="No está bien: devolverlo a Haciendo con lo que falta"
-          className="ml-auto shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-          {...botonProps}
-          onClick={onRebotar}
-        >
-          <Undo2 /> Rebotar
-        </Button>
+      {(puedo || (onDerivar && yo !== null)) && (
+        <span className="ml-auto flex shrink-0 items-center gap-1">
+          {onDerivar && yo !== null && (
+            <Button
+              variant="ghost"
+              size={compacto ? "icon-xs" : "sm"}
+              aria-label={`Crear un pendiente nuevo a partir de #${pendiente.numero}`}
+              title="Crear un pendiente nuevo a partir de este (mismo proyecto, tipo y etiquetas)"
+              className="text-muted-foreground"
+              {...botonProps}
+              onClick={onDerivar}
+            >
+              <CopyPlus />
+              {!compacto && "Nuevo a partir de este"}
+            </Button>
+          )}
+          {puedo && (
+            <Button
+              variant="ghost"
+              size={compacto ? "xs" : "sm"}
+              aria-label={`Rebotar "${pendiente.texto}" a Haciendo`}
+              title="No está bien: devolverlo a Haciendo con lo que falta"
+              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+              {...botonProps}
+              onClick={onRebotar}
+            >
+              <Undo2 /> Rebotar
+            </Button>
+          )}
+        </span>
       )}
     </div>
   )

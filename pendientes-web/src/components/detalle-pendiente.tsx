@@ -67,6 +67,8 @@ type Props = {
   onAprobar: (id: string, aprueba: boolean) => void
   // Revisado y no aprobado: abre el diálogo para devolverlo a Haciendo.
   onRebotar: (pendiente: Pendiente) => void
+  // Abre el diálogo para crear un pendiente nuevo a partir de este (botón junto a Rebotar y /nuevo en el chat).
+  onDerivar: (pendiente: Pendiente) => void
   // Les pide a compañeros que lo revisen (desde el chat).
   onPedirRevision: (id: string, revisores: string[], nota: string) => Promise<boolean>
   // Quien no puede cerrar su pedido aprobándolo (su responsable, o quien ya lo aprobó) lo da por revisado.
@@ -155,6 +157,7 @@ function Contenido({
   onAbrirPendiente,
   onAprobar,
   onRebotar,
+  onDerivar,
   onPedirRevision,
   onMarcarRevisado,
   onBorrar,
@@ -418,6 +421,7 @@ function Contenido({
                   yo={usuario?.perfil_id ?? null}
                   onAprobar={(aprueba) => onAprobar(id, aprueba)}
                   onRebotar={() => onRebotar(pendiente)}
+                  onDerivar={() => onDerivar(pendiente)}
                 />
               </dd>
               {pendiente.revisiones.length > 0 && (
@@ -623,6 +627,7 @@ function Contenido({
               onCantidad={(cantidad) => onCantidadComentarios(id, cantidad)}
               onSalir={onSalir}
               enfocar={enfocarChat}
+              onDerivar={yo ? () => onDerivar(pendiente) : undefined}
               revision={
                 yo
                   ? { pendiente, candidatos: revisores, onPedir: (elegidos, nota) => onPedirRevision(id, elegidos, nota) }

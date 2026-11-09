@@ -90,6 +90,7 @@ import { Siguiendo } from "@/components/siguiendo"
 import { PasarDialog } from "@/components/pasar-dialog"
 import { PorRevisar } from "@/components/por-revisar"
 import { AvisoRebote, RebotarDialog } from "@/components/rebotar-dialog"
+import { DerivarDialog, type Derivado } from "@/components/derivar-dialog"
 import { PerfilAvatar } from "@/components/perfil-avatar"
 import { RecordatorioEvidencia, type Recordatorio } from "@/components/recordatorio-evidencia"
 import type { CambiosPerfil } from "@/components/perfiles-dialog"
@@ -141,7 +142,7 @@ import {
   type SinLeer,
   type Usuario,
 } from "@/lib/api"
-import { enlaceWhatsApp, unirNombres } from "@/lib/actividad"
+import { enlaceDePendiente, enlaceWhatsApp, unirNombres } from "@/lib/actividad"
 import { APARIENCIA_NORMAL, aplicarApariencia } from "@/lib/apariencia"
 import { coincide } from "@/lib/buscar"
 import { agrupar, conOrganizacion, conProyecto, involucrados, organizacionDe, SIN_ORGANIZACION, type Catalogo } from "@/lib/catalogo"
@@ -480,6 +481,7 @@ export function Tablero({
   // El pendiente hecho que se está pasando a otra persona.
   const [pasando, setPasando] = useState<Pendiente | null>(null)
   const [rebotando, setRebotando] = useState<Pendiente | null>(null)
+  const [derivando, setDerivando] = useState<Pendiente | null>(null)
   const [recordatorio, setRecordatorio] = useState<Recordatorio | null>(null)
   // Abrir un pendiente con el campo del chat listo para escribir (`vez` cambia con cada pedido).
   const [chatEnfocado, setChatEnfocado] = useState<{ id: string; vez: number } | null>(null)
@@ -1011,6 +1013,50 @@ export function Tablero({
   )
 
   // Revisado y no aprobado: vuelve a Haciendo, primero en la columna y marcado hasta que vuelva a Hecho.
+  // Un pendiente nuevo a partir de otro: su proyecto, tipo y etiquetas, y en la descripción el enlace al original y lo
+  // que hay que hacer. Entra en Por hacer, como cualquier pendiente nuevo.
+  async function derivar({ texto, detalle, perfil_id }: Derivado) {
+    if (!derivando) return false
+    const original = derivando
+    const parrafo = (contenido: unknown[]) => ({ type: "paragraph", content: contenido })
+    const descripcion = JSON.stringify([
+      parrafo([
+        { type: "text", text: "A partir de ", styles: {} },
+        {
+          type: "link",
+          href: enlaceDePendiente(original.id),
+          content: [{ type: "text", text: `#${original.numero} ${original.texto}`, styles: {} }],
+        },
+      ]),
+      ...detalle
+        .split("\n")
+        .map((linea) => linea.trim())
+        .filter(Boolean)
+        .map((linea) => parrafo([{ type: "text", text: linea, styles: {} }])),
+    ])
+    try {
+      const nuevo = await api.crear(credenciales, {
+        texto,
+        proyecto_id: original.proyecto_id,
+        tipo: original.tipo,
+        perfil_id,
+        etiquetas: original.etiquetas,
+        descripcion,
+      })
+      setTarjetas((actuales) => (nuevo.perfil_id ? [...actuales, aTarjeta(nuevo)] : [aTarjeta(nuevo), ...actuales]))
+      setDerivando(null)
+      setError("")
+      toast.success(`Se creó #${nuevo.numero} a partir de #${original.numero}`, {
+        action: { label: "Abrir", onClick: () => setAbierto(nuevo.id) },
+      })
+      avisarPorWhatsApp(nuevo)
+      return true
+    } catch (err) {
+      fallar(err)
+      return false
+    }
+  }
+
   async function rebotar(nota: string) {
     if (!rebotando) return false
     try {
@@ -2025,6 +2071,7 @@ export function Tablero({
                                     yo={usuario?.perfil_id ?? null}
                                     onAprobar={(aprueba) => aprobar(tarjeta.id, aprueba)}
                                     onRebotar={() => setRebotando(tarjeta)}
+                                    onDerivar={() => setDerivando(tarjeta)}
                                     botonProps={noArrastrar}
                                   />
                                 )}
@@ -2247,6 +2294,12 @@ export function Tablero({
         onCerrar={() => setRebotando(null)}
         onRebotar={rebotar}
       />
+      <DerivarDialog
+        pendiente={derivando}
+        personas={derivando ? involucrados(perfiles, organizacionDe(catalogo, derivando.proyecto_id), derivando.perfil_id) : []}
+        onCerrar={() => setDerivando(null)}
+        onCrear={derivar}
+      />
       <PasarDialog
         pendiente={pasando}
         personas={pasando ? involucrados(perfiles, organizacionDe(catalogo, pasando.proyecto_id)) : []}
@@ -2269,6 +2322,7 @@ export function Tablero({
         onCantidadArchivos={cambiarCantidadArchivos}
         onPasar={setPasando}
         onRebotar={setRebotando}
+        onDerivar={setDerivando}
         onPedirRevision={pedirRevision}
         onMarcarRevisado={marcarRevisado}
         onAbrirPendiente={setAbierto}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type TouchEvent } from "react"
-import { Paperclip, Reply, ScanEye, SendHorizontal, Trash2, X } from "lucide-react"
+import { CopyPlus, Paperclip, Reply, ScanEye, SendHorizontal, Sparkles, Trash2, X, type LucideIcon } from "lucide-react"
 import { cn } from "cn"
 
 import { ChipArchivo, esImagenVisible, MiniaturaArchivo } from "@/components/archivos"
@@ -93,6 +93,13 @@ function CitaMensaje({
 type Adjunto = { clave: string; nombre: string; tipo: string; tamano: number; avance?: number; archivo?: Archivo }
 // Lo escrito entre una @ y el cursor, mientras se escribe una mención.
 const MENCION_EN_CURSO = /(?:^|\s)@([^\s@]{0,30})$/u
+// Lo escrito entre una / (al principio o tras un espacio) y el cursor, mientras se elige un comando.
+const COMANDO_EN_CURSO = /(?:^|\s)\/(\p{L}{0,20})$/u
+
+type NombreComando = "ia" | "revisar" | "nuevo"
+type Comando = { nombre: NombreComando; descripcion: string; Icono: LucideIcon }
+// Lo escrito para un comando: desde la / hasta el cursor.
+type EnCurso = { inicio: number; fin: number; consulta: string }
 
 const escapar = (texto: string) => texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 const sinTildes = (texto: string) => texto.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase()
@@ -142,6 +149,7 @@ export function ChatPendiente({
   onCantidad,
   onSalir,
   enfocar = 0,
+  onDerivar,
   revision,
 }: {
   credenciales: string
@@ -152,6 +160,8 @@ export function ChatPendiente({
   onSalir: () => void
   // Cambia (>0) cuando hay que dejar el campo listo para escribir.
   enfocar?: number
+  // Abre el diálogo para crear un pendiente nuevo a partir de este (/nuevo); sin perfil no se puede.
+  onDerivar?: () => void
   // Para pedirle a un compañero que lo revise (botón y /revisar); sin perfil no se puede.
   revision?: {
     pendiente: Pick<Pendiente, "estado" | "perfil_id" | "aprobaciones" | "revisiones">
@@ -167,6 +177,9 @@ export function ChatPendiente({
   // La mención que se está escribiendo: desde la @ hasta el cursor.
   const [mencion, setMencion] = useState<{ inicio: number; fin: number; consulta: string } | null>(null)
   const [elegido, setElegido] = useState(0)
+  // El comando que se está escribiendo tras una /: abre el menú de comandos.
+  const [comando, setComando] = useState<EnCurso | null>(null)
+  const [comandoElegido, setComandoElegido] = useState(0)
   // /ia abierto: dónde estaba escrito (ahí va lo que redacte la IA) y lo que ya había en el mensaje.
   const [ia, setIa] = useState<{ posicion: number; previo: string } | null>(null)
   const [pidiendoRevision, setPidiendoRevision] = useState(false)
@@ -278,23 +291,62 @@ export function ChatPendiente({
     setMencion({ inicio: fin - consulta.length - 1, fin, consulta })
   }
 
-  // Escribir /ia (al principio o después de un espacio) lo borra y abre el campo de la IA en ese lugar; /revisar lo borra y
-  // abre el pedido de revisión.
-  function revisarIA(elemento: HTMLTextAreaElement) {
+  // Los comandos que hay en este chat: /revisar y /nuevo solo con perfil.
+  const comandos = useMemo(() => {
+    const todos: (Comando | false)[] = [
+      { nombre: "ia", descripcion: "Redactar el mensaje con IA", Icono: Sparkles },
+      Boolean(revision) && { nombre: "revisar", descripcion: "Pedirle a un compañero que lo revise", Icono: ScanEye },
+      Boolean(onDerivar) && { nombre: "nuevo", descripcion: "Crear un pendiente nuevo a partir de este", Icono: CopyPlus },
+    ]
+    return todos.filter((c): c is Comando => Boolean(c))
+  }, [revision, onDerivar])
+  // Los que empiezan como lo escrito.
+  const comandosSugeridos = useMemo(
+    () => (comando ? comandos.filter((c) => c.nombre.startsWith(sinTildes(comando.consulta))) : []),
+    [comando, comandos]
+  )
+  const comandoSugerido = comandosSugeridos[Math.min(comandoElegido, comandosSugeridos.length - 1)]
+
+  // Una / al principio o tras un espacio abre el menú de comandos; escribir uno entero (/ia, /revisar, /nuevo) lo usa
+  // de una vez. Devuelve si lo escrito era un comando (entonces no es una mención).
+  function revisarComando(elemento: HTMLTextAreaElement, usarSiEstaEntero: boolean) {
     const cursor = elemento.selectionStart
-    if (revision && cursor === elemento.selectionEnd && /(^|\s)\/revisar$/i.test(elemento.value.slice(0, cursor))) {
-      setTexto(elemento.value.slice(0, cursor - 8) + elemento.value.slice(cursor))
-      setMencion(null)
-      setPidiendoRevision(true)
+    const encontrado = cursor === elemento.selectionEnd ? COMANDO_EN_CURSO.exec(elemento.value.slice(0, cursor)) : null
+    if (!encontrado) {
+      setComando(null)
+      return false
+    }
+    const consulta = encontrado[1]
+    const inicio = cursor - consulta.length - 1
+    const entero = comandos.find((c) => c.nombre === sinTildes(consulta))
+    if (usarSiEstaEntero && entero) {
+      usarComando(entero, elemento.value, inicio, cursor)
       return true
     }
-    if (cursor !== elemento.selectionEnd || !/(^|\s)\/ia$/i.test(elemento.value.slice(0, cursor))) return false
-    const sinComando = elemento.value.slice(0, cursor - 3) + elemento.value.slice(cursor)
-    setTexto(sinComando)
+    if (consulta !== comando?.consulta) setComandoElegido(0)
+    setComando({ inicio, fin: cursor, consulta })
     setMencion(null)
-    setIa({ posicion: cursor - 3, previo: sinComando })
-    cursorTrasIA.current = cursor - 3
     return true
+  }
+
+  // Borra lo escrito del comando y hace lo suyo.
+  function usarComando({ nombre }: Comando, valor: string, inicio: number, fin: number) {
+    const sinComando = valor.slice(0, inicio) + valor.slice(fin)
+    setTexto(sinComando)
+    setComando(null)
+    setMencion(null)
+    if (nombre === "ia") {
+      setIa({ posicion: inicio, previo: sinComando })
+      cursorTrasIA.current = inicio
+    } else if (nombre === "revisar") {
+      setPidiendoRevision(true)
+    } else {
+      onDerivar?.()
+    }
+  }
+
+  function elegirComando(elegido: Comando) {
+    if (comando) usarComando(elegido, texto, comando.inicio, comando.fin)
   }
 
   async function redactar(borrador: string) {
@@ -581,7 +633,14 @@ export function ChatPendiente({
           {error}
         </p>
       )}
-      <Popover open={sugerencias.length > 0} onOpenChange={(abierto) => !abierto && setMencion(null)}>
+      <Popover
+        open={sugerencias.length > 0 || comandosSugeridos.length > 0}
+        onOpenChange={(abierto) => {
+          if (abierto) return
+          setMencion(null)
+          setComando(null)
+        }}
+      >
         <PopoverAnchor asChild>
           <form
             ref={formulario}
@@ -676,14 +735,16 @@ export function ChatPendiente({
                 ref={campo}
                 aria-label="Mensaje"
                 aria-autocomplete="list"
-                aria-controls={sugerencias.length > 0 ? idSugerencias : undefined}
-                placeholder={`Escribe un mensaje… (@ para mencionar, /ia para redactar con IA${revision ? ", /revisar para pedir revisión" : ""})`}
+                aria-controls={sugerencias.length > 0 || comandosSugeridos.length > 0 ? idSugerencias : undefined}
+                placeholder="Escribe un mensaje… (@ para mencionar, / para comandos)"
                 value={texto}
                 onChange={(event) => {
                   setTexto(event.target.value)
-                  if (!revisarIA(event.target)) revisarMencion(event.target)
+                  if (!revisarComando(event.target, true)) revisarMencion(event.target)
                 }}
-                onSelect={(event) => revisarMencion(event.currentTarget)}
+                onSelect={(event) => {
+                  if (!revisarComando(event.currentTarget, false)) revisarMencion(event.currentTarget)
+                }}
                 onPaste={(event) => {
                   // Una captura o un archivo copiado se adjunta; el texto se pega como siempre.
                   if (event.clipboardData.files.length === 0) return
@@ -692,6 +753,20 @@ export function ChatPendiente({
                 }}
                 onKeyDown={(event) => {
                   if (event.nativeEvent.isComposing) return
+                  // Con el menú de comandos abierto, las flechas eligen y Enter o Tab lo usan.
+                  if (comandoSugerido) {
+                    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                      event.preventDefault()
+                      const paso = event.key === "ArrowDown" ? 1 : -1
+                      setComandoElegido((comandosSugeridos.indexOf(comandoSugerido) + paso + comandosSugeridos.length) % comandosSugeridos.length)
+                      return
+                    }
+                    if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+                      event.preventDefault()
+                      elegirComando(comandoSugerido)
+                      return
+                    }
+                  }
                   // Con la lista de menciones abierta, las flechas eligen y Enter o Tab mencionan.
                   if (sugerida) {
                     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -733,27 +808,49 @@ export function ChatPendiente({
             if (formulario.current?.contains(event.target as Node)) event.preventDefault()
           }}
         >
-          <Command
-            shouldFilter={false}
-            value={sugerida?.id ?? ""}
-            onValueChange={(id) => setElegido(Math.max(sugerencias.findIndex((perfil) => perfil.id === id), 0))}
-          >
-            <CommandList id={idSugerencias}>
-              <CommandGroup heading="Mencionar y avisar a">
-                {sugerencias.map((perfil) => (
-                  <CommandItem key={perfil.id} value={perfil.id} onSelect={() => mencionar(perfil)}>
-                    <PerfilAvatar perfil={perfil} size="sm" />
-                    {perfil.nombre}
-                    {!perfil.tiene_contrasena && (
-                      <span className="ml-auto text-xs text-muted-foreground" title="Verá el aviso cuando entre con su perfil">
-                        aún no entra
+          {comandosSugeridos.length > 0 ? (
+            <Command
+              shouldFilter={false}
+              value={comandoSugerido?.nombre ?? ""}
+              onValueChange={(nombre) => setComandoElegido(Math.max(comandosSugeridos.findIndex((c) => c.nombre === nombre), 0))}
+            >
+              <CommandList id={idSugerencias}>
+                <CommandGroup heading="Comandos">
+                  {comandosSugeridos.map((c) => (
+                    <CommandItem key={c.nombre} value={c.nombre} onSelect={() => elegirComando(c)}>
+                      <c.Icono />
+                      <span className="flex min-w-0 flex-col">
+                        <span className="font-medium">/{c.nombre}</span>
+                        <span className="truncate text-xs text-muted-foreground">{c.descripcion}</span>
                       </span>
-                    )}
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            </CommandList>
-          </Command>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              </CommandList>
+            </Command>
+          ) : (
+            <Command
+              shouldFilter={false}
+              value={sugerida?.id ?? ""}
+              onValueChange={(id) => setElegido(Math.max(sugerencias.findIndex((perfil) => perfil.id === id), 0))}
+            >
+              <CommandList id={idSugerencias}>
+                <CommandGroup heading="Mencionar y avisar a">
+                  {sugerencias.map((perfil) => (
+                    <CommandItem key={perfil.id} value={perfil.id} onSelect={() => mencionar(perfil)}>
+                      <PerfilAvatar perfil={perfil} size="sm" />
+                      {perfil.nombre}
+                      {!perfil.tiene_contrasena && (
+                        <span className="ml-auto text-xs text-muted-foreground" title="Verá el aviso cuando entre con su perfil">
+                          aún no entra
+                        </span>
+                      )}
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              </CommandList>
+            </Command>
+          )}
         </PopoverContent>
       </Popover>
       {/* El pedido de revisión también sale encima del mensaje. */}
