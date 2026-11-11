@@ -308,7 +308,7 @@ function Filtro({ activo, className, children, ...props }: { activo: boolean } &
       type="button"
       aria-pressed={activo}
       className={cn(
-        "inline-flex h-10 items-center gap-2 rounded-lg border bg-card px-3.5 text-sm font-medium transition-colors outline-none hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50 [&_svg]:size-4 [&_svg]:shrink-0",
+        "inline-flex h-10 shrink-0 items-center gap-2 rounded-lg border bg-card px-3.5 text-sm font-medium whitespace-nowrap transition-colors outline-none hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50 [&_svg]:size-4 [&_svg]:shrink-0",
         activo && "border-primary bg-primary/25 ring-3 ring-primary/25 hover:bg-primary/30",
         className
       )}
@@ -1580,8 +1580,9 @@ export function Tablero({
       </header>
 
       <main className="mx-auto flex max-w-[100rem] flex-col gap-5 px-4 py-5 md:px-6 md:py-6 lg:px-10">
-        <form onSubmit={agregar} className="flex flex-col gap-3 sm:flex-row">
-          <InputGroup className="h-11 sm:flex-1">
+        {/* En el celular va uno debajo del otro (proyecto y responsable lado a lado); en tablet la búsqueda ocupa su fila; desde lg, todo en una. */}
+        <form onSubmit={agregar} className="flex flex-col gap-3 sm:flex-row sm:flex-wrap lg:flex-nowrap">
+          <InputGroup className="h-11 grow sm:basis-full lg:basis-0">
             <InputGroupAddon className="pl-3">
               <Search />
             </InputGroupAddon>
@@ -1605,15 +1606,16 @@ export function Tablero({
               </InputGroupAddon>
             )}
           </InputGroup>
+          <div className="grid grid-cols-2 gap-3 sm:flex sm:grow lg:grow-0">
           <ProyectoCombobox
             valor={proyectoDelFormulario}
             onCambiar={setProyectoId}
             catalogo={catalogo}
             onCrear={crearProyecto}
-            className="h-11 w-full sm:w-60"
+            className="h-11 w-full min-w-0 sm:w-auto sm:grow lg:w-60 lg:grow-0"
           />
           <Select value={responsableDelFormulario} onValueChange={setResponsable}>
-            <SelectTrigger aria-label="Responsable" className="w-full px-3 data-[size=default]:h-11 sm:w-48">
+            <SelectTrigger aria-label="Responsable" className="w-full min-w-0 px-3 data-[size=default]:h-11 sm:w-48">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -1627,6 +1629,7 @@ export function Tablero({
               </SelectItem>
             </SelectContent>
           </Select>
+          </div>
           <div className="flex gap-3">
             <Button type="submit" className="h-11 flex-1 px-5 sm:flex-none">
               <Plus /> Agregar
@@ -1692,7 +1695,7 @@ export function Tablero({
                   </div>
                 )}
                 <CollapsibleContent className="flex flex-col gap-2.5">
-                  <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por organización">
+                  <div className="flex flex-wrap items-center gap-2 max-sm:-mx-4 max-sm:-my-1 max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:px-4 max-sm:py-1 max-sm:[scrollbar-width:none]" role="group" aria-label="Filtrar por organización">
                     <Filtro activo={organizacionFiltrada === null} onClick={() => filtrarPorOrganizacion(null)}>
                       <Building2 /> Todas
                     </Filtro>
@@ -1725,7 +1728,7 @@ export function Tablero({
                     </CollapsibleTrigger>
                   </div>
                   {proyectosDelFiltro.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar por proyecto">
+                    <div className="flex flex-wrap items-center gap-2 max-sm:-mx-4 max-sm:-my-1 max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:px-4 max-sm:py-1 max-sm:[scrollbar-width:none]" role="group" aria-label="Filtrar por proyecto">
                       <Filtro activo={proyectoFiltrado === null} onClick={() => filtrarPorProyecto(null)}>
                         <FolderOpen /> Todos los proyectos
                       </Filtro>
@@ -1745,7 +1748,7 @@ export function Tablero({
             )}
             {perfiles.length > 0 && (
               <div
-                className="flex flex-wrap items-center gap-2"
+                className="flex flex-wrap items-center gap-2 max-sm:-mx-4 max-sm:-my-1 max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:px-4 max-sm:py-1 max-sm:[scrollbar-width:none]"
                 role="group"
                 aria-label={organizacionDelFiltro ? `Filtrar por persona de ${organizacionDelFiltro.nombre}` : "Filtrar por persona"}
               >
@@ -1809,9 +1812,11 @@ export function Tablero({
         {cargando ? (
           <p className="text-sm text-muted-foreground">Cargando…</p>
         ) : (
-          <div className="overflow-x-auto pb-2">
+          // Cada columna mide al menos 20rem: si no caben las tres, el tablero se desliza de lado. En el celular, una
+          // columna casi a pantalla completa (asoma la siguiente) que se acomoda al soltar el dedo.
+          <div className="-mx-4 snap-x snap-proximity overflow-x-auto scroll-px-4 px-4 pb-2 sm:mx-0 sm:px-0">
             <KanbanProvider
-              className="min-w-[56rem] gap-5 md:min-w-0"
+              className="auto-cols-[minmax(20rem,1fr)] gap-5 max-sm:auto-cols-[85%] max-sm:gap-3 [&>*]:snap-start"
               columns={COLUMNAS}
               data={enColumnas}
               onDataChange={cambiarTablero}

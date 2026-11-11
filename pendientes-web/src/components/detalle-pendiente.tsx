@@ -406,7 +406,7 @@ function Contenido({
 
       <div className="flex flex-col gap-6 px-4 pb-6">
         <AvisoRebote pendiente={pendiente} por={pendiente.rebotado_por ? (perfilesPorId.get(pendiente.rebotado_por) ?? null) : null} />
-        <dl className="grid grid-cols-[6.5rem_1fr] items-center gap-x-3 gap-y-2 text-sm">
+        <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] items-center sm:grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm">
           <dt className="text-muted-foreground">Estado</dt>
           <dd className="flex flex-wrap items-center gap-2">
             <Select value={pendiente.estado} onValueChange={(valor) => onCambiar(id, { estado: valor as Estado })}>

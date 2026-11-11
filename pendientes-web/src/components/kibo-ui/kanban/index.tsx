@@ -212,7 +212,9 @@ export const KanbanCards = <T extends KanbanItemProps = KanbanItemProps>({
   }, [visibles, claveItems]);
 
   return (
-    <ScrollArea ref={raiz} className="overflow-hidden">
+    // Radix envuelve el contenido en un display: table que crece hasta el ancho natural de las tarjetas y las corta por la
+    // derecha cuando la columna es más angosta; como bloque, se ajustan al ancho de la columna.
+    <ScrollArea ref={raiz} className="overflow-hidden [&_[data-slot=scroll-area-viewport]>div]:block!">
       <SortableContext items={items}>
         <div
           ref={lista}

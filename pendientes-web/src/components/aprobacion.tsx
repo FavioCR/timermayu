@@ -85,7 +85,7 @@ export function Aprobacion({
         </span>
       )}
       {(puedo || (onDerivar && yo !== null)) && (
-        <span className="ml-auto flex shrink-0 items-center gap-1">
+        <span className={cn("ml-auto flex items-center gap-1", compacto ? "shrink-0" : "flex-wrap")}>
           {onDerivar && yo !== null && (
             <Button
               variant="ghost"

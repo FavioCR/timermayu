@@ -419,7 +419,14 @@ export function ArchivosPendiente({
           <ChipArchivo key={archivo.clave} archivo={archivo} subiendo nota={archivo.avance > 0 ? `${Math.round(archivo.avance * 100)} %` : undefined} />
         ))}
         <Button type="button" variant="ghost" size="xs" className="text-muted-foreground" onClick={() => entrada.current?.click()}>
-          <Paperclip /> {archivos?.length || subiendo.length ? "Adjuntar" : "Adjuntar archivo (PDF, Word, imágenes, videos…)"}
+          <Paperclip />
+          {archivos?.length || subiendo.length ? (
+            "Adjuntar"
+          ) : (
+            <>
+              Adjuntar archivo<span className="hidden sm:inline"> (PDF, Word, imágenes, videos…)</span>
+            </>
+          )}
         </Button>
         <UsarExistente
           credenciales={credenciales}
