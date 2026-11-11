@@ -2044,6 +2044,21 @@ test('aprobaciones: otros perfiles aprueban un pendiente hecho; se pierden si vu
   assert.deepEqual((await diego.data('GET', `/${pendiente.id}/actividad`)).actividad.slice(0, 3).map((a) => [a.tipo, a.autor]),
     [['aprobacion_quitada', 'Junior'], ['aprobado', 'Favio'], ['aprobado', 'Junior']]);
 
+  // Cada aprobación deja un mensaje en el chat; quitarla lo borra, y borrar el mensaje quita la aprobación.
+  const mensajes = async () => (await diego.data('GET', `/${pendiente.id}/comentarios`)).comentarios
+    .filter((c) => c.aprobacion).map((c) => [c.autor, c.texto]);
+  assert.deepEqual(await mensajes(), [['Favio', '👍 Lo aprobé']]);
+  await aprobar(junior);
+  assert.deepEqual(await mensajes(), [['Favio', '👍 Lo aprobé'], ['Junior', '👍 Lo aprobé']]);
+  const deFavio = (await favio.data('GET', `/${pendiente.id}/comentarios`)).comentarios.find((c) => c.aprobacion && c.autor === 'Favio');
+  assert.equal((await junior.call('DELETE', `/comentarios/${deFavio.id}`)).status, 403);
+  await favio.data('DELETE', `/comentarios/${deFavio.id}`);
+  assert.deepEqual(await mensajes(), [['Junior', '👍 Lo aprobé']]);
+  assert.deepEqual((await data('GET')).pendientes.find((p) => p.id === pendiente.id).aprobaciones, [junior.perfil.id]);
+  await junior.data('DELETE', ruta);
+  assert.deepEqual(await mensajes(), []);
+  await aprobar(favio);
+
   // Si queda a cargo de quien lo aprobó, su aprobación se va.
   await aprobar(junior);
   assert.deepEqual((await diego.data('PATCH', `/${pendiente.id}`, { perfil_id: favio.perfil.id })).pendiente.aprobaciones, [junior.perfil.id]);

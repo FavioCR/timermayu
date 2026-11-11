@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode, type TouchEvent } from "react"
-import { CopyPlus, Paperclip, Reply, ScanEye, SendHorizontal, Sparkles, Trash2, X, type LucideIcon } from "lucide-react"
+import { BadgeCheck, CopyPlus, Paperclip, Reply, ScanEye, SendHorizontal, Sparkles, Trash2, X, type LucideIcon } from "lucide-react"
 import { cn } from "cn"
 
 import { ChipArchivo, esImagenVisible, MiniaturaArchivo } from "@/components/archivos"
@@ -173,6 +173,7 @@ export function ChatPendiente({
   onCantidad,
   onSalir,
   enfocar = 0,
+  numComentarios,
   onDerivar,
   revision,
 }: {
@@ -184,6 +185,9 @@ export function ChatPendiente({
   onSalir: () => void
   // Cambia (>0) cuando hay que dejar el campo listo para escribir.
   enfocar?: number
+  // Cuántos mensajes dice el pendiente que tiene: si cambia por algo que hizo esta pestaña (aprobarlo deja un mensaje), se
+  // recarga; los cambios en tiempo real no le avisan a quien los hizo.
+  numComentarios?: number
   // Abre el diálogo para crear un pendiente nuevo a partir de este (/nuevo); sin perfil no se puede.
   onDerivar?: () => void
   // Para pedirle a un compañero que lo revise (botón y /revisar); sin perfil no se puede.
@@ -278,6 +282,11 @@ export function ChatPendiente({
       }
     }
   }, [credenciales, pendienteId, fallar])
+
+  const cuantos = comentarios?.length
+  useEffect(() => {
+    if (numComentarios !== undefined && cuantos !== undefined && numComentarios !== cuantos) cargar()
+  }, [numComentarios]) // eslint-disable-line react-hooks/exhaustive-deps -- solo cuando cambia lo que dice el pendiente
 
   useCambios((cambio) => {
     if (cambio.tipo === "conectado" || ((cambio.tipo === "comentarios" || cambio.tipo === "archivos") && cambio.pendiente_id === pendienteId)) cargar()
@@ -590,6 +599,11 @@ export function ChatPendiente({
                       {comentario.revision && (
                         <span className="flex items-center gap-1 font-medium text-primary">
                           <ScanEye className="size-3.5" /> Pidió revisión
+                        </span>
+                      )}
+                      {comentario.aprobacion && (
+                        <span className="flex items-center gap-1 font-medium text-emerald-600 dark:text-emerald-400">
+                          <BadgeCheck className="size-3.5" /> Aprobó
                         </span>
                       )}
                       <time dateTime={comentario.creado_en} title={fechaCompleta.format(new Date(comentario.creado_en))}>

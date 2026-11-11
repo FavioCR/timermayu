@@ -646,6 +646,7 @@ function Contenido({
               onCantidad={(cantidad) => onCantidadComentarios(id, cantidad)}
               onSalir={onSalir}
               enfocar={enfocarChat}
+              numComentarios={pendiente.num_comentarios}
               onDerivar={yo ? () => onDerivar(pendiente) : undefined}
               revision={
                 yo

@@ -231,6 +231,8 @@ export type Comentario = {
   respuesta_a: string | null
   // El mensaje con el que se pidió revisar el pendiente.
   revision: boolean
+  // El mensaje que queda al aprobarlo; quitar la aprobación lo borra, y borrarlo la quita.
+  aprobacion: boolean
   creado_en: string
   archivos: Archivo[]
 }

@@ -224,7 +224,7 @@ const UBICACION = `(SELECT o.nombre FROM proyectos pr JOIN organizaciones o ON o
 const ACTIVIDAD_VISIBLE = `(a.pendiente_id IN (SELECT id FROM pendientes WHERE ${PENDIENTE_VISIBLE})
   OR (a.pendiente_id IS NULL AND (a.privado_de IS NULL OR a.privado_de = ?)))`;
 const SELECT_ACTIVIDAD = 'SELECT a.id, a.pendiente_id, a.texto_pendiente, a.perfil_id, a.autor, a.tipo, a.datos, a.creado_en FROM actividad a';
-const SELECT_COMENTARIO = 'SELECT id, pendiente_id, perfil_id, autor, texto, respuesta_a, revision, creado_en FROM comentarios';
+const SELECT_COMENTARIO = 'SELECT id, pendiente_id, perfil_id, autor, texto, respuesta_a, revision, aprobacion, creado_en FROM comentarios';
 const SELECT_ARCHIVO = 'SELECT id, pendiente_id, comentario_id, nombre, tipo, tamano, subido, perfil_id, autor, creado_en FROM archivos';
 // Lo de las notas se busca siempre junto con el dueño del curso: lo de otro perfil no existe.
 const SELECT_CURSO = 'SELECT id, nombre, icono, creado_en, actualizado_en FROM cursos';
@@ -556,6 +556,10 @@ const MIGRACIONES = [
           UPDATE pendientes SET numero = (SELECT CAST(valor AS INTEGER) FROM ajustes WHERE clave = 'ultimo_numero') WHERE id = NEW.id;
         END;
     `);
+  },
+  // Aprobar un pendiente también deja un mensaje en su chat (aprobacion = 1); quitar la aprobación lo borra, y borrarlo la quita.
+  (db) => {
+    db.exec('ALTER TABLE comentarios ADD COLUMN aprobacion INTEGER NOT NULL DEFAULT 0');
   },
 ];
 
@@ -1221,8 +1225,9 @@ const actividadFila = (row) => (row ? { ...row, datos: row.datos ? JSON.parse(ro
 const pendienteFila = (row) => (row
   ? { ...row, etiquetas: JSON.parse(row.etiquetas).sort(), aprobaciones: JSON.parse(row.aprobaciones), revisiones: JSON.parse(row.revisiones) }
   : null);
-// revision: el mensaje con el que alguien pidió revisar el pendiente.
-const comentarioFila = (row) => (row ? { ...row, revision: Boolean(row.revision) } : null);
+// revision: el mensaje con el que alguien pidió revisar el pendiente; aprobacion: el que dejó al aprobarlo.
+const comentarioFila = (row) => (row ? { ...row, revision: Boolean(row.revision), aprobacion: Boolean(row.aprobacion) } : null);
+const MENSAJE_DE_APROBACION = '👍 Lo aprobé';
 
 // Proyecto sin organización con ese nombre; se crea si no existe.
 function proyectoSuelto(db, nombre) {
@@ -2041,9 +2046,13 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       return transaction(db, () => {
         // Si le habían pedido revisarlo, el pedido se cierra y quien lo pidió también se entera.
         const pedido = db.prepare('DELETE FROM revisiones WHERE pendiente_id = ? AND revisor_id = ? RETURNING pedido_por').get(id, yo);
-        const { changes } = db.prepare('INSERT OR IGNORE INTO aprobaciones (pendiente_id, perfil_id, creado_en) VALUES (?, ?, ?)')
-          .run(id, yo, new Date().toISOString());
-        if (changes) registrar(quien, actual, 'aprobado', null, [actual.perfil_id, actual.creado_por, pedido?.pedido_por]);
+        const ahora = new Date().toISOString();
+        const { changes } = db.prepare('INSERT OR IGNORE INTO aprobaciones (pendiente_id, perfil_id, creado_en) VALUES (?, ?, ?)').run(id, yo, ahora);
+        if (changes) {
+          db.prepare('INSERT INTO comentarios (id, pendiente_id, perfil_id, autor, texto, respuesta_a, aprobacion, creado_en) VALUES (?, ?, ?, ?, ?, NULL, 1, ?)')
+            .run(randomUUID(), id, yo, quien.nombre, MENSAJE_DE_APROBACION, ahora);
+          registrar(quien, actual, 'aprobado', null, [actual.perfil_id, actual.creado_por, pedido?.pedido_por]);
+        }
         return pendiente(yo, id);
       });
     },
@@ -2070,7 +2079,10 @@ function createRepo(db, dataDir, graciaImagenesMs) {
       if (!yo) throw httpError(403, 'aprobar_con_perfil');
       return transaction(db, () => {
         const { changes } = db.prepare('DELETE FROM aprobaciones WHERE pendiente_id = ? AND perfil_id = ?').run(id, yo);
-        if (changes) registrar(quien, actual, 'aprobacion_quitada');
+        if (changes) {
+          db.prepare('DELETE FROM comentarios WHERE pendiente_id = ? AND perfil_id = ? AND aprobacion = 1').run(id, yo);
+          registrar(quien, actual, 'aprobacion_quitada');
+        }
         return pendiente(yo, id);
       });
     },
@@ -2202,9 +2214,9 @@ function createRepo(db, dataDir, graciaImagenesMs) {
     },
 
     // Cada quien borra solo sus mensajes; con el mensaje se van su entrada del historial y sus avisos (y, si era un pedido de
-    // revisión, el pedido).
+    // revisión, el pedido; si era el de una aprobación, la aprobación).
     async borrarComentario(quien, id) {
-      const comentario = db.prepare(`SELECT c.perfil_id, c.autor, c.pendiente_id, c.revision, c.creado_en FROM comentarios c
+      const comentario = db.prepare(`SELECT c.perfil_id, c.autor, c.pendiente_id, c.revision, c.aprobacion, c.creado_en FROM comentarios c
         JOIN pendientes ON pendientes.id = c.pendiente_id WHERE c.id = ? AND ${PENDIENTE_VISIBLE}`).get(id, quien.perfil_id);
       if (!comentario) return false;
       const esSuyo = comentario.perfil_id ? comentario.perfil_id === quien.perfil_id : quien.perfil_id === null && comentario.autor === quien.nombre;
@@ -2216,6 +2228,9 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         if (comentario.revision) {
           db.prepare('DELETE FROM revisiones WHERE pendiente_id = ? AND pedido_por IS ? AND pedido_en = ?')
             .run(comentario.pendiente_id, comentario.perfil_id, comentario.creado_en);
+        }
+        if (comentario.aprobacion && db.prepare('DELETE FROM aprobaciones WHERE pendiente_id = ? AND perfil_id = ?').run(comentario.pendiente_id, quien.perfil_id).changes) {
+          registrar(quien, pendiente(quien.perfil_id, comentario.pendiente_id), 'aprobacion_quitada');
         }
         db.prepare('DELETE FROM comentarios WHERE id = ?').run(id);
       });
@@ -2398,7 +2413,7 @@ function createRepo(db, dataDir, graciaImagenesMs) {
         (tipo = 'estado' AND (json_extract(datos, '$.a') = 'haciendo' OR json_extract(datos, '$.de') = 'hecho')) OR tipo = 'rebotado'
         OR (tipo IN ('asignado', 'traspaso') AND json_extract(datos, '$.a_id') = ?))`);
       // El mensaje de un pedido de revisión no cuenta: no dice qué se probó.
-      const escribio = db.prepare('SELECT 1 FROM comentarios WHERE pendiente_id = ? AND perfil_id = ? AND creado_en >= ? AND revision = 0 LIMIT 1');
+      const escribio = db.prepare('SELECT 1 FROM comentarios WHERE pendiente_id = ? AND perfil_id = ? AND creado_en >= ? AND revision = 0 AND aprobacion = 0 LIMIT 1');
       const sinEvidencia = [];
       for (const terminado of terminados) {
         if (quienTermino.get(terminado.id)?.perfil_id !== yo) continue;
@@ -2968,12 +2983,17 @@ export function createApp(options = {}) {
     if (method === 'GET') return null;
     const deRuta = (ruta) => pathname.match(ruta)?.[1];
     if (pathname === API_PATH || pathname === ORDER_PATH) return { tipo: 'pendientes' };
-    // Un pedido de revisión cambia el pendiente y deja un mensaje en su chat.
-    if (deRuta(REVISION_PATH)) return [{ tipo: 'pendientes', pendiente_id: deRuta(REVISION_PATH) }, { tipo: 'comentarios', pendiente_id: deRuta(REVISION_PATH) }];
-    const pendienteId = deRuta(ITEM_PATH) ?? deRuta(TRASPASO_PATH) ?? deRuta(APROBACION_PATH) ?? deRuta(REBOTE_PATH) ?? deRuta(REVISADO_PATH);
+    // Pedir una revisión o aprobar cambia el pendiente y deja (o quita) un mensaje en su chat.
+    const conMensaje = deRuta(REVISION_PATH) ?? deRuta(APROBACION_PATH);
+    if (conMensaje) return [{ tipo: 'pendientes', pendiente_id: conMensaje }, { tipo: 'comentarios', pendiente_id: conMensaje }];
+    const pendienteId = deRuta(ITEM_PATH) ?? deRuta(TRASPASO_PATH) ?? deRuta(REBOTE_PATH) ?? deRuta(REVISADO_PATH);
     if (pendienteId) return { tipo: 'pendientes', pendiente_id: pendienteId };
     if (deRuta(COMENTARIOS_PATH)) return { tipo: 'comentarios', pendiente_id: deRuta(COMENTARIOS_PATH) };
-    if (deRuta(COMENTARIO_PATH)) return { tipo: 'comentarios', pendiente_id: repo.pendienteDeComentario(deRuta(COMENTARIO_PATH)) };
+    // Borrar un mensaje puede quitar una aprobación o un pedido de revisión: también cambia el pendiente.
+    if (deRuta(COMENTARIO_PATH)) {
+      const deMensaje = repo.pendienteDeComentario(deRuta(COMENTARIO_PATH));
+      return [{ tipo: 'comentarios', pendiente_id: deMensaje }, { tipo: 'pendientes', pendiente_id: deMensaje }];
+    }
     const pendienteDeArchivos = deRuta(ARCHIVOS_PATH) ?? deRuta(ARCHIVO_REPETIDO_PATH) ?? deRuta(REUSAR_ARCHIVO_PATH);
     if (pendienteDeArchivos) return { tipo: 'archivos', pendiente_id: pendienteDeArchivos };
     if (deRuta(ARCHIVO_PATH)) return { tipo: 'archivos', pendiente_id: repo.pendienteDeArchivo(deRuta(ARCHIVO_PATH)) };
